@@ -6,6 +6,8 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::{Column, text, text_input};
 
+mod websocket;
+
 pub fn main() -> iced::Result {
   iced::application(new, update, view)
     .subscription(subscription)
