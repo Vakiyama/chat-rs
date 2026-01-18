@@ -6,7 +6,7 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::{Column, text, text_input};
 
-use chat_rs::Post;
+use chat_rs::schema::post::Model as Post;
 
 mod websocket;
 
