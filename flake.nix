@@ -1,39 +1,47 @@
 {
-  description = "flake for rust projects";
-
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs }:
-    let
-      systems = [ "x86_64-linux" ];
-    in
-    {
-      devShell = builtins.listToAttrs (map
-        (system: {
-          name = system;
-          value =
-            let
-              pkgs = nixpkgs.legacyPackages.${system};
-            in
-            pkgs.mkShell {
-              buildInputs = with pkgs; [
+  outputs = {
+    nixpkgs,
+    flake-utils,
+    ...
+  }:
+    flake-utils.lib.eachDefaultSystem (
+      system: let
+        pkgs = import nixpkgs {
+          inherit system;
+        };
+
+        buildInputs = with pkgs; [
+          expat
+          fontconfig
+          freetype
+          freetype.dev
+          libGL
+          pkg-config
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+          xorg.libXrandr
+          wayland
+          libxkbcommon
                 rustc
                 cargo
                 clippy
                 rust-analyzer
                 rustfmt
                 bacon
-              ];
+        ];
+      in {
+        devShells.default = pkgs.mkShell {
+          inherit buildInputs;
 
-
-              shellHook = ''
-                export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib.outPath}/lib:$LD_LIBRARY_PATH"
-              '';
-            };
-        })
-        systems);
-    };
+          LD_LIBRARY_PATH =
+            builtins.foldl' (a: b: "${a}:${b}/lib") "${pkgs.vulkan-loader}/lib" buildInputs;
+        };
+      }
+    );
 }
-
