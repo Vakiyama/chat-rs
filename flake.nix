@@ -28,12 +28,13 @@
           xorg.libXrandr
           wayland
           libxkbcommon
-                rustc
-                cargo
-                clippy
-                rust-analyzer
-                rustfmt
-                bacon
+          rustc
+          cargo
+          clippy
+          rust-analyzer
+          rustfmt
+          bacon
+          lazygit
         ];
       in {
         devShells.default = pkgs.mkShell {
