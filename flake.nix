@@ -38,6 +38,7 @@
           lazygit
           diesel-cli
           openssl
+          watchexec
         ];
       in
       {

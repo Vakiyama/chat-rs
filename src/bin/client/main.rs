@@ -1,14 +1,18 @@
 use iced::Element;
+use iced::Padding;
 use iced::Subscription;
 use iced::keyboard;
 use iced::keyboard::Event;
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
-use iced::widget::{Column, text, text_input};
+use iced::widget::container;
+use iced::widget::{Column, column, text, text_input};
 
 use chat_rs::schema::post::Model as Post;
 
 mod websocket;
+
+const SPACE_GRID: u16 = 8;
 
 pub fn main() -> iced::Result {
   iced::application(new, update, view)
@@ -69,7 +73,17 @@ fn update(model: &mut Model, message: Message) {
 }
 
 fn view(model: &'_ Model) -> Element<'_, Message> {
-  let mut children = model
+  container(
+    container(view_chat(model, "#general"))
+      .padding(SPACE_GRID)
+      .style(container::rounded_box),
+  )
+  .padding(SPACE_GRID)
+  .into()
+}
+
+fn view_chat<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
+  let posts = model
     .posts
     .iter()
     .map(|post| {
@@ -78,11 +92,17 @@ fn view(model: &'_ Model) -> Element<'_, Message> {
     })
     .collect::<Vec<_>>();
 
-  children.extend(vec![
+  let children: Element<'_, Message> = column![
+    container(Column::with_children(posts))
+      .padding([SPACE_GRID, 0])
+      .height(iced::Fill),
     text_input("Send message", &model.input)
       .on_input(Message::ContentChanged)
-      .into(),
-  ]);
+      .padding(SPACE_GRID)
+  ]
+  .into();
 
-  Column::with_children(children).into()
+  column![container(chat_title), children]
+    .spacing({ SPACE_GRID } as u32)
+    .into()
 }
