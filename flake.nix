@@ -39,6 +39,7 @@
           diesel-cli
           openssl
           watchexec
+          websocat
         ];
       in
       {

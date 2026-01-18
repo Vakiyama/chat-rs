@@ -2,18 +2,20 @@
 
 ## PRD
 
-Key problem: Fast and secure text, voice, video and screen sharing based communication with
-a close set of friends.
+Key problem: Fast and secure text, voice, video and screen sharing based
+communication with a close set of friends.
 
 Motivations: Discord is the leader in this space, but has some key issues:
 
-- Client performance: Electron/web based apps are memory hungry and not necessary for discord to exist.
-- Bloated feature set: Discord is desperately looking for monetization opportunities, bloating the experience.
+- Client performance: Electron/web based apps are memory hungry and not
+  necessary for discord to exist.
+- Bloated feature set: Discord is desperately looking for monetization
+  opportunities, bloating the experience.
 
 ### Requirements
 
-Text based instant messaging, supporting direct messaging and
-server based messaging.
+Text based instant messaging, supporting direct messaging and server based
+messaging.
 
 Peer to peer direct and room based voice chat.
 
