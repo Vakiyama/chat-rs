@@ -35,6 +35,7 @@
           rustfmt
           bacon
           lazygit
+          diesel-cli
         ];
       in {
         devShells.default = pkgs.mkShell {

@@ -7,3 +7,12 @@ edition = "2024"
 iced = "0.14.0"
 tokio = "1.49.0"
 tokio-tungstenite = "0.28.0"
+dotenvy = "0.15"
+sea-orm = { version = "2.0.0-rc", features = [ sqlx-postgres, runtime-tokio-native-tls, "macros" ] }
+
+[dependencies.uuid]
+version = "1.19.0"
+features = [
+    "v4",
+]
+
