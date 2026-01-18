@@ -6,6 +6,8 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::{Column, text, text_input};
 
+use chat_rs::Post;
+
 mod websocket;
 
 pub fn main() -> iced::Result {
@@ -32,18 +34,6 @@ impl Default for Model {
     Model {
       posts: vec![Post::new("Post 1"), Post::new("Post 2")],
       input: String::new(),
-    }
-  }
-}
-
-struct Post {
-  content: String,
-}
-
-impl Post {
-  fn new(content: &str) -> Self {
-    Self {
-      content: content.to_string(),
     }
   }
 }
