@@ -6,9 +6,10 @@ use iced::keyboard::Event;
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::container;
-use iced::widget::{Column, column, text, text_input};
+use iced::widget::{Column, column, row, text, text_input};
 
 use chat_rs::schema::post::Model as Post;
+use chat_rs::schema::user::Model as User;
 
 mod websocket;
 
@@ -36,7 +37,10 @@ struct Model {
 impl Default for Model {
   fn default() -> Self {
     Model {
-      posts: vec![Post::new("Post 1"), Post::new("Post 2")],
+      posts: vec![
+        Post::new("Post 1", "RootPoison"),
+        Post::new("Post 2", "Cecilian"),
+      ],
       input: String::new(),
     }
   }
@@ -65,7 +69,7 @@ fn update(model: &mut Model, message: Message) {
       } = event
       {
         let Model { input, posts } = model;
-        posts.push(Post::new(input));
+        posts.push(Post::new(input, "RootPoison"));
         model.input = "".to_string();
       }
     }
@@ -87,7 +91,10 @@ fn view_chat<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> 
     .posts
     .iter()
     .map(|post| {
-      let element: Element<Message> = text(post.content.clone()).into();
+      let element: Element<Message> =
+        row![text(post.author_name.clone()), text(post.content.clone())]
+          .spacing(SPACE_GRID as u32)
+          .into();
       element
     })
     .collect::<Vec<_>>();
