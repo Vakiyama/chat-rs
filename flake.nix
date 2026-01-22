@@ -57,6 +57,7 @@
               pkgs.diesel-cli
               pkgs.openssl
               pkgs.watchexec
+              pkgs.openssl
             ]
             ++ guiLibs;
 
@@ -68,6 +69,10 @@
               {
                 name = "LD_LIBRARY_PATH";
                 value = pkgs.lib.makeLibraryPath guiLibs;
+              }
+              {
+                name = "PKG_CONFIG_PATH";
+                value = "${pkgs.openssl.dev}/lib/pkgconfig";
               }
             ];
           };
