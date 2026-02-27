@@ -65,7 +65,8 @@ fn update(model: &mut Model, message: Message) {
       }
     }
     Message::Disconnected => todo!(),
-    Message::Connected(connection) => todo!(),
+    Message::Connected(_connection) => todo!(),
+    Message::Websocket(_server_message) => todo!(),
   }
 }
 

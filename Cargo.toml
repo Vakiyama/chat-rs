@@ -12,6 +12,7 @@ tokio-tungstenite = "0.28.0"
 dotenvy = "0.15"
 sea-orm = { version = "2.0.0-rc", features = [ "sqlx-postgres", "runtime-tokio-native-tls", "macros" ] }
 async-tungstenite = { version = "0.32.1", features = [ "tokio-runtime" ] }
+rkyv = { version = "0.8.15", features = ["uuid-1", "alloc"] }
 
 [dependencies.uuid]
 version = "1.19.0"
