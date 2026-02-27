@@ -1,3 +1,4 @@
+use chat_rs::SERVER_URL;
 use futures_util::{SinkExt, stream::StreamExt};
 
 struct State {
@@ -13,11 +14,9 @@ async fn main() {
     .route("/", axum::routing::any(ws_handler))
     .with_state(state);
 
-  let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-    .await
-    .unwrap();
+  let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 
-  println!("Listening on port 3000.");
+  println!("Listening on {SERVER_URL}");
   axum::serve(listener, app).await.unwrap();
 }
 

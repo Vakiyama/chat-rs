@@ -1,5 +1,4 @@
 use iced::Element;
-use iced::Padding;
 use iced::Subscription;
 use iced::keyboard;
 use iced::keyboard::Event;
@@ -9,13 +8,16 @@ use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
 
 use chat_rs::schema::post::Model as Post;
-use chat_rs::schema::user::Model as User;
 
+mod message;
 mod websocket;
+
+use message::Message;
 
 const SPACE_GRID: u16 = 8;
 
-pub fn main() -> iced::Result {
+#[tokio::main]
+pub async fn main() -> iced::Result {
   iced::application(new, update, view)
     .subscription(subscription)
     .run()
@@ -46,17 +48,6 @@ impl Default for Model {
   }
 }
 
-// TEMPORARY
-enum PostError {
-  Unknown,
-}
-
-#[derive(Clone)]
-enum Message {
-  ContentChanged(String),
-  Keyboard(Event),
-}
-
 fn update(model: &mut Model, message: Message) {
   match message {
     Message::ContentChanged(new) => {
@@ -73,6 +64,8 @@ fn update(model: &mut Model, message: Message) {
         model.input = "".to_string();
       }
     }
+    Message::Disconnected => todo!(),
+    Message::Connected(connection) => todo!(),
   }
 }
 
