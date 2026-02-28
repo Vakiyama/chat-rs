@@ -13,7 +13,7 @@ pub struct ChatMessage {
   text: String,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum ClientMessage {
   JoinedRoom { from: User },
   LeftRoom { from: User },

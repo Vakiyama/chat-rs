@@ -1,5 +1,3 @@
-use std::fmt;
-
 use rkyv::rancor::Error;
 
 use chat_rs::{ClientMessage, ServerMessage, WS_URL};
@@ -10,7 +8,6 @@ use async_tungstenite::tungstenite;
 use futures::channel::mpsc;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
-use rkyv::ser::Writer;
 
 use crate::Message;
 
@@ -31,12 +28,15 @@ pub enum Event {
   Connected(Connection),
   Disconnected,
   MessageReceived(ServerMessage),
-  MessageSent(ClientMessage),
 }
 
-impl fmt::Display for Message {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str(self.as_str())
+impl From<Event> for Message {
+  fn from(val: Event) -> Self {
+    match val {
+      Event::Connected(connection) => Message::Connected(connection),
+      Event::Disconnected => Message::Disconnected,
+      Event::MessageReceived(server_message) => Message::Websocket(server_message),
+    }
   }
 }
 

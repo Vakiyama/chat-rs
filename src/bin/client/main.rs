@@ -7,12 +7,14 @@ use iced::keyboard::key::Named;
 use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
 
-use chat_rs::schema::post::Model as Post;
-
 mod message;
 mod websocket;
 
 use message::Message;
+
+use crate::model::WebSocket;
+
+mod model;
 
 const SPACE_GRID: u16 = 8;
 
@@ -23,32 +25,18 @@ pub async fn main() -> iced::Result {
     .run()
 }
 
-fn new() -> Model {
-  Model::default()
+fn new() -> model::Model {
+  model::Model::default()
 }
 
-fn subscription(_model: &Model) -> Subscription<Message> {
-  keyboard::listen().map(Message::Keyboard)
+fn subscription(_model: &model::Model) -> Subscription<Message> {
+  Subscription::batch([
+    keyboard::listen().map(Message::Keyboard),
+    Subscription::run(websocket::connect).map(|event| event.into()),
+  ])
 }
 
-struct Model {
-  posts: Vec<Post>,
-  input: String,
-}
-
-impl Default for Model {
-  fn default() -> Self {
-    Model {
-      posts: vec![
-        Post::new("Post 1", "RootPoison"),
-        Post::new("Post 2", "Cecilian"),
-      ],
-      input: String::new(),
-    }
-  }
-}
-
-fn update(model: &mut Model, message: Message) {
+fn update(model: &mut model::Model, message: Message) {
   match message {
     Message::ContentChanged(new) => {
       model.input = new;
@@ -58,19 +46,28 @@ fn update(model: &mut Model, message: Message) {
         key: Key::Named(Named::Enter),
         ..
       } = event
+        && let Err(model::Error::NoConnection) = model.send()
       {
-        let Model { input, posts } = model;
-        posts.push(Post::new(input, "RootPoison"));
-        model.input = "".to_string();
+        println!("Not connected...")
       }
     }
-    Message::Disconnected => todo!(),
-    Message::Connected(_connection) => todo!(),
-    Message::Websocket(_server_message) => todo!(),
+    Message::Disconnected => {
+      model.websocket = WebSocket::Disconnected;
+    }
+    Message::Connected(connection) => {
+      model.websocket = WebSocket::Connected(connection);
+    }
+    Message::Websocket(server_message) => match server_message {
+      chat_rs::ServerMessage::JoinedRoom { from } => {
+        println!("User joined room: {from:?}")
+      }
+      chat_rs::ServerMessage::LeftRoom { from } => println!("User left room: {from:?}"),
+      chat_rs::ServerMessage::Chat { from, text } => model.receive(&text, &from.name),
+    },
   }
 }
 
-fn view(model: &'_ Model) -> Element<'_, Message> {
+fn view(model: &'_ model::Model) -> Element<'_, Message> {
   container(
     container(view_chat(model, "#general"))
       .padding(SPACE_GRID)
@@ -80,7 +77,7 @@ fn view(model: &'_ Model) -> Element<'_, Message> {
   .into()
 }
 
-fn view_chat<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
+fn view_chat<'a>(model: &'_ model::Model, chat_title: &'a str) -> Element<'a, Message> {
   let posts = model
     .posts
     .iter()
