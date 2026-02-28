@@ -18,8 +18,7 @@ mod model;
 
 const SPACE_GRID: u16 = 8;
 
-#[tokio::main]
-pub async fn main() -> iced::Result {
+fn main() -> iced::Result {
   iced::application(new, update, view)
     .subscription(subscription)
     .run()
@@ -63,6 +62,9 @@ fn update(model: &mut model::Model, message: Message) {
       }
       chat_rs::ServerMessage::LeftRoom { from } => println!("User left room: {from:?}"),
       chat_rs::ServerMessage::Chat { from, text } => model.receive(&text, &from.name),
+      chat_rs::ServerMessage::Ping => {
+        println!("Server ping received.")
+      }
     },
   }
 }

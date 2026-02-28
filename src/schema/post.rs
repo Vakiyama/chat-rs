@@ -1,4 +1,3 @@
-use crate::schema::user::Model as User;
 use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 

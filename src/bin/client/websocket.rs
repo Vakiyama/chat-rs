@@ -5,6 +5,7 @@ use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 
 use async_tungstenite::tungstenite;
+use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
@@ -44,6 +45,9 @@ pub fn connect() -> impl Sipper<Never, Event> {
   sipper(async |mut output| {
     // reconnect loop; awaits 1 second on disconnect/error and retries
     loop {
+      // headers setup - https://docs.rs/async-tungstenite/latest/async_tungstenite/tokio/fn.connect_async.html
+      // let mut request = "wss://api.example.com".into_client_request().unwrap();
+      // request.headers_mut().insert("api-key", "42".parse().unwrap());
       let (mut websocket, mut input) = match async_tungstenite::tokio::connect_async(WS_URL).await {
         Ok((websocket, _)) => {
           let (sender, receiver) = mpsc::channel(100);
@@ -64,16 +68,16 @@ pub fn connect() -> impl Sipper<Never, Event> {
             received = websocket.select_next_some() => {
                 match received {
                     Ok(tungstenite::Message::Binary(message)) => {
-                        let deserialized = rkyv::access::<chat_rs::ArchivedServerMessage, Error>(&message)
-                            .and_then(rkyv::deserialize);
+                        println!("received message, attempting deserialize");
+                        let deserialized: Result<ServerMessage, _> = message.try_into();
 
                         if let Ok(server_msg) = deserialized {
                          output.send(Event::MessageReceived(server_msg)).await
                         } else {
-                            println!("Serliaziation error: {deserialized:?}")
+                            println!("Serialization error: {deserialized:?}")
                         }
                     }
-                    Err(_) => {
+                    Ok(tungstenite::Message::Close(_)) | Err(_) => {
                         output.send(Event::Disconnected).await;
                         // breaks on error to restart the reconnect loop
                         break;
@@ -82,10 +86,11 @@ pub fn connect() -> impl Sipper<Never, Event> {
                 }
             }
             message = input.select_next_some() => {
-                let serialized = rkyv::to_bytes::<Error>(&message);
+                println!("firing msg: {message:?}");
+                let serialized: Result<Bytes, _> = message.try_into();
 
-                if let Ok(client_msg) = serialized {
-                    let result = websocket.send(tungstenite::Message::Binary(client_msg.into_vec().into())).await;
+                if let Ok(bytes) = serialized {
+                    let result = websocket.send(tungstenite::Message::Binary(bytes)).await;
 
                     if result.is_err() {
                       output.send(Event::Disconnected).await;

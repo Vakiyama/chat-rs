@@ -74,6 +74,10 @@
                 name = "PKG_CONFIG_PATH";
                 value = "${pkgs.openssl.dev}/lib/pkgconfig";
               }
+              {
+                name = "RUST_BACKTRACE";
+                value = "0";
+              }
             ];
           };
         };

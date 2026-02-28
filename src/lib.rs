@@ -1,4 +1,5 @@
-use rkyv::{Archive, Deserialize, Serialize};
+use bytes::Bytes;
+use rkyv::{Archive, Deserialize, Serialize, rancor};
 
 pub mod schema;
 
@@ -25,4 +26,51 @@ pub enum ServerMessage {
   JoinedRoom { from: User },
   LeftRoom { from: User },
   Chat { from: User, text: String },
+  Ping,
+}
+
+impl TryFrom<Bytes> for ServerMessage {
+  type Error = rancor::Error;
+
+  fn try_from(value: Bytes) -> Result<Self, Self::Error> {
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(&value);
+
+    let archived = rkyv::access::<ArchivedServerMessage, Self::Error>(&aligned)?;
+
+    rkyv::deserialize(archived)
+  }
+}
+
+impl TryFrom<Bytes> for ClientMessage {
+  type Error = rancor::Error;
+
+  fn try_from(value: Bytes) -> Result<Self, Self::Error> {
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(&value);
+
+    let archived = rkyv::access::<ArchivedClientMessage, Self::Error>(&aligned)?;
+
+    rkyv::deserialize(archived)
+  }
+}
+
+impl TryFrom<ClientMessage> for Bytes {
+  type Error = rancor::Error;
+
+  fn try_from(value: ClientMessage) -> Result<Self, Self::Error> {
+    let bytes: Bytes = rkyv::to_bytes::<Self::Error>(&value)?.into_vec().into();
+
+    Ok(bytes)
+  }
+}
+
+impl TryFrom<ServerMessage> for Bytes {
+  type Error = rancor::Error;
+
+  fn try_from(value: ServerMessage) -> Result<Self, Self::Error> {
+    let bytes: Bytes = rkyv::to_bytes::<Self::Error>(&value)?.into_vec().into();
+
+    Ok(bytes)
+  }
 }

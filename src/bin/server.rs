@@ -1,8 +1,13 @@
+use std::any::Any;
+
+use bytes::Bytes;
 use chat_rs::SERVER_URL;
+use chat_rs::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, stream::StreamExt};
+use rkyv::rancor::Error;
 
 struct State {
-  tx: tokio::sync::broadcast::Sender<String>,
+  tx: tokio::sync::broadcast::Sender<Bytes>,
 }
 
 #[tokio::main]
@@ -45,12 +50,10 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: std::syn
 
   let mut rx = state.tx.subscribe();
 
-  let _ = state.tx.send("New user joined!".to_string());
-
   let mut task_send = tokio::spawn(async move {
     while let Ok(msg) = rx.recv().await {
       if sender
-        .send(axum::extract::ws::Message::text(msg))
+        .send(axum::extract::ws::Message::binary(msg))
         .await
         .is_err()
       {
@@ -64,9 +67,20 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: std::syn
   let mut task_recv = tokio::spawn(async move {
     while let Some(msg) = receiver.next().await {
       match msg {
-        Ok(axum::extract::ws::Message::Text(text)) => {
-          let _ = tx.send(text.to_string());
-          println!("{text}");
+        Ok(axum::extract::ws::Message::Binary(binary)) => {
+          let client_msg: Result<ClientMessage, _> = binary.try_into();
+          if let Ok(client_msg) = client_msg {
+            let echo_message = match client_msg {
+              ClientMessage::JoinedRoom { from } => ServerMessage::JoinedRoom { from },
+              ClientMessage::LeftRoom { from } => ServerMessage::LeftRoom { from },
+              ClientMessage::Chat { from, text } => ServerMessage::Chat { from, text },
+            };
+            println!("echo msg received {echo_message:?}");
+
+            let _ = tx.send(echo_message.try_into().unwrap());
+          } else {
+            println!("Error when echoing msg: {client_msg:?}")
+          }
         }
         Ok(axum::extract::ws::Message::Close(_)) => break,
         Ok(other) => println!("Received: {other:?}"),
@@ -83,5 +97,5 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: std::syn
       _ = &mut task_recv => task_send.abort(),
   }
 
-  let _ = state.tx.send("A user left!".to_string());
+  // let _ = state.tx.send("A user left!".into());
 }
