@@ -57,14 +57,11 @@ fn update(model: &mut model::Model, message: Message) {
       model.websocket = WebSocket::Connected(connection);
     }
     Message::Websocket(server_message) => match server_message {
-      chat_rs::ServerMessage::JoinedRoom { from } => {
+      chat_rs::WebSocketMessage::JoinedRoom { from } => {
         println!("User joined room: {from:?}")
       }
-      chat_rs::ServerMessage::LeftRoom { from } => println!("User left room: {from:?}"),
-      chat_rs::ServerMessage::Chat { from, text } => model.receive(&text, &from.name),
-      chat_rs::ServerMessage::Ping => {
-        println!("Server ping received.")
-      }
+      chat_rs::WebSocketMessage::LeftRoom { from } => println!("User left room: {from:?}"),
+      chat_rs::WebSocketMessage::Chat { from, text } => model.receive(&text, &from.name),
     },
   }
 }

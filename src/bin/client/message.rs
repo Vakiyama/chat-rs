@@ -8,5 +8,5 @@ pub enum Message {
   Keyboard(Event),
   Disconnected,
   Connected(Connection),
-  Websocket(chat_rs::ServerMessage),
+  Websocket(chat_rs::WebSocketMessage),
 }

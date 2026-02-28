@@ -1,6 +1,4 @@
-use rkyv::rancor::Error;
-
-use chat_rs::{ClientMessage, ServerMessage, WS_URL};
+use chat_rs::{WS_URL, WebSocketMessage};
 use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 
@@ -13,10 +11,10 @@ use futures::stream::StreamExt;
 use crate::Message;
 
 #[derive(Debug, Clone)]
-pub struct Connection(mpsc::Sender<ClientMessage>);
+pub struct Connection(mpsc::Sender<WebSocketMessage>);
 
 impl Connection {
-  pub fn send(&mut self, message: ClientMessage) {
+  pub fn send(&mut self, message: WebSocketMessage) {
     self
       .0
       .try_send(message)
@@ -28,7 +26,7 @@ impl Connection {
 pub enum Event {
   Connected(Connection),
   Disconnected,
-  MessageReceived(ServerMessage),
+  MessageReceived(WebSocketMessage),
 }
 
 impl From<Event> for Message {
@@ -69,9 +67,10 @@ pub fn connect() -> impl Sipper<Never, Event> {
                 match received {
                     Ok(tungstenite::Message::Binary(message)) => {
                         println!("received message, attempting deserialize");
-                        let deserialized: Result<ServerMessage, _> = message.try_into();
+                        let deserialized: Result<WebSocketMessage, _> = message.try_into();
 
                         if let Ok(server_msg) = deserialized {
+                         println!("Deserialized {server_msg:?}");
                          output.send(Event::MessageReceived(server_msg)).await
                         } else {
                             println!("Serialization error: {deserialized:?}")

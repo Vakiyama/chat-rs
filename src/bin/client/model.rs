@@ -1,4 +1,4 @@
-use chat_rs::ClientMessage;
+use chat_rs::WebSocketMessage;
 use chat_rs::schema::post::Model as Post;
 use chat_rs::schema::user::Model as User;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ impl Model {
         self.posts.push(Post::new(&input, &name));
         self.input = "".to_string();
 
-        connection.send(ClientMessage::Chat {
+        connection.send(WebSocketMessage::Chat {
           from: self.user.clone(),
           text: input,
         });
