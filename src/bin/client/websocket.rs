@@ -1,3 +1,4 @@
+use crate::screens::chat;
 use chat_rs::{WS_URL, WebSocketMessage};
 use iced::futures;
 use iced::task::{Never, Sipper, sipper};
@@ -29,12 +30,12 @@ pub enum Event {
   MessageReceived(WebSocketMessage),
 }
 
-impl From<Event> for Message {
+impl From<Event> for chat::Message {
   fn from(val: Event) -> Self {
     match val {
-      Event::Connected(connection) => Message::Connected(connection),
-      Event::Disconnected => Message::Disconnected,
-      Event::MessageReceived(server_message) => Message::Websocket(server_message),
+      Event::Connected(connection) => chat::Message::Connected(connection),
+      Event::Disconnected => chat::Message::Disconnected,
+      Event::MessageReceived(server_message) => chat::Message::Websocket(server_message),
     }
   }
 }

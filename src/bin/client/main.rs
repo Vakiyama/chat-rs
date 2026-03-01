@@ -1,20 +1,17 @@
-use iced::Element;
-use iced::Subscription;
-use iced::keyboard;
-use iced::keyboard::Event;
-use iced::keyboard::Key;
-use iced::keyboard::key::Named;
 use iced::widget::container;
-use iced::widget::{Column, column, row, text, text_input};
+use iced::{Element, Subscription};
 
 mod message;
 mod websocket;
 
 use message::Message;
 
-use crate::model::WebSocket;
+use crate::model::{Auth, Screen};
+use crate::screens::chat;
 
 mod model;
+mod screens;
+mod types;
 
 const SPACE_GRID: u16 = 8;
 
@@ -29,77 +26,36 @@ fn new() -> model::Model {
 }
 
 fn subscription(_model: &model::Model) -> Subscription<Message> {
-  Subscription::batch([
-    keyboard::listen().map(Message::Keyboard),
-    Subscription::run(websocket::connect).map(|event| event.into()),
-  ])
+  Subscription::run(websocket::connect)
+    .map(|event| event.into())
+    .map(Message::Chat)
 }
 
-fn update(model: &mut model::Model, message: Message) {
+pub fn update(model: &mut model::Model, message: Message) {
   match message {
-    Message::ContentChanged(new) => {
-      model.input = new;
-    }
-    Message::Keyboard(event) => {
-      if let Event::KeyPressed {
-        key: Key::Named(Named::Enter),
-        ..
-      } = event
-        && let Err(model::Error::NoConnection) = model.send()
+    Message::Chat(msg) => {
+      if let Auth::LoggedIn(user) = &model.user
+        && let Screen::Chat(chat_model) = &mut model.screen
       {
-        println!("Not connected...")
+        chat::update(chat_model, msg, user);
       }
     }
-    Message::Disconnected => {
-      model.websocket = WebSocket::Disconnected;
-    }
-    Message::Connected(connection) => {
-      model.websocket = WebSocket::Connected(connection);
-    }
-    Message::Websocket(server_message) => match server_message {
-      chat_rs::WebSocketMessage::JoinedRoom { from } => {
-        println!("User joined room: {from:?}")
-      }
-      chat_rs::WebSocketMessage::LeftRoom { from } => println!("User left room: {from:?}"),
-      chat_rs::WebSocketMessage::Chat { from, text } => model.receive(&text, &from.name),
-    },
   }
 }
 
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
+  let view = match &model.screen {
+    model::Screen::Login => todo!(),
+    model::Screen::Register => todo!(),
+    model::Screen::ConfirmCode => todo!(),
+    model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
+  };
+
   container(
-    container(view_chat(model, "#general"))
+    container(view)
       .padding(SPACE_GRID)
       .style(container::rounded_box),
   )
   .padding(SPACE_GRID)
   .into()
-}
-
-fn view_chat<'a>(model: &'_ model::Model, chat_title: &'a str) -> Element<'a, Message> {
-  let posts = model
-    .posts
-    .iter()
-    .map(|post| {
-      let element: Element<Message> =
-        row![text(post.author_name.clone()), text(post.content.clone())]
-          .spacing(SPACE_GRID as u32)
-          .into();
-      element
-    })
-    .collect::<Vec<_>>();
-
-  let children: Element<'_, Message> = column![
-    container(Column::with_children(posts))
-      .padding([SPACE_GRID, 0])
-      .height(iced::Fill),
-    text_input("Send message", &model.input)
-      .on_input(Message::ContentChanged)
-      .padding(SPACE_GRID)
-  ]
-  .into();
-
-  column![container(chat_title), children]
-    .spacing({ SPACE_GRID } as u32)
-    .into()
 }
