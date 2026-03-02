@@ -4,10 +4,8 @@ use iced::{Element, Subscription};
 mod message;
 mod websocket;
 
-use message::Message;
-
 use crate::model::{Auth, Screen};
-use crate::screens::chat;
+use crate::screens::{chat, login};
 
 mod model;
 mod screens;
@@ -31,7 +29,13 @@ fn subscription(_model: &model::Model) -> Subscription<Message> {
     .map(Message::Chat)
 }
 
-pub fn update(model: &mut model::Model, message: Message) {
+#[derive(Debug, Clone)]
+enum Message {
+  Chat(chat::Message),
+  Login(login::Message),
+}
+
+fn update(model: &mut model::Model, message: Message) {
   match message {
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
@@ -40,12 +44,19 @@ pub fn update(model: &mut model::Model, message: Message) {
         chat::update(chat_model, msg, user);
       }
     }
+    Message::Login(msg) => {
+      if let Auth::NotLoggedIn = &model.user
+        && let Screen::Login(login_model) = &mut model.screen
+      {
+        login::update(login_model, msg)
+      }
+    }
   }
 }
 
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
-    model::Screen::Login => todo!(),
+    model::Screen::Login(model) => login::view(model).map(Message::Login),
     model::Screen::Register => todo!(),
     model::Screen::ConfirmCode => todo!(),
     model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),

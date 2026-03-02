@@ -1,6 +1,7 @@
 use crate::screens::chat::Model as ChatModel;
+use crate::screens::login::Model as LoginModel;
 use chat_rs::schema::user::Model as User;
-use uuid::Uuid;
+// use uuid::Uuid;
 
 use crate::websocket;
 
@@ -19,28 +20,28 @@ pub struct Model {
 }
 
 pub enum Screen {
-  Login,
+  Login(LoginModel),
   Register,
   ConfirmCode,
   Chat(ChatModel),
 }
 
 impl Default for Model {
-  // fn default() -> Self {
-  //   Model {
-  //     screen: Screen::Login,
-  //     user: Auth::NotLoggedIn,
-  //   }
-  // }
-  //
-  // debug version vvvv
   fn default() -> Self {
     Model {
-      screen: Screen::Chat(Default::default()),
-      user: Auth::LoggedIn(User {
-        id: Uuid::new_v4(),
-        name: "RootPoison".into(),
-      }),
+      screen: Screen::Login(Default::default()),
+      user: Auth::NotLoggedIn,
     }
   }
+
+  // debug version vvvv
+  // fn default() -> Self {
+  //   Model {
+  //     screen: Screen::Chat(Default::default()),
+  //     user: Auth::LoggedIn(User {
+  //       id: Uuid::new_v4(),
+  //       name: "RootPoison".into(),
+  //     }),
+  //   }
+  // }
 }

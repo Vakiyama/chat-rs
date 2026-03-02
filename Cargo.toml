@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 axum = { version = "0.8.8", features = ["ws"] }
 futures-util = { version = "0.3.31", features = ["sink", "std"] }
-iced = { version = "0.14.0", features = ["tokio", "sipper"] }
+iced = { version = "0.14.0", features = ["tokio", "sipper", "image"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = "0.28.0"
 dotenvy = "0.15"

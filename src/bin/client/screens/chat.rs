@@ -6,6 +6,7 @@ use crate::websocket::Connection;
 use chat_rs::WebSocketMessage;
 use chat_rs::schema::post::Model as Post;
 use chat_rs::schema::user::Model as User;
+use iced::Pixels;
 use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
 
@@ -84,7 +85,7 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
     .map(|post| {
       let element: Element<Message> =
         row![text(post.author_name.clone()), text(post.content.clone())]
-          .spacing(SPACE_GRID as u32)
+          .spacing(Pixels(SPACE_GRID.into()))
           .into();
       element
     })
