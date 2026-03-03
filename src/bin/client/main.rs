@@ -7,6 +7,7 @@ mod websocket;
 use crate::model::{Auth, Screen};
 use crate::screens::{auth, chat};
 
+mod library;
 mod model;
 mod screens;
 mod types;
