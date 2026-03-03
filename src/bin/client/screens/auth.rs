@@ -5,7 +5,7 @@ use iced::{
   border::{self, color},
   widget::{
     button, button::Style as ButtonStyle, column, container, container::Style as ContainerStyle,
-    row, space, text_input, text_input::Style as TextStyle,
+    row, space, text, text_input, text_input::Style as TextStyle,
   },
 };
 
@@ -14,7 +14,16 @@ use crate::SPACE_GRID;
 // -------------------- MODEL --------------------
 
 #[derive(Default)]
+pub enum Mode {
+  #[default]
+  Login,
+  Register,
+  Code,
+}
+
+#[derive(Default)]
 pub struct Model {
+  mode: Mode,
   email_input: String,
   remember_me_checked: bool,
 }
@@ -22,8 +31,9 @@ pub struct Model {
 #[derive(Debug, Clone)]
 pub enum Message {
   UserChangedLoginInput(String),
-  UserSubmittedLogin,
-  UserClickedRegister,
+  UserSubmittedForm,
+  UserNavigatedRegister,
+  UserNavigatedLogin,
   UserToggledRememberMe,
 }
 
@@ -61,9 +71,39 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
           container(space())
             .width(Fill)
             .height(2)
-            .style(container::bordered_box)
+            .style(container::bordered_box),
+          row![
+            container("").width(Fill),
+            button(
+              text("Register")
+                .align_x(text::Alignment::Right)
+                .size(12)
+                .color(Color::from_rgba(1., 1., 1., 0.8))
+            )
+            .on_press(Message::UserNavigatedRegister)
+            .style(|theme: &Theme, _status| {
+              let palette = theme.extended_palette();
+
+              ButtonStyle {
+                background: None,
+                text_color: palette.background.weakest.text,
+                border: Border {
+                  color: Color::TRANSPARENT,
+                  width: 0.,
+                  radius: border::radius(0),
+                },
+                ..ButtonStyle::default()
+              }
+            })
+            .width(100)
+            .padding(0)
+          ]
+          .padding(SPACE_GRID)
+          // .style(container::bordered_box)
+          .width(Fill)
         ],
         button(container("Login").center_x(Fill))
+          .on_press(Message::UserSubmittedForm)
           .width(Fill)
           .style(|_theme: &Theme, _status| {
             ButtonStyle {
@@ -77,7 +117,7 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
             }
           })
       ]
-      .spacing(Pixels(SPACE_GRID.into()) * 2.)
+      .spacing(Pixels(SPACE_GRID.into()))
       .width(400),
     )
     .center(Fill),
@@ -121,8 +161,9 @@ fn hero<'a>() -> Element<'a, Message> {
 pub fn update(model: &mut Model, message: Message) {
   match message {
     Message::UserChangedLoginInput(new) => model.email_input = new,
-    Message::UserSubmittedLogin => todo!(),
-    Message::UserClickedRegister => todo!(),
-    Message::UserToggledRememberMe => todo!(),
+    Message::UserSubmittedForm => todo!(),
+    Message::UserToggledRememberMe => model.remember_me_checked = !model.remember_me_checked,
+    Message::UserNavigatedRegister => model.mode = Mode::Register,
+    Message::UserNavigatedLogin => model.mode = Mode::Login,
   }
 }
