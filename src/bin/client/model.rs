@@ -1,5 +1,5 @@
+use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
-use crate::screens::login::Model as LoginModel;
 use chat_rs::schema::user::Model as User;
 // use uuid::Uuid;
 
@@ -20,7 +20,7 @@ pub struct Model {
 }
 
 pub enum Screen {
-  Login(LoginModel),
+  Auth(AuthModel),
   Register,
   ConfirmCode,
   Chat(ChatModel),
@@ -29,7 +29,7 @@ pub enum Screen {
 impl Default for Model {
   fn default() -> Self {
     Model {
-      screen: Screen::Login(Default::default()),
+      screen: Screen::Auth(Default::default()),
       user: Auth::NotLoggedIn,
     }
   }

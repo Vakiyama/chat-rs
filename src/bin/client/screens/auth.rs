@@ -96,7 +96,7 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
       ..ContainerStyle::default()
     }
   })
-  .padding(SPACE_GRID)
+  .padding(SPACE_GRID * 4)
   .width(FillPortion(9))
   .height(Fill)
   .into()

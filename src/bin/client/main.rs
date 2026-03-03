@@ -5,7 +5,7 @@ mod message;
 mod websocket;
 
 use crate::model::{Auth, Screen};
-use crate::screens::{chat, login};
+use crate::screens::{auth, chat};
 
 mod model;
 mod screens;
@@ -32,7 +32,7 @@ fn subscription(_model: &model::Model) -> Subscription<Message> {
 #[derive(Debug, Clone)]
 enum Message {
   Chat(chat::Message),
-  Login(login::Message),
+  Auth(auth::Message),
 }
 
 fn update(model: &mut model::Model, message: Message) {
@@ -44,11 +44,11 @@ fn update(model: &mut model::Model, message: Message) {
         chat::update(chat_model, msg, user);
       }
     }
-    Message::Login(msg) => {
+    Message::Auth(msg) => {
       if let Auth::NotLoggedIn = &model.user
-        && let Screen::Login(login_model) = &mut model.screen
+        && let Screen::Auth(auth_model) = &mut model.screen
       {
-        login::update(login_model, msg)
+        auth::update(auth_model, msg)
       }
     }
   }
@@ -56,7 +56,7 @@ fn update(model: &mut model::Model, message: Message) {
 
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
-    model::Screen::Login(model) => login::view(model).map(Message::Login),
+    model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
     model::Screen::Register => todo!(),
     model::Screen::ConfirmCode => todo!(),
     model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
