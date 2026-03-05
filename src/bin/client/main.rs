@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use iced::widget::container;
 use iced::{Element, Subscription};
+use resend_rs::Resend;
 
 mod message;
 mod websocket;
@@ -15,7 +18,10 @@ mod types;
 const SPACE_GRID: u16 = 8;
 
 fn main() -> iced::Result {
-  iced::application(new, update, view)
+  let _env = dotenvy::dotenv().unwrap();
+  let resend = Arc::new(Resend::default());
+
+  iced::application(new, make_update(resend), view)
     .subscription(subscription)
     .run()
 }
@@ -36,20 +42,25 @@ enum Message {
   Auth(auth::Message),
 }
 
-fn update(model: &mut model::Model, message: Message) {
-  match message {
+fn make_update(resend: Arc<Resend>) -> impl Fn(&mut model::Model, Message) -> iced::Task<Message> {
+  move |model: &mut model::Model, message: Message| match message {
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
         chat::update(chat_model, msg, user);
+        iced::Task::none()
+      } else {
+        iced::Task::none()
       }
     }
     Message::Auth(msg) => {
       if let Auth::NotLoggedIn = &model.user
         && let Screen::Auth(auth_model) = &mut model.screen
       {
-        auth::update(auth_model, msg)
+        auth::update(auth_model, msg, resend.clone()).map(Message::Auth)
+      } else {
+        iced::Task::none()
       }
     }
   }

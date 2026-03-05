@@ -16,6 +16,7 @@ rkyv = { version = "0.8.15", features = ["uuid-1", "alloc"] }
 bytes = "1.11.1"
 rand = "0.10.0"
 resend-rs = "0.21.1"
+email_address = "0.2.9"
 
 [dependencies.uuid]
 version = "1.19.0"

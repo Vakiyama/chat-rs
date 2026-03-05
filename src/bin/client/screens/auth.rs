@@ -1,24 +1,34 @@
+use std::{str::FromStr, sync::Arc};
+
 use iced::{
   Border, Color, Element,
   Length::{self, Fill, FillPortion},
-  Pixels, Theme,
+  Pixels, Task, Theme,
   border::{self, color},
   widget::{
     button, button::Style as ButtonStyle, column, container, container::Style as ContainerStyle,
-    row, space, text, text_input, text_input::Style as TextStyle,
+    float, row, space, text, text_input, text_input::Style as TextStyle,
   },
 };
+use resend_rs::Resend;
 
 use crate::SPACE_GRID;
+use crate::library::resend;
 
 // -------------------- MODEL --------------------
 
-#[derive(Default)]
 pub enum Mode {
-  #[default]
-  Login,
-  Register,
-  Code,
+  Login { error_message: Option<&'static str> },
+  Register { error_message: Option<&'static str> },
+  Code { error_message: Option<&'static str> },
+}
+
+impl Default for Mode {
+  fn default() -> Self {
+    Self::Login {
+      error_message: None,
+    }
+  }
 }
 
 #[derive(Default)]
@@ -35,6 +45,60 @@ pub enum Message {
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
+  ResendSentEmail(Arc<Result<String, resend::Error>>),
+}
+
+// -------------------- UPDATE --------------------
+
+pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<Message> {
+  match message {
+    Message::UserChangedLoginInput(new) => {
+      model.email_input = new;
+      Task::none()
+    }
+    Message::UserSubmittedForm => Task::perform(
+      resend::send_auth_email(model.email_input.clone(), resend),
+      |response| Message::ResendSentEmail(Arc::new(response)),
+    ),
+    Message::UserToggledRememberMe => {
+      model.remember_me_checked = !model.remember_me_checked;
+      Task::none()
+    }
+    Message::UserNavigatedRegister => {
+      model.mode = Mode::Register {
+        error_message: None,
+      };
+      Task::none()
+    }
+    Message::UserNavigatedLogin => {
+      model.mode = Mode::Login {
+        error_message: None,
+      };
+      Task::none()
+    }
+    Message::ResendSentEmail(response) => {
+      println!("{response:?}");
+      if let Mode::Login { error_message } = &mut model.mode {
+        match *response {
+          Ok(_) => {
+            todo!()
+          }
+          Err(resend::Error::Api(_)) => {
+            *error_message = Some(
+              "An error ocurred while sending your confirmation email. Please try again later.",
+            );
+            Task::none()
+          }
+          Err(resend::Error::EmailValidation(_)) => {
+            *error_message = Some("Invalid email.");
+            Task::none()
+          }
+        }
+      } else {
+        Task::none()
+      }
+    }
+  }
 }
 
 // -------------------- VIEW --------------------
@@ -54,6 +118,7 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
         column![
           text_input("Email", &model.email_input)
             .on_input(Message::UserChangedLoginInput)
+            .on_submit(Message::UserSubmittedForm)
             .style(|theme: &Theme, status| {
               let palette = theme.extended_palette();
 
@@ -115,7 +180,17 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
               },
               ..ButtonStyle::default()
             }
-          })
+          }),
+        {
+          if let Mode::Login {
+            error_message: Some(err),
+          } = model.mode
+          {
+            float(text(err).color(Color::from_rgb(1., 0.5, 0.5)).size(12))
+          } else {
+            float(text("").height(0))
+          }
+        },
       ]
       .spacing(Pixels(SPACE_GRID.into()))
       .width(400),
@@ -154,16 +229,4 @@ fn hero<'a>() -> Element<'a, Message> {
   .width(FillPortion(15))
   .height(Fill)
   .into()
-}
-
-// -------------------- UPDATE --------------------
-
-pub fn update(model: &mut Model, message: Message) {
-  match message {
-    Message::UserChangedLoginInput(new) => model.email_input = new,
-    Message::UserSubmittedForm => todo!(),
-    Message::UserToggledRememberMe => model.remember_me_checked = !model.remember_me_checked,
-    Message::UserNavigatedRegister => model.mode = Mode::Register,
-    Message::UserNavigatedLogin => model.mode = Mode::Login,
-  }
 }
