@@ -58,6 +58,7 @@
               pkgs.openssl
               pkgs.watchexec
               pkgs.openssl
+              pkgs.tokei
             ]
             ++ guiLibs;
 

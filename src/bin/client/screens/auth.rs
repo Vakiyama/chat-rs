@@ -78,25 +78,28 @@ pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<
     }
     Message::ResendSentEmail(response) => {
       println!("{response:?}");
-      if let Mode::Login { error_message } = &mut model.mode {
-        match *response {
-          Ok(_) => {
-            todo!()
-          }
-          Err(resend::Error::Api(_)) => {
-            *error_message = Some(
-              "An error ocurred while sending your confirmation email. Please try again later.",
-            );
-            Task::none()
-          }
-          Err(resend::Error::EmailValidation(_)) => {
-            *error_message = Some("Invalid email.");
-            Task::none()
+
+      let new_err_msg = match *response {
+        Ok(_) => None,
+        Err(resend::Error::Api(_)) => {
+          Some("An error ocurred while sending your confirmation email. Please try again later.")
+        }
+        Err(resend::Error::EmailValidation(_)) => Some("Invalid email."),
+      };
+
+      match (&mut model.mode, &*response) {
+        (Mode::Login { error_message }, Err(_)) | (Mode::Register { error_message }, Err(_)) => {
+          *error_message = new_err_msg;
+        }
+        (Mode::Login { .. }, Ok(_)) | (Mode::Register { .. }, Ok(_)) => {
+          model.mode = Mode::Code {
+            error_message: None,
           }
         }
-      } else {
-        Task::none()
-      }
+        (Mode::Code { .. }, _) => (), // ignore responses when already in code view
+      };
+
+      Task::none()
     }
   }
 }
@@ -104,69 +107,18 @@ pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<
 // -------------------- VIEW --------------------
 
 pub fn view<'a>(model: &Model) -> Element<'a, Message> {
-  row![login_card(model), hero()]
+  row![left_card(model), hero()]
     .spacing(Pixels(SPACE_GRID.into()))
     .width(Fill)
     .height(Fill)
     .into()
 }
 
-fn login_card<'a>(model: &Model) -> Element<'a, Message> {
+fn left_card<'a>(model: &Model) -> Element<'a, Message> {
   container(
     container(
       column![
-        column![
-          text_input("Email", &model.email_input)
-            .on_input(Message::UserChangedLoginInput)
-            .on_submit(Message::UserSubmittedForm)
-            .style(|theme: &Theme, status| {
-              let palette = theme.extended_palette();
-
-              TextStyle {
-                border: Border {
-                  width: 0.0,
-                  ..Border::default()
-                },
-                background: iced::Background::Color(palette.background.stronger.color),
-                value: palette.background.stronger.text,
-                placeholder: palette.background.strong.text,
-                ..text_input::default(theme, status)
-              }
-            }),
-          container(space())
-            .width(Fill)
-            .height(2)
-            .style(container::bordered_box),
-          row![
-            container("").width(Fill),
-            button(
-              text("Register")
-                .align_x(text::Alignment::Right)
-                .size(12)
-                .color(Color::from_rgba(1., 1., 1., 0.8))
-            )
-            .on_press(Message::UserNavigatedRegister)
-            .style(|theme: &Theme, _status| {
-              let palette = theme.extended_palette();
-
-              ButtonStyle {
-                background: None,
-                text_color: palette.background.weakest.text,
-                border: Border {
-                  color: Color::TRANSPARENT,
-                  width: 0.,
-                  radius: border::radius(0),
-                },
-                ..ButtonStyle::default()
-              }
-            })
-            .width(100)
-            .padding(0)
-          ]
-          .padding(SPACE_GRID)
-          // .style(container::bordered_box)
-          .width(Fill)
-        ],
+        render_left_content(model),
         button(container("Login").center_x(Fill))
           .on_press(Message::UserSubmittedForm)
           .width(Fill)
@@ -214,6 +166,124 @@ fn login_card<'a>(model: &Model) -> Element<'a, Message> {
   .padding(SPACE_GRID * 4)
   .width(FillPortion(9))
   .height(Fill)
+  .into()
+}
+
+fn render_left_content<'a>(model: &Model) -> Element<'a, Message> {
+  match model.mode {
+    Mode::Login { .. } => login_content(model),
+    Mode::Register { .. } => todo!(),
+    Mode::Code { .. } => code_input_content(model),
+  }
+}
+
+fn code_input_content<'a>(model: &Model) -> Element<'a, Message> {
+  column![
+    text_input("Enter Code", &model.email_input)
+      .on_input(Message::UserChangedLoginInput)
+      .on_submit(Message::UserSubmittedForm)
+      .style(|theme: &Theme, status| {
+        let palette = theme.extended_palette();
+
+        TextStyle {
+          border: Border {
+            width: 0.0,
+            ..Border::default()
+          },
+          background: iced::Background::Color(palette.background.stronger.color),
+          value: palette.background.stronger.text,
+          placeholder: palette.background.strong.text,
+          ..text_input::default(theme, status)
+        }
+      }),
+    container(space())
+      .width(Fill)
+      .height(2)
+      .style(container::bordered_box),
+    row![
+      container("").width(Fill),
+      button(
+        text("Back to Login")
+          .align_x(text::Alignment::Right)
+          .size(12)
+          .color(Color::from_rgba(1., 1., 1., 0.8))
+      )
+      .on_press(Message::UserNavigatedLogin)
+      .style(|theme: &Theme, _status| {
+        let palette = theme.extended_palette();
+
+        ButtonStyle {
+          background: None,
+          text_color: palette.background.weakest.text,
+          border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: border::radius(0),
+          },
+          ..ButtonStyle::default()
+        }
+      })
+      .width(100)
+      .padding(0)
+    ]
+    .padding(SPACE_GRID)
+    .width(Fill)
+  ]
+  .into()
+}
+
+fn login_content<'a>(model: &Model) -> Element<'a, Message> {
+  column![
+    text_input("Email", &model.email_input)
+      .on_input(Message::UserChangedLoginInput)
+      .on_submit(Message::UserSubmittedForm)
+      .style(|theme: &Theme, status| {
+        let palette = theme.extended_palette();
+
+        TextStyle {
+          border: Border {
+            width: 0.0,
+            ..Border::default()
+          },
+          background: iced::Background::Color(palette.background.stronger.color),
+          value: palette.background.stronger.text,
+          placeholder: palette.background.strong.text,
+          ..text_input::default(theme, status)
+        }
+      }),
+    container(space())
+      .width(Fill)
+      .height(2)
+      .style(container::bordered_box),
+    row![
+      container("").width(Fill),
+      button(
+        text("Register")
+          .align_x(text::Alignment::Right)
+          .size(12)
+          .color(Color::from_rgba(1., 1., 1., 0.8))
+      )
+      .on_press(Message::UserNavigatedRegister)
+      .style(|theme: &Theme, _status| {
+        let palette = theme.extended_palette();
+
+        ButtonStyle {
+          background: None,
+          text_color: palette.background.weakest.text,
+          border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: border::radius(0),
+          },
+          ..ButtonStyle::default()
+        }
+      })
+      .width(100)
+      .padding(0)
+    ]
+    .padding(SPACE_GRID)
+    .width(Fill)
+  ]
   .into()
 }
 

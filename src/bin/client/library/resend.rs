@@ -17,7 +17,7 @@ pub enum Error {
 }
 
 /// sends an authentication email to the address
-/// returns the auth code for confirmation that the user recieved it
+/// returns the auth code for confirmation that the user received it
 pub async fn send_auth_email(to: String, resend: Arc<Resend>) -> Result<String, Error> {
   let _env = dotenv().unwrap();
 
