@@ -1,17 +1,29 @@
 use std::{
   collections::HashMap,
   sync::{Arc, Mutex},
+  time::Duration,
 };
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+use bytes::Bytes;
 use dotenvy::dotenv;
+use jwt_simple::{
+  claims::Claims,
+  prelude::{HS256Key, MACLike},
+};
 
 use crate::library::resend;
 use uuid::Uuid;
 
 #[derive(Default, Clone)]
+struct EmailCodePair {
+  code: String,
+  email: String,
+}
+
+#[derive(Default, Clone)]
 struct PendingTokenStore {
-  pending: HashMap<Uuid, String>,
+  pending: HashMap<Uuid, EmailCodePair>,
 }
 
 #[derive(Default, Clone)]
@@ -25,6 +37,7 @@ pub fn router() -> Router {
 
   Router::new()
     .route("/login", post(login_handler))
+    .route("/verify", post(verify_handler))
     .with_state(RouterState::default())
 }
 
@@ -34,15 +47,13 @@ struct LoginResponse {
 }
 
 #[derive(serde::Deserialize)]
-pub struct LoginParams {
-  pub email: String,
+struct LoginParams {
+  email: String,
 }
 
-// get the email from the qparam, send to resend, create a stateful "email:code -> JWT" pending
-// resolution store
 #[utoipa::path(
     post,
-    path = "/login",
+    path = "/api/auth/login",
     params(("email" = String, Query, description = "Email to send verification code to")), 
     responses(
       (status = 200, body = LoginResponse),
@@ -51,16 +62,100 @@ pub struct LoginParams {
     )
  )
 ]
-#[axum::debug_handler]
+
 async fn login_handler(
   State(state): State<RouterState>,
   Json(payload): Json<LoginParams>,
 ) -> Result<Json<LoginResponse>, resend::Error> {
   let identifier = Uuid::new_v4();
-  let code = resend::send_auth_email(payload.email, state.resend).await?;
+  let code = resend::send_auth_email(&payload.email, state.resend).await?;
 
   let mut state_lock = state.store.lock().unwrap();
-  state_lock.pending.insert(identifier, code);
+  state_lock.pending.insert(
+    identifier,
+    EmailCodePair {
+      code,
+      email: payload.email,
+    },
+  );
 
   Ok(Json(LoginResponse { identifier }))
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyParams {
+  identifier: Uuid,
+  email: String,
+  code: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct VerifyResponse {
+  token: String,
+  duration_milliseconds: u128,
+}
+
+enum VerifyError {
+  InvalidCode,
+  UnknownIdentifier,
+  Internal,
+}
+
+impl IntoResponse for VerifyError {
+  fn into_response(self) -> axum::response::Response {
+    todo!()
+  }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/verify",
+    params(("email" = String, Query, description = "Email to send verification code to")), 
+    responses(
+      (status = 200, body = VerifyResponse),
+      (status = 422, description = "Missing or invalid body params"),
+      (status = 400, description = "Invalid identifier"),
+      (status = 500, description = "Internal server error"),
+     )
+   )
+]
+async fn verify_handler(
+  State(state): State<RouterState>,
+  Json(payload): Json<VerifyParams>,
+) -> Result<Json<VerifyResponse>, VerifyError> {
+  let VerifyParams {
+    identifier,
+    email: incoming_email,
+    code: code_attempt,
+  } = payload;
+
+  let store = state.store.lock().unwrap();
+
+  let EmailCodePair { code, email } = store
+    .pending
+    .get(&identifier)
+    .map(Ok)
+    .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
+
+  if &code_attempt == code && email == &incoming_email {
+    let key_bytes: Bytes =
+      hex::decode(std::env::var("JWT_SECRET").expect("Missing JWT secret env var"))
+        .expect("Invalid key, decode failed")
+        .into();
+
+    let key: HS256Key = HS256Key::from_bytes(&key_bytes);
+
+    let duration = Duration::from_hours(8);
+    let claims = Claims::create(duration.into());
+    let token = key
+      .authenticate(claims)
+      .map_err(|_| VerifyError::Internal)?;
+
+    Ok(Json(VerifyResponse {
+      token,
+      duration_milliseconds: duration.as_millis(),
+    }))
+  } else {
+    Err(VerifyError::InvalidCode)
+  }
 }
