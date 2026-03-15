@@ -10,7 +10,6 @@ mod websocket;
 use crate::model::{Auth, Screen};
 use crate::screens::{auth, chat};
 
-mod library;
 mod model;
 mod screens;
 mod types;
@@ -19,9 +18,8 @@ const SPACE_GRID: u16 = 8;
 
 fn main() -> iced::Result {
   let _env = dotenvy::dotenv().unwrap();
-  let resend = Arc::new(Resend::default());
 
-  iced::application(new, make_update(resend), view)
+  iced::application(new, update, view)
     .subscription(subscription)
     .run()
 }
@@ -42,8 +40,8 @@ enum Message {
   Auth(auth::Message),
 }
 
-fn make_update(resend: Arc<Resend>) -> impl Fn(&mut model::Model, Message) -> iced::Task<Message> {
-  move |model: &mut model::Model, message: Message| match message {
+fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
+  match message {
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
@@ -58,7 +56,7 @@ fn make_update(resend: Arc<Resend>) -> impl Fn(&mut model::Model, Message) -> ic
       if let Auth::NotLoggedIn = &model.user
         && let Screen::Auth(auth_model) = &mut model.screen
       {
-        auth::update(auth_model, msg, resend.clone()).map(Message::Auth)
+        auth::update(auth_model, msg).map(Message::Auth)
       } else {
         iced::Task::none()
       }

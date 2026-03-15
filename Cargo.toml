@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.8.8", features = ["ws"] }
+axum = { version = "0.8.8", features = ["ws", "macros"] }
 futures-util = { version = "0.3.31", features = ["sink", "std"] }
 iced = { version = "0.14.0", features = ["tokio", "sipper", "image"] }
 tokio = { version = "1.49.0", features = ["full"] }
@@ -17,9 +17,13 @@ bytes = "1.11.1"
 rand = "0.10.0"
 resend-rs = "0.21.1"
 email_address = "0.2.9"
+utoipa-axum = "0.2.0"
+utoipa = { version = "5.4.0", features = [ "uuid" ] }
+serde = "1.0.228"
 
 [dependencies.uuid]
 version = "1.19.0"
 features = [
     "v4",
+    "serde"
 ]

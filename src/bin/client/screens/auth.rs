@@ -1,10 +1,11 @@
+use email_address;
 use std::{str::FromStr, sync::Arc};
 
 use iced::{
   Border, Color, Element,
-  Length::{self, Fill, FillPortion},
+  Length::{Fill, FillPortion},
   Pixels, Task, Theme,
-  border::{self, color},
+  border::{self},
   widget::{
     button, button::Style as ButtonStyle, column, container, container::Style as ContainerStyle,
     float, row, space, text, text_input, text_input::Style as TextStyle,
@@ -13,7 +14,6 @@ use iced::{
 use resend_rs::Resend;
 
 use crate::SPACE_GRID;
-use crate::library::resend;
 
 // -------------------- MODEL --------------------
 
@@ -45,21 +45,31 @@ pub enum Message {
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
-  ResendSentEmail(Arc<Result<String, resend::Error>>),
+  ResendSentEmail(Arc<Result<String, axum::Error>>),
 }
 
 // -------------------- UPDATE --------------------
 
-pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<Message> {
+pub fn update(model: &mut Model, message: Message) -> Task<Message> {
   match message {
     Message::UserChangedLoginInput(new) => {
       model.email_input = new;
       Task::none()
     }
-    Message::UserSubmittedForm => Task::perform(
-      resend::send_auth_email(model.email_input.clone(), resend),
-      |response| Message::ResendSentEmail(Arc::new(response)),
-    ),
+    Message::UserSubmittedForm => {
+      if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
+        match &mut model.mode {
+          Mode::Login { error_message } | Mode::Register { error_message } => {
+            *error_message = Some("Invalid email.")
+          }
+          Mode::Code { error_message } => (), // shouldn't happen
+        };
+        Task::none()
+      } else {
+        // send off req as task
+        todo!();
+      }
+    }
     Message::UserToggledRememberMe => {
       model.remember_me_checked = !model.remember_me_checked;
       Task::none()
@@ -81,10 +91,9 @@ pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<
 
       let new_err_msg = match *response {
         Ok(_) => None,
-        Err(resend::Error::Api(_)) => {
+        Err(_) => {
           Some("An error ocurred while sending your confirmation email. Please try again later.")
         }
-        Err(resend::Error::EmailValidation(_)) => Some("Invalid email."),
       };
 
       match (&mut model.mode, &*response) {
@@ -95,6 +104,7 @@ pub fn update(model: &mut Model, message: Message, resend: Arc<Resend>) -> Task<
           model.mode = Mode::Code {
             error_message: None,
           }
+          // todo here
         }
         (Mode::Code { .. }, _) => (), // ignore responses when already in code view
       };

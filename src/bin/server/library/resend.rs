@@ -1,6 +1,8 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use dotenvy::dotenv;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
@@ -14,6 +16,17 @@ const SUBJECT: &str = "Login Code";
 pub enum Error {
   Api(resend_rs::Error),
   EmailValidation(email_address::Error),
+}
+
+impl IntoResponse for Error {
+  fn into_response(self) -> axum::response::Response {
+    match self {
+      Error::Api(_) => (StatusCode::BAD_REQUEST, "Resend API Error").into_response(),
+      Error::EmailValidation(_error) => {
+        (StatusCode::UNPROCESSABLE_ENTITY, "Invalid Email").into_response()
+      }
+    }
+  }
 }
 
 /// sends an authentication email to the address

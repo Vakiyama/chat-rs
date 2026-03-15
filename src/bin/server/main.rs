@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-mod api;
 use chat_rs::SERVER_URL;
+
+mod api;
+mod library;
 mod websocket;
 
 #[tokio::main]
@@ -16,8 +18,8 @@ async fn main() {
       "/",
       axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
     )
-    .nest("/api", api::router())
-    .with_state(state);
+    .with_state(state)
+    .nest("/api", api::router());
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 
