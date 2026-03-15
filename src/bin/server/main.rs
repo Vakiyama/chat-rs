@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use chat_rs::SERVER_URL;
 use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 
 mod api;
 mod library;
@@ -23,14 +24,17 @@ async fn main() {
     .nest("/api", api::router())
     .split_for_parts();
 
-  let app = app.route(
-    "/api-docs/openapi.json",
-    axum::routing::get({
-      api_spec.info.title = "ChatRS API".into();
-      api_spec.info.description = Some("Documentation for the ChatRS open api".into());
-      move || async move { axum::Json(api_spec) }
-    }),
-  );
+  api_spec.info.title = "ChatRS API".into();
+  api_spec.info.description = Some("Documentation for the ChatRS open api".into());
+  api_spec.info.contact = None;
+  api_spec.info.license = None;
+
+  let app = app
+    // .route(
+    //   "/api-docs/openapi.json",
+    //   axum::routing::get({ move || async move { axum::Json(api_spec) } }),
+    // )
+    .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", api_spec));
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 

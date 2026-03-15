@@ -22,6 +22,7 @@ utoipa = { version = "5.4.0", features = [ "uuid" ] }
 serde = "1.0.228"
 jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
 hex = "0.4.3"
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 [dependencies.uuid]
 version = "1.19.0"
