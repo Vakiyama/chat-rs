@@ -1,8 +1,7 @@
-use axum::Router;
+use utoipa_axum::router::OpenApiRouter;
 
 mod auth;
 
-pub fn router() -> Router {
-  Router::new().nest("/auth", auth::router())
+pub fn router() -> OpenApiRouter {
+  OpenApiRouter::new().nest("/auth", auth::router())
 }
-

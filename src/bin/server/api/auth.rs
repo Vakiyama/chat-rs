@@ -4,13 +4,13 @@ use std::{
   time::Duration,
 };
 
-use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+use axum::{Json, extract::State, response::IntoResponse, routing::post};
 use bytes::Bytes;
-use dotenvy::dotenv;
 use jwt_simple::{
   claims::Claims,
   prelude::{HS256Key, MACLike},
 };
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::library::resend;
 use uuid::Uuid;
@@ -32,12 +32,10 @@ struct RouterState {
   resend: Arc<resend_rs::Resend>,
 }
 
-pub fn router() -> Router {
-  let _env = dotenv();
-
-  Router::new()
-    .route("/login", post(login_handler))
-    .route("/verify", post(verify_handler))
+pub fn router() -> OpenApiRouter {
+  OpenApiRouter::new()
+    .routes(routes!(login_handler))
+    .routes(routes!(verify_handler))
     .with_state(RouterState::default())
 }
 
@@ -53,7 +51,7 @@ struct LoginBody {
 
 #[utoipa::path(
     post,
-    path = "/api/auth/login",
+    path = "/login",
     request_body(content = LoginBody, description = "Email to attempt login with", content_type = "application/json"),
     // params(("email" = String, Query, description = "Email to send verification code to")), 
     responses(
@@ -110,7 +108,7 @@ impl IntoResponse for VerifyError {
 
 #[utoipa::path(
     post,
-    path = "/api/auth/verify",
+    path = "/verify",
     request_body(content = VerifyBody, description = "Verification details for token exchange", content_type = "application/json"),
     responses(
       (status = 200, body = VerifyResponse),
