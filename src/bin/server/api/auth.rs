@@ -46,15 +46,16 @@ struct LoginResponse {
   identifier: Uuid,
 }
 
-#[derive(serde::Deserialize)]
-struct LoginParams {
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct LoginBody {
   email: String,
 }
 
 #[utoipa::path(
     post,
     path = "/api/auth/login",
-    params(("email" = String, Query, description = "Email to send verification code to")), 
+    request_body(content = LoginBody, description = "Email to attempt login with", content_type = "application/json"),
+    // params(("email" = String, Query, description = "Email to send verification code to")), 
     responses(
       (status = 200, body = LoginResponse),
       (status = 422, description = "Missing or invalid body params"),
@@ -65,7 +66,7 @@ struct LoginParams {
 
 async fn login_handler(
   State(state): State<RouterState>,
-  Json(payload): Json<LoginParams>,
+  Json(payload): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, resend::Error> {
   let identifier = Uuid::new_v4();
   let code = resend::send_auth_email(&payload.email, state.resend).await?;
@@ -82,8 +83,8 @@ async fn login_handler(
   Ok(Json(LoginResponse { identifier }))
 }
 
-#[derive(serde::Deserialize)]
-struct VerifyParams {
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct VerifyBody {
   identifier: Uuid,
   email: String,
   code: String,
@@ -110,7 +111,7 @@ impl IntoResponse for VerifyError {
 #[utoipa::path(
     post,
     path = "/api/auth/verify",
-    params(("email" = String, Query, description = "Email to send verification code to")), 
+    request_body(content = VerifyBody, description = "Verification details for token exchange", content_type = "application/json"),
     responses(
       (status = 200, body = VerifyResponse),
       (status = 422, description = "Missing or invalid body params"),
@@ -121,9 +122,9 @@ impl IntoResponse for VerifyError {
 ]
 async fn verify_handler(
   State(state): State<RouterState>,
-  Json(payload): Json<VerifyParams>,
+  Json(payload): Json<VerifyBody>,
 ) -> Result<Json<VerifyResponse>, VerifyError> {
-  let VerifyParams {
+  let VerifyBody {
     identifier,
     email: incoming_email,
     code: code_attempt,
