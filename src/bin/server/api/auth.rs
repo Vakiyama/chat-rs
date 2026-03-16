@@ -4,12 +4,16 @@ use std::{
   time::Duration,
 };
 
-use axum::{Json, extract::State, response::IntoResponse, routing::post};
+use axum::{Json, extract::State, response::IntoResponse};
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
+use http::{Request, Response, StatusCode};
+use http_body_util::Full;
 use jwt_simple::{
-  claims::Claims,
+  claims::{Claims, NoCustomClaims},
   prelude::{HS256Key, MACLike},
 };
+use tower_http::auth::AsyncAuthorizeRequest;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::library::resend;
@@ -30,8 +34,38 @@ struct PendingTokenStore {
 struct RouterState {
   store: Arc<Mutex<PendingTokenStore>>,
   resend: Arc<resend_rs::Resend>,
+  jwt_key: JWTKey,
 }
 
+#[derive(Clone)]
+struct JWTKey {
+  key: HS256Key,
+}
+
+impl Default for JWTKey {
+  fn default() -> Self {
+    let key_bytes: Bytes =
+      hex::decode(std::env::var("JWT_SECRET").expect("Missing JWT secret env var"))
+        .expect("Invalid key, decode failed")
+        .into();
+
+    let key: HS256Key = HS256Key::from_bytes(&key_bytes);
+
+    Self { key }
+  }
+}
+
+impl JWTKey {
+  pub fn get(&self) -> &HS256Key {
+    &self.key
+  }
+}
+
+// ------------------------ Config ------------------------
+
+const JWT_DURATION: Duration = Duration::from_hours(8);
+
+// ------------------------ Router ------------------------
 pub fn router() -> OpenApiRouter {
   OpenApiRouter::new()
     .routes(routes!(login_handler))
@@ -137,24 +171,65 @@ async fn verify_handler(
     .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
 
   if &code_attempt == code && email == &incoming_email {
-    let key_bytes: Bytes =
-      hex::decode(std::env::var("JWT_SECRET").expect("Missing JWT secret env var"))
-        .expect("Invalid key, decode failed")
-        .into();
-
-    let key: HS256Key = HS256Key::from_bytes(&key_bytes);
-
-    let duration = Duration::from_hours(8);
-    let claims = Claims::create(duration.into());
-    let token = key
+    let claims = Claims::create(JWT_DURATION.into()).with_subject(identifier.to_string());
+    let token = state
+      .jwt_key
+      .get()
       .authenticate(claims)
       .map_err(|_| VerifyError::Internal)?;
 
     Ok(Json(VerifyResponse {
       token,
-      duration_milliseconds: duration.as_millis(),
+      duration_milliseconds: JWT_DURATION.as_millis(),
     }))
   } else {
     Err(VerifyError::InvalidCode)
   }
+}
+
+// Middleware
+
+#[derive(Clone)]
+struct JWTAuthorized
+where
+  JWTKey: 'static,
+{
+  key: Arc<JWTKey>,
+}
+
+impl<B> AsyncAuthorizeRequest<B> for JWTAuthorized
+where
+  B: Send + Sync + 'static,
+{
+  type RequestBody = B;
+  type ResponseBody = Full<Bytes>;
+  type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
+
+  fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
+    let key = self.key.clone();
+
+    Box::pin(async {
+      if let Some(user_id) = check_auth(&request, key) {
+        request.extensions_mut().insert(user_id);
+        Ok(request)
+      } else {
+        let unauthorized_response = Response::builder()
+          .status(StatusCode::UNAUTHORIZED)
+          .body(Full::<Bytes>::default())
+          .unwrap();
+
+        Err(unauthorized_response)
+      }
+    })
+  }
+}
+
+fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
+  let header = req.headers().get("Authorization")?.to_str().ok()?;
+  let token = header.strip_prefix("Bearer ")?;
+
+  let claims = key.get().verify_token::<NoCustomClaims>(token, None).ok()?;
+  let subject = claims.subject?;
+
+  Uuid::parse_str(&subject).ok()
 }

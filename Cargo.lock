@@ -925,6 +925,8 @@ dependencies = [
  "email_address",
  "futures-util",
  "hex",
+ "http",
+ "http-body-util",
  "iced",
  "jwt-simple",
  "rand 0.10.0",
@@ -934,6 +936,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-tungstenite",
+ "tower-http",
  "utoipa",
  "utoipa-axum",
  "utoipa-swagger-ui",
@@ -2442,6 +2445,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -6393,12 +6397,14 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
+ "base64",
  "bitflags 2.10.0",
  "bytes",
  "futures-util",
  "http",
  "http-body",
  "iri-string",
+ "mime",
  "pin-project-lite",
  "tower",
  "tower-layer",
