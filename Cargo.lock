@@ -918,6 +918,7 @@ dependencies = [
 name = "chat-rs"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-tungstenite",
  "axum",
  "bytes",
@@ -936,6 +937,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "tower-http",
  "utoipa",
  "utoipa-axum",

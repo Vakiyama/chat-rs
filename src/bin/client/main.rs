@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use iced::widget::container;
 use iced::{Element, Subscription};
-use resend_rs::Resend;
 
 mod message;
 mod websocket;

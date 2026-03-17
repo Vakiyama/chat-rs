@@ -4,16 +4,16 @@ use std::{
   time::Duration,
 };
 
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{Extension, Json, extract::State, response::IntoResponse};
 use bytes::Bytes;
-use futures_util::future::BoxFuture;
+use futures_util::{TryFutureExt, future::BoxFuture};
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
 use jwt_simple::{
   claims::{Claims, NoCustomClaims},
   prelude::{HS256Key, MACLike},
 };
-use tower_http::auth::AsyncAuthorizeRequest;
+use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::library::resend;
@@ -26,13 +26,30 @@ struct EmailCodePair {
 }
 
 #[derive(Default, Clone)]
-struct PendingTokenStore {
+struct InMemoryStore {
   pending: HashMap<Uuid, EmailCodePair>,
 }
 
+impl CodeStore for InMemoryStore {
+  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<&EmailCodePair> {
+    self.pending.get(uuid)
+  }
+
+  async fn insert(&mut self, uuid: Uuid, email_code: EmailCodePair) -> Option<EmailCodePair> {
+    self.pending.insert(uuid, email_code)
+  }
+}
+
+trait CodeStore {
+  /// given an uuid, gets the pending
+  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<&EmailCodePair>;
+
+  async fn insert(&mut self, uuid: Uuid, email_code: EmailCodePair) -> Option<EmailCodePair>;
+}
+
 #[derive(Default, Clone)]
-struct RouterState {
-  store: Arc<Mutex<PendingTokenStore>>,
+struct RouterState<Store> {
+  store: Store,
   resend: Arc<resend_rs::Resend>,
   jwt_key: JWTKey,
 }
@@ -63,14 +80,27 @@ impl JWTKey {
 
 // ------------------------ Config ------------------------
 
-const JWT_DURATION: Duration = Duration::from_hours(8);
+const JWT_ACCESS_DURATION: Duration = Duration::from_hours(8);
+const JWT_REFRESH_DURATION: Duration = Duration::from_hours(24 * 30);
 
 // ------------------------ Router ------------------------
 pub fn router() -> OpenApiRouter {
+  let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+    .expect("Invalid JWT_KEY, decode failed")
+    .into();
+
+  let key = HS256Key::from_bytes(&key_bytes);
+
   OpenApiRouter::new()
     .routes(routes!(login_handler))
     .routes(routes!(verify_handler))
-    .with_state(RouterState::default())
+    .layer(
+      tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
+        key: JWTKey { key: key.into() }.into(),
+      })),
+    )
+    .routes(routes!(refresh_handler))
+    .with_state(RouterState::<InMemoryStore>::default())
 }
 
 #[derive(utoipa::ToSchema, serde::Serialize)]
@@ -96,21 +126,26 @@ struct LoginBody {
  )
 ]
 
-async fn login_handler(
-  State(state): State<RouterState>,
+async fn login_handler<Store>(
+  State(mut state): State<RouterState<Store>>,
   Json(payload): Json<LoginBody>,
-) -> Result<Json<LoginResponse>, resend::Error> {
+) -> Result<Json<LoginResponse>, resend::Error>
+where
+  Store: CodeStore + Send + Sync + 'static,
+{
   let identifier = Uuid::new_v4();
   let code = resend::send_auth_email(&payload.email, state.resend).await?;
 
-  let mut state_lock = state.store.lock().unwrap();
-  state_lock.pending.insert(
-    identifier,
-    EmailCodePair {
-      code,
-      email: payload.email,
-    },
-  );
+  state
+    .store
+    .insert(
+      identifier,
+      EmailCodePair {
+        code,
+        email: payload.email,
+      },
+    )
+    .await;
 
   Ok(Json(LoginResponse { identifier }))
 }
@@ -124,7 +159,8 @@ struct VerifyBody {
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
 struct VerifyResponse {
-  token: String,
+  access_token: String,
+  refresh_token: String,
   duration_milliseconds: u128,
 }
 
@@ -152,39 +188,115 @@ impl IntoResponse for VerifyError {
      )
    )
 ]
-async fn verify_handler(
-  State(state): State<RouterState>,
+async fn verify_handler<Store>(
+  State(state): State<RouterState<Store>>,
   Json(payload): Json<VerifyBody>,
-) -> Result<Json<VerifyResponse>, VerifyError> {
+) -> Result<Json<VerifyResponse>, VerifyError>
+where
+  Store: CodeStore + Send + Sync + 'static,
+{
   let VerifyBody {
     identifier,
     email: incoming_email,
     code: code_attempt,
   } = payload;
 
-  let store = state.store.lock().unwrap();
-
-  let EmailCodePair { code, email } = store
-    .pending
-    .get(&identifier)
+  let EmailCodePair { code, email } = state
+    .store
+    .get_email_code_pair(&identifier)
+    .await
     .map(Ok)
     .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
 
-  if &code_attempt == code && email == &incoming_email {
-    let claims = Claims::create(JWT_DURATION.into()).with_subject(identifier.to_string());
-    let token = state
-      .jwt_key
-      .get()
-      .authenticate(claims)
-      .map_err(|_| VerifyError::Internal)?;
+  let TokenPair {
+    access_token,
+    refresh_token,
+  } = generate_tokens(identifier, state.jwt_key.get())
+    .map_err(|_| VerifyError::Internal)
+    .await?;
 
+  if &code_attempt == code && email == &incoming_email {
     Ok(Json(VerifyResponse {
-      token,
-      duration_milliseconds: JWT_DURATION.as_millis(),
+      access_token,
+      refresh_token,
+      duration_milliseconds: JWT_ACCESS_DURATION.as_millis(),
     }))
   } else {
     Err(VerifyError::InvalidCode)
   }
+}
+
+struct TokenPair {
+  access_token: String,
+  refresh_token: String,
+}
+
+/// expects the user id as identifier
+async fn generate_tokens(identifier: Uuid, key: &HS256Key) -> Result<TokenPair, anyhow::Error> {
+  let claims = Claims::create(JWT_ACCESS_DURATION.into()).with_subject(identifier.to_string());
+  let access_token = key
+    .authenticate(claims)
+    .map_err(|_| anyhow::anyhow!("Internal"))?;
+
+  let claims = Claims::create(JWT_REFRESH_DURATION.into()).with_subject(identifier.to_string());
+  let refresh_token = key
+    .authenticate(claims)
+    .map_err(|_| anyhow::anyhow!("Internal"))?;
+
+  Ok(TokenPair {
+    access_token,
+    refresh_token,
+  })
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct RefreshBody {
+  refresh_token: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct RefreshResponse {
+  access_token: String,
+  refresh_token: String,
+}
+
+pub enum RefreshError {
+  InvalidCode,
+  UnknownIdentifier,
+  Internal,
+}
+
+impl IntoResponse for RefreshError {
+  fn into_response(self) -> axum::response::Response {
+    todo!()
+  }
+}
+
+/// given a valid refresh token, a new token is issued
+#[utoipa::path(
+    post,
+    path = "/refresh",
+    request_body(content = RefreshBody, description = "Verification details for token exchange", content_type = "application/json"),
+    responses(
+      (status = 200, body = RefreshResponse),
+      (status = 400, description = "Missing bearer token"),
+      (status = 401, description = "Unauthorized"),
+      (status = 500, description = "Internal server error"),
+     )
+   )
+]
+// hemingway: refresh handler should return a refresh body, generate all new tokens, replace the
+// old refresh token in the store and give the both new tokens back
+// #[axum::debug_handler]
+async fn refresh_handler<Store>(
+  Extension(user_id): Extension<Uuid>,
+  State(mut state): State<RouterState<Store>>,
+  Json(body): Json<RefreshBody>,
+) -> Result<Json<RefreshResponse>, RefreshError>
+where
+  Store: CodeStore + Send + Sync + 'static,
+{
+  todo!()
 }
 
 // Middleware
@@ -197,15 +309,12 @@ where
   key: Arc<JWTKey>,
 }
 
-impl<B> AsyncAuthorizeRequest<B> for JWTAuthorized
-where
-  B: Send + Sync + 'static,
-{
-  type RequestBody = B;
-  type ResponseBody = Full<Bytes>;
-  type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
+impl AsyncAuthorizeRequest<axum::body::Body> for JWTAuthorized {
+  type RequestBody = axum::body::Body;
+  type ResponseBody = axum::body::Body;
+  type Future = BoxFuture<'static, Result<Request<axum::body::Body>, Response<Self::ResponseBody>>>;
 
-  fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
+  fn authorize(&mut self, mut request: Request<axum::body::Body>) -> Self::Future {
     let key = self.key.clone();
 
     Box::pin(async {
@@ -215,7 +324,7 @@ where
       } else {
         let unauthorized_response = Response::builder()
           .status(StatusCode::UNAUTHORIZED)
-          .body(Full::<Bytes>::default())
+          .body(axum::body::Body::default())
           .unwrap();
 
         Err(unauthorized_response)
