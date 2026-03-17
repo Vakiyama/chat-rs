@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  JWT_KEY: 0123456789abcdef0123456789abcdef
 
 jobs:
   build:
