@@ -23,6 +23,4 @@ pub fn router() -> OpenApiRouter {
       })),
     )
   // ------ private api routes --------
-  // hemingway: setup progenitor for app client, with semantics for
-  // refresh token requesting on unautorhized reqs
 }

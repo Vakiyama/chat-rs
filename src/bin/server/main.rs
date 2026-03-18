@@ -1,6 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::{
+  fs,
+  sync::{Arc, Mutex},
+};
 
-use chat_rs::SERVER_URL;
+use chat_rs::{OPENAPI_SPEC_PATH, SERVER_URL};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -10,6 +13,7 @@ mod websocket;
 
 #[tokio::main]
 async fn main() {
+  let _env = dotenvy::dotenv();
   let (tx, _rx) = tokio::sync::mpsc::channel(32);
   let state = Arc::new(websocket::State { tx });
 
@@ -35,6 +39,17 @@ async fn main() {
     //   axum::routing::get({ move || async move { axum::Json(api_spec) } }),
     // )
     .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", api_spec));
+
+  // let stringified = api_spec.to_json().expect("Api writes to json").to_string();
+
+  // println!(
+  //   "Writing openapi spec to disk at '{}' ...",
+  //   OPENAPI_SPEC_PATH
+  // );
+
+  // fs::write(OPENAPI_SPEC_PATH, stringified)
+  //   .expect("Critical: failed to write openapi.json to disk");
+  // println!("Done! \n");
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 
