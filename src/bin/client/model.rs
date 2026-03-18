@@ -1,8 +1,6 @@
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
-use chat_rs::OPENAPI_SPEC_PATH;
 use chat_rs::schema::user::Model as User;
-use progenitor::generate_api;
 // use uuid::Uuid;
 
 use crate::websocket;
@@ -31,7 +29,7 @@ pub enum Screen {
 
 impl Default for Model {
   fn default() -> Self {
-    generate_api!("src/spec/openapi.json");
+    // generate_api!("src/spec/openapi.json");
 
     Model {
       screen: Screen::Auth(Default::default()),

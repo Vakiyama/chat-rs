@@ -506,7 +506,7 @@ pub struct JWTAuthorized
 where
   JWTKey: 'static,
 {
-  pub key: Arc<JWTKey>,
+  key: Arc<JWTKey>,
 }
 
 impl AsyncAuthorizeRequest<axum::body::Body> for JWTAuthorized {

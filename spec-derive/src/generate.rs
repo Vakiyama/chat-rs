@@ -1,4 +1,4 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{Attribute, FnArg, ImplItem, ImplItemFn, ItemImpl, LitStr, Token, parse::Parse};
 
@@ -27,18 +27,29 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   // each item can be turned into the naked tokenstream fn using quote!
   // we can then quote! compose these later
   let items = item_impl.items;
-  let parsed: Vec<TokenStream> = items
+
+  // let parsed_handlers: Vec<Result<TokenStream, syn::Error>> = items
+  //   .iter()
+  //   .map(|impl_item: &ImplItem| parse_item_into_handler(impl_item))
+  //   .collect();
+
+  let parsed_handlers: TokenStream = items
     .iter()
-    .map(|impl_item: &ImplItem| parse_item(impl_item))
+    .map(|impl_item: &ImplItem| {
+      parse_item_into_handler(impl_item).unwrap_or_else(|e| e.to_compile_error())
+    })
     .collect();
 
-  todo!()
+  parsed_handlers
 }
 
-fn parse_item(impl_item: &ImplItem) -> TokenStream {
+fn parse_item_into_handler(impl_item: &ImplItem) -> Result<TokenStream, syn::Error> {
   match impl_item {
-    ImplItem::Fn(impl_item_fn) => parse_trait_fn(impl_item_fn),
-    _ => syn::Error::new_spanned(impl_item, "Trait item must be a function.").to_compile_error(),
+    ImplItem::Fn(impl_item_fn) => Ok(parse_trait_fn(impl_item_fn)?),
+    _ => Err(syn::Error::new_spanned(
+      impl_item,
+      "Trait item must be a function.",
+    )),
   }
 }
 
@@ -89,17 +100,38 @@ impl Parse for Http {
   }
 }
 
-fn parse_trait_fn(f: &ImplItemFn) -> TokenStream {
-  match find_http_attr(f) {
-    Err(e) => e.to_compile_error(),
-    Ok(http) => {
-      // we need to rebuild the arguments from #[body] request: SomeType, #[query] ... into
-      // Json(request): SomeType, Query(query): ...
+fn parse_trait_fn(f: &ImplItemFn) -> Result<TokenStream, syn::Error> {
+  // we need to rebuild the arguments from #[body] request: SomeType, #[query] ... into
+  // Json(request): SomeType, Query(query): ...
 
-      f.sig.inputs.iter();
-      todo!()
-    }
-  }
+  let new_params: Result<Vec<TokenStream>, syn::Error> = f
+    .sig
+    .inputs
+    .iter()
+    .filter(|arg| !matches!(arg, FnArg::Receiver(_)))
+    .map(parse_sig_param)
+    .collect();
+
+  let params = new_params?;
+
+  // at this point, we have the new params list, we can create the handler
+
+  let fname = syn::Ident::new(
+    &format!("{}_handler", &f.sig.ident.to_string()),
+    Span::call_site(),
+  );
+  let freturn = &f.sig.output;
+  let fblock = &f.block;
+
+  let new_fn_tokens = quote! {
+      async fn #fname(#(#params),*) #freturn
+          #fblock
+
+  };
+
+  eprintln!("TOKENS: {}", new_fn_tokens);
+
+  Ok(new_fn_tokens)
 }
 
 enum Extractor {
@@ -130,7 +162,7 @@ impl TryFrom<&syn::Path> for Extractor {
 
 fn parse_sig_param(arg: &FnArg) -> Result<TokenStream, syn::Error> {
   match arg {
-    FnArg::Receiver(_) => Ok(quote! { #arg }), // this is the self arg
+    FnArg::Receiver(_) => Ok(quote! {}), // this is the self arg
     FnArg::Typed(pat_type) => {
       let filtered: Vec<&Attribute> = pat_type
         .attrs
@@ -138,39 +170,41 @@ fn parse_sig_param(arg: &FnArg) -> Result<TokenStream, syn::Error> {
         .filter(|attr| attr.style == syn::AttrStyle::Outer)
         .collect();
 
-      let attr = if filtered.len() > 1 {
-        Err(syn::Error::new_spanned(
+      match filtered.len() {
+        0 => Ok(quote! { #arg }),
+        1 => {
+          let attr = filtered[0];
+          let extractor: Extractor = match &attr.meta {
+            syn::Meta::Path(path) => path.try_into(),
+            _ => Err(syn::Error::new_spanned(
+              attr,
+              "Attribute is not a valid extractor. Expected something like #[query]",
+            )),
+          }?;
+
+          let ident_string = match pat_type.pat.as_ref() {
+            syn::Pat::Ident(syn::PatIdent { ident, .. }) => Ok(ident),
+            _ => Err(syn::Error::new_spanned(
+              &pat_type.pat,
+              "expected a simple identifier as argument name",
+            )),
+          }?;
+
+          let ty = pat_type.ty.as_ref();
+
+          // use axum::{Json, extract::State, response::IntoResponse};
+          Ok(match extractor {
+            Extractor::Json => quote! { axum::Json(#ident_string): axum::Json<#ty> },
+            Extractor::Query => {
+              quote! { axum::extract::Query(#ident_string): axum::extract::Query<#ty> }
+            }
+          })
+        }
+        _ => Err(syn::Error::new_spanned(
           arg,
           "Must have at most 1 argument annotation, such as \"#[query]\"",
-        ))
-      } else {
-        Ok(&pat_type.attrs[0])
-      }?;
-
-      let extractor: Extractor = match &attr.meta {
-        syn::Meta::Path(path) => path.try_into(),
-        _ => Err(syn::Error::new_spanned(
-          attr,
-          "Attribute is not a valid extractor. Expected something like #[query]",
         )),
-      }?;
-
-      let ident_string = match pat_type.pat.as_ref() {
-        syn::Pat::Ident(syn::PatIdent { ident, .. }) => Ok(ident),
-        _ => Err(syn::Error::new_spanned(
-          &pat_type.pat,
-          "expected a simple identifier as argument name",
-        )),
-      }?
-      .to_string();
-
-      let ty = pat_type.ty.as_ref();
-
-      // use axum::{Json, extract::State, response::IntoResponse};
-      Ok(match extractor {
-        Extractor::Json => quote! { axum::Json(#ident_string): axum::Json(#ty) },
-        Extractor::Query => quote! { axum::Query(#ident_string): axum::Query(#ty) },
-      })
+      }
     }
   }
 }

@@ -9,8 +9,6 @@ use crate::schema::user::Model as User;
 pub const WS_URL: &str = "ws://127.0.0.1:3000";
 pub const SERVER_URL: &str = "127.0.0.1:3000";
 
-pub const OPENAPI_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/spec/openapi.json");
-
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ChatMessage {
   from: User,
