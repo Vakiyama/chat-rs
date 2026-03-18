@@ -129,9 +129,10 @@ fn parse_trait_fn(f: &ImplItemFn) -> Result<TokenStream, syn::Error> {
 
   };
 
-  eprintln!("TOKENS: {}", new_fn_tokens);
-
-  Ok(new_fn_tokens)
+  match &f.sig.asyncness {
+    Some(_) => Ok(new_fn_tokens),
+    None => Err(syn::Error::new_spanned(f, "Method must be async")),
+  }
 }
 
 enum Extractor {
