@@ -4,7 +4,7 @@ use std::{
   time::Duration,
 };
 
-use axum::{Extension, Json, extract::State, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use bytes::Bytes;
 use futures_util::{TryFutureExt, future::BoxFuture};
 use http::{Request, Response, StatusCode};
@@ -12,7 +12,7 @@ use jwt_simple::{
   claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
   prelude::{HS256Key, MACLike},
 };
-use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
+use tower_http::auth::AsyncAuthorizeRequest;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::library::resend;
@@ -55,16 +55,13 @@ enum RefreshTokenStoreError {
 }
 
 trait RefreshTokenStore {
+  #[allow(dead_code)] // used in tests
   fn new(time_tolerance: jwt_simple::prelude::Duration) -> Self;
-  // check if token exists, if not
-  // check if incoming is valid -> remove all for this user if the incoming is valid, been rotated
-  // incoming is invalid? return false, no token exists
 
-  // if token exists, check if it's valid, if so, return true
-  // if token exists, check if it's invalid, remove it and return token expired err
   async fn has(&self, token: &Token) -> Result<UserId, RefreshTokenStoreError>;
 
-  // check if incoming is valid,
+  async fn rotate(&self, old: &Token, new: Token) -> Result<(), RefreshTokenStoreError>;
+
   async fn insert(&self, token: Token) -> Result<UserId, RefreshTokenStoreError>;
 
   async fn remove(&self, token: &Token) -> Result<Option<()>, RefreshTokenStoreError>;
@@ -91,6 +88,14 @@ struct TokenUserIdReverseLookup {
 }
 
 impl RefreshTokenStore for InMemoryTokenStore {
+  fn new(time_tolerance: jwt_simple::prelude::Duration) -> Self {
+    Self {
+      time_tolerance,
+      lookups: Default::default(),
+      key: Default::default(),
+    }
+  }
+
   async fn has(&self, token: &Token) -> Result<UserId, RefreshTokenStoreError> {
     let token_uuid = get_uuid_from_token(self.key.get(), token, self.time_tolerance);
 
@@ -115,6 +120,13 @@ impl RefreshTokenStore for InMemoryTokenStore {
         None => Err(RefreshTokenStoreError::InvalidToken),
       },
     }
+  }
+
+  async fn rotate(&self, old: &Token, new: Token) -> Result<(), RefreshTokenStoreError> {
+    self.remove(old).await?;
+    self.insert(new).await?;
+
+    Ok(())
   }
 
   async fn insert(&self, token: Token) -> Result<UserId, RefreshTokenStoreError> {
@@ -195,26 +207,19 @@ impl RefreshTokenStore for InMemoryTokenStore {
 
     Ok(())
   }
-
-  fn new(time_tolerance: jwt_simple::prelude::Duration) -> Self {
-    Self {
-      time_tolerance,
-      lookups: Default::default(),
-      key: Default::default(),
-    }
-  }
 }
 
 #[derive(Default, Clone)]
-struct RouterState<Store> {
-  store: Store,
+struct RouterState<CodeStore, RefreshStore> {
+  code_store: CodeStore,
+  refresh_store: RefreshStore,
   resend: Arc<resend_rs::Resend>,
   jwt_key: JWTKey,
 }
 
 #[derive(Clone)]
-struct JWTKey {
-  key: HS256Key,
+pub struct JWTKey {
+  pub key: HS256Key,
 }
 
 impl Default for JWTKey {
@@ -242,22 +247,22 @@ const JWT_REFRESH_DURATION: Duration = Duration::from_hours(24 * 30);
 
 // ------------------------ Router ------------------------
 pub fn router() -> OpenApiRouter {
-  let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
-    .expect("Invalid JWT_KEY, decode failed")
-    .into();
+  // let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+  //   .expect("Invalid JWT_KEY, decode failed")
+  //   .into();
 
-  let key = HS256Key::from_bytes(&key_bytes);
+  // let key = HS256Key::from_bytes(&key_bytes);
 
   OpenApiRouter::new()
     .routes(routes!(login_handler))
     .routes(routes!(verify_handler))
-    .layer(
-      tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
-        key: JWTKey { key: key.into() }.into(),
-      })),
-    )
+    // .layer(
+    //   tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
+    //     key: JWTKey { key: key.into() }.into(),
+    //   })),
+    // )
     .routes(routes!(refresh_handler))
-    .with_state(RouterState::<InMemoryStore>::default())
+    .with_state(RouterState::<InMemoryStore, InMemoryTokenStore>::default())
 }
 
 #[derive(utoipa::ToSchema, serde::Serialize)]
@@ -283,18 +288,19 @@ struct LoginBody {
  )
 ]
 
-async fn login_handler<Store>(
-  State(mut state): State<RouterState<Store>>,
+async fn login_handler<C, R>(
+  State(mut state): State<RouterState<C, R>>,
   Json(payload): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, resend::Error>
 where
-  Store: CodeStore + Send + Sync + 'static,
+  C: CodeStore + Send + Sync + 'static,
+  R: RefreshTokenStore + Send + Sync + 'static,
 {
   let identifier = Uuid::new_v4();
   let code = resend::send_auth_email(&payload.email, state.resend).await?;
 
   state
-    .store
+    .code_store
     .insert(
       identifier,
       EmailCodePair {
@@ -345,12 +351,13 @@ impl IntoResponse for VerifyError {
      )
    )
 ]
-async fn verify_handler<Store>(
-  State(state): State<RouterState<Store>>,
+async fn verify_handler<C, R>(
+  State(state): State<RouterState<C, R>>,
   Json(payload): Json<VerifyBody>,
 ) -> Result<Json<VerifyResponse>, VerifyError>
 where
-  Store: CodeStore + Send + Sync + 'static,
+  C: CodeStore + Send + Sync + 'static,
+  R: RefreshTokenStore + Send + Sync + 'static,
 {
   let VerifyBody {
     identifier,
@@ -359,7 +366,7 @@ where
   } = payload;
 
   let EmailCodePair { code, email } = state
-    .store
+    .code_store
     .get_email_code_pair(&identifier)
     .await
     .map(Ok)
@@ -418,9 +425,22 @@ struct RefreshResponse {
 }
 
 pub enum RefreshError {
-  InvalidCode,
+  Unauthorized,
   UnknownIdentifier,
+  Expired,
   Internal,
+}
+
+impl From<RefreshTokenStoreError> for RefreshError {
+  fn from(value: RefreshTokenStoreError) -> Self {
+    match value {
+      RefreshTokenStoreError::InvalidToken => RefreshError::Unauthorized,
+      RefreshTokenStoreError::TokenRotatedOut | RefreshTokenStoreError::TokenExpired => {
+        RefreshError::Expired
+      }
+      RefreshTokenStoreError::NoUserWithSuchToken => RefreshError::UnknownIdentifier,
+    }
+  }
 }
 
 impl IntoResponse for RefreshError {
@@ -436,24 +456,29 @@ impl IntoResponse for RefreshError {
     request_body(content = RefreshBody, description = "Verification details for token exchange", content_type = "application/json"),
     responses(
       (status = 200, body = RefreshResponse),
-      (status = 400, description = "Missing bearer token"),
       (status = 401, description = "Unauthorized"),
+      (status = 422, description = "Missing bearer token"),
       (status = 500, description = "Internal server error"),
      )
    )
 ]
-// hemingway: refresh handler should return a refresh body, generate all new tokens, replace the
-// old refresh token in the store and give the both new tokens back
-// #[axum::debug_handler]
-async fn refresh_handler<Store>(
-  Extension(user_id): Extension<UserId>,
-  State(mut state): State<RouterState<Store>>,
+async fn refresh_handler<C, R>(
+  State(state): State<RouterState<C, R>>,
   Json(body): Json<RefreshBody>,
 ) -> Result<Json<RefreshResponse>, RefreshError>
 where
-  Store: CodeStore + Send + Sync + 'static,
+  C: CodeStore + Send + Sync + 'static,
+  R: RefreshTokenStore + Send + Sync + 'static,
 {
-  // this route is protected due to the extension for the user id
+  let RefreshBody {
+    refresh_token: incoming_refresh_token,
+  } = body;
+
+  let user_id = state
+    .refresh_store
+    .has(&incoming_refresh_token)
+    .await
+    .map_err(|err| -> RefreshError { err.into() })?;
 
   let TokenPair {
     access_token,
@@ -462,19 +487,26 @@ where
     .await
     .map_err(|_| RefreshError::Internal)?;
 
-  // state.store.
+  state
+    .refresh_store
+    .rotate(&incoming_refresh_token, refresh_token.clone())
+    .await
+    .map_err(|err| -> RefreshError { err.into() })?;
 
-  todo!();
+  Ok(Json(RefreshResponse {
+    access_token,
+    refresh_token,
+  }))
 }
 
 // Middleware
 
 #[derive(Clone)]
-struct JWTAuthorized
+pub struct JWTAuthorized
 where
   JWTKey: 'static,
 {
-  key: Arc<JWTKey>,
+  pub key: Arc<JWTKey>,
 }
 
 impl AsyncAuthorizeRequest<axum::body::Body> for JWTAuthorized {
@@ -526,7 +558,7 @@ fn get_uuid_from_token(
   Uuid::parse_str(&subject).ok()
 }
 
-// ----------------------------------- (mostly) LLM generated unit tests for RefreshTokenStore ---------------------------
+// ---------------------------- (mostly) LLM generated unit tests for RefreshTokenStore ---------------------------
 
 #[cfg(test)]
 mod tests {
@@ -580,18 +612,12 @@ mod tests {
     let token1 = make_valid_token(key, user_id);
     let token2 = make_valid_token(key, user_id);
 
+    store.insert(token1.clone()).await.unwrap();
+
     store
-      .insert(token1.clone())
+      .rotate(&token1, token2)
       .await
-      .expect("Token1 inserts successfully");
-    store
-      .remove(&token1)
-      .await
-      .expect("Token1 removes successfully");
-    store
-      .insert(token2)
-      .await
-      .expect("Token2 inserts successfully");
+      .expect("Rotation succeeds");
 
     let result = store.has(&token1).await;
     assert!(matches!(
