@@ -1,9 +1,6 @@
-use std::{
-  fs,
-  sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use chat_rs::{OPENAPI_SPEC_PATH, SERVER_URL};
+use chat_rs::SERVER_URL;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_swagger_ui::SwaggerUi;
 

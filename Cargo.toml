@@ -29,6 +29,7 @@ http = "1.4.0"
 anyhow = "1.0.102"
 tower = "0.5.3"
 spec-derive = { path = "spec-derive" }
+reqwest = "0.13.2"
 
 [dependencies.uuid]
 version = "1.19.0"

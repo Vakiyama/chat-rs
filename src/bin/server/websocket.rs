@@ -1,7 +1,5 @@
-use futures_util::TryFutureExt;
 use std::{
   collections::HashMap,
-  marker::PhantomData,
   sync::{Arc, Mutex},
 };
 
@@ -16,27 +14,6 @@ type Sender<T> = tokio::sync::mpsc::Sender<T>;
 
 pub struct State {
   pub tx: Sender<Bytes>,
-}
-
-#[derive(Clone, Copy)]
-struct Id<Type> {
-  value: Uuid,
-  _marker: PhantomData<Type>,
-}
-
-impl<T> Default for Id<T> {
-  fn default() -> Self {
-    Self {
-      value: Uuid::new_v4(),
-      _marker: Default::default(),
-    }
-  }
-}
-
-impl<T> PartialEq for Id<T> {
-  fn eq(&self, other: &Self) -> bool {
-    self.value == other.value
-  }
 }
 
 enum Error {

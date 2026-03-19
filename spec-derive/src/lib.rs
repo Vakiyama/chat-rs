@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
+use quote::quote;
 use syn::Item;
-// extern crate syn;
 
 mod generate;
 
@@ -17,6 +17,47 @@ pub fn generate(_metadata: TokenStream, input: TokenStream) -> TokenStream {
     .to_compile_error();
 
     TokenStream::from(error)
+  }
+}
+
+#[proc_macro_attribute]
+pub fn client(_metadata: TokenStream, input: TokenStream) -> TokenStream {
+  let item: Item = syn::parse(input).expect("Failed to parse input");
+  if let Item::Struct(item_struct) = item {
+    let ident = &item_struct.ident;
+    let vis = &item_struct.vis;
+
+    let struct_tokens = quote! {
+      #vis struct #ident {
+          pub inner: reqwest::Client,
+          pub base_url: std::sync::Arc<String>,
+      }
+    };
+
+    let new_impl = quote! {
+        impl #ident {
+            #vis fn new(base_url: impl Into<String>) -> Self {
+                Self {
+                    inner: reqwest::Client::new(),
+                    base_url: std::sync::Arc::new(base_url.into())
+                }
+            }
+        }
+    };
+
+    let tokens = quote! {
+        #struct_tokens
+
+        #new_impl
+    };
+
+    eprintln!("{tokens}");
+
+    tokens.into()
+  } else {
+    syn::Error::new_spanned(item, "This attribute can only be applied to a struct")
+      .to_compile_error()
+      .into()
   }
 }
 
@@ -64,3 +105,10 @@ pub fn generate(_metadata: TokenStream, input: TokenStream) -> TokenStream {
 // 2.
 // a reqwest client, sharing the api interface. we can encode/decode everything as json for now for
 // simplicity, allowing axum extractors to handle the incoming.
+//
+// ideally, we'd support more than just json wrapped responses
+// we can try and use trait bounds on the responses
+// axum expects reponses to impl Into<axum::response>, so that side is handled
+// we can add our own trait bound to go from axum::response -> T
+// in the client, we call this trait method
+// this gives users full control over both ends

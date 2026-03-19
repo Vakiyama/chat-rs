@@ -116,6 +116,11 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   // the handlers, which will be used in the defined router
   // the handlers shouldn't have to pollute the name space
 
+  // for the client, we want each macro to derive a new body for each
+  // fn that handles the client side of the request, still generating that
+  // same impl.
+  // the api client should be derived from some struct
+
   let router_handlers = quote! {
       #router
 

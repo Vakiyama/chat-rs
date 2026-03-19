@@ -1,7 +1,6 @@
 use iced::widget::container;
 use iced::{Element, Subscription};
 
-mod message;
 mod websocket;
 
 use crate::model::{Auth, Screen};
