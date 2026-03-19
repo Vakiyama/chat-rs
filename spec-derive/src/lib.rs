@@ -112,3 +112,11 @@ pub fn client(_metadata: TokenStream, input: TokenStream) -> TokenStream {
 // we can add our own trait bound to go from axum::response -> T
 // in the client, we call this trait method
 // this gives users full control over both ends
+//
+//
+// for simplicity, we'll handle json only for now
+// we create a decode trait that goes from a reqwest response to T
+// we can create a blanket impl for T using Json if T: Deserialize
+// we can create our own ApiError enum generated alongside the client
+// this will have two enums: ReqwestError, ServerError, or decode error where SE is our
+// error type from the client (so it's generic)

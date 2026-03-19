@@ -1,5 +1,6 @@
 use axum::{Json, response::IntoResponse};
 use spec_derive::{client, generate};
+use spec_derive_core::E;
 
 #[derive(serde::Serialize)]
 struct Room {
@@ -27,10 +28,10 @@ trait RoomsApi {
 }
 
 #[client]
-pub struct ApiClient;
+pub struct Api;
 
 #[generate]
-impl RoomsApi for ApiClient {
+impl RoomsApi for Api {
   #[http(GET, "/room")]
   async fn get_room(&self, #[query] id: u8) -> Result<RoomResponse, ApiError> {
     Ok(Json(Room {
@@ -49,6 +50,6 @@ impl RoomsApi for ApiClient {
 }
 
 fn test() {
-  let client = ApiClient::new("localhost:3000");
+  let client = Api::new("localhost:3000");
   todo!()
 }

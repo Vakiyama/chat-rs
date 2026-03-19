@@ -959,6 +959,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "spec-derive",
+ "spec-derive-core",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -5949,6 +5950,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "spec-derive-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

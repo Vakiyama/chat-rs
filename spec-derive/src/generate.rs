@@ -1,7 +1,10 @@
 use darling::FromMeta;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::{Attribute, FnArg, ImplItem, ImplItemFn, ItemImpl, LitStr, Token, parse::Parse};
+use syn::{
+  Attribute, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, LitStr, PathArguments,
+  ReturnType, Token, Type, parse::Parse,
+};
 
 // the actual impl:
 // pub struct ItemImpl {
@@ -34,7 +37,7 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   //   .map(|impl_item: &ImplItem| parse_item_into_handler(impl_item))
   //   .collect();
 
-  let with_http: Vec<Result<(TokenStream, Http, &syn::Ident), syn::Error>> = items
+  let with_http: Vec<Result<(GeneratedFns, Http, &syn::Ident), syn::Error>> = items
     .iter()
     .map(|impl_item: &ImplItem| parse_item_into_handler(impl_item))
     .collect();
@@ -42,7 +45,7 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   let routes: TokenStream = with_http
     .iter()
     .filter_map(|item| item.as_ref().ok())
-    .map(|(_, http, ident): &(TokenStream, Http, &syn::Ident)| {
+    .map(|(_, http, ident): &(GeneratedFns, Http, &syn::Ident)| {
       let axum_method = http.method.as_axum_fn();
       let path = http.path.value();
       let stringified_ident = ident.to_string();
@@ -55,7 +58,9 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
     })
     .collect();
 
-  let router_name = match &item_impl.trait_ {
+  let trait_name = &item_impl.trait_;
+
+  let (router_name, client_trait) = match trait_name {
     Some((_, path, _)) => path
       .segments
       .last()
@@ -79,7 +84,9 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
         let router_name: syn::Ident = syn::Ident::from_string(&router_name.to_lowercase()).unwrap();
 
-        quote! { #router_name }
+        let client_trait = syn::Ident::from_string(format!("{trait_name}Client").as_str()).unwrap();
+
+        (quote! { #router_name }, quote! { #client_trait })
       })
       .ok_or(
         syn::Error::new_spanned(&item_impl, "Failed to find type name for trait impl")
@@ -90,7 +97,7 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
         .to_compile_error(),
     ),
   }
-  .unwrap_or_else(|e| e);
+  .unwrap_or_else(|e| (e, TokenStream::new()));
 
   let router = quote! {
     pub fn #router_name() -> axum::Router {
@@ -100,10 +107,20 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   };
 
   let parsed_handlers: TokenStream = with_http
+    .iter()
+    .map(|item| {
+      item
+        .as_ref()
+        .map(|item| item.0.server_handler.clone())
+        .unwrap_or_else(|e| e.to_compile_error())
+    })
+    .collect();
+
+  let parsed_client_trait: TokenStream = with_http
     .into_iter()
     .map(|item| {
       item
-        .map(|item| item.0)
+        .map(|item| item.0.client_trait_method)
         .unwrap_or_else(|e| e.to_compile_error())
     })
     .collect();
@@ -121,10 +138,17 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   // same impl.
   // the api client should be derived from some struct
 
+  let self_ty = &item_impl.self_ty;
+
   let router_handlers = quote! {
       #router
 
       #parsed_handlers
+
+      impl #client_trait for #self_ty {
+        #parsed_client_trait
+      }
+
   };
 
   eprintln!("{router_handlers}");
@@ -134,13 +158,16 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
 fn parse_item_into_handler(
   impl_item: &ImplItem,
-) -> Result<(TokenStream, Http, &syn::Ident), syn::Error> {
+) -> Result<(GeneratedFns, Http, &syn::Ident), syn::Error> {
   match impl_item {
-    ImplItem::Fn(impl_item_fn) => Ok((
-      parse_trait_fn(impl_item_fn)?,
-      find_http_attr(impl_item_fn)?,
-      &impl_item_fn.sig.ident,
-    )),
+    ImplItem::Fn(impl_item_fn) => {
+      let http = find_http_attr(impl_item_fn)?;
+      Ok((
+        parse_trait_fn(impl_item_fn, &http)?,
+        http,
+        &impl_item_fn.sig.ident,
+      ))
+    }
     _ => Err(syn::Error::new_spanned(
       impl_item,
       "Trait item must be a function.",
@@ -164,6 +191,16 @@ impl HttpMethod {
       HttpMethod::Put => quote! { axum::routing::put },
       HttpMethod::Delete => quote! { axum::routing::delete },
       HttpMethod::Patch => quote! { axum::routing::patch },
+    }
+  }
+
+  pub fn as_reqwest_fn(&self) -> proc_macro2::TokenStream {
+    match self {
+      HttpMethod::Get => quote! { get },
+      HttpMethod::Post => quote! { post },
+      HttpMethod::Put => quote! { put },
+      HttpMethod::Delete => quote! { delete },
+      HttpMethod::Patch => quote! { patch },
     }
   }
 }
@@ -207,11 +244,16 @@ impl Parse for Http {
   }
 }
 
-fn parse_trait_fn(f: &ImplItemFn) -> Result<TokenStream, syn::Error> {
+struct GeneratedFns {
+  client_trait_method: TokenStream,
+  server_handler: TokenStream,
+}
+
+fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Error> {
   // we need to rebuild the arguments from #[body] request: SomeType, #[query] ... into
   // Json(request): SomeType, Query(query): ...
 
-  let new_params: Result<Vec<TokenStream>, syn::Error> = f
+  let new_params: Result<Vec<TransformedArgs>, syn::Error> = f
     .sig
     .inputs
     .iter()
@@ -219,7 +261,18 @@ fn parse_trait_fn(f: &ImplItemFn) -> Result<TokenStream, syn::Error> {
     .map(parse_sig_param)
     .collect();
 
-  let params = new_params?;
+  let with_extractors: Vec<TokenStream> = new_params
+    .clone()?
+    .iter()
+    .map(|transformed_args| transformed_args.with_extractors.clone())
+    .collect();
+
+  // bridge: pass along correct params when constructing the json body
+  let param_idents: Vec<TokenStream> = new_params
+    .clone()?
+    .iter()
+    .map(|p| p.ident.clone()) // just the name, no type
+    .collect();
 
   // at this point, we have the new params list, we can create the handler
 
@@ -232,13 +285,56 @@ fn parse_trait_fn(f: &ImplItemFn) -> Result<TokenStream, syn::Error> {
 
   let new_fn_tokens = quote! {
       #[axum::debug_handler]
-      async fn #fname(#(#params),*) #freturn
+      async fn #fname(#(#with_extractors),*) #freturn
           #fblock
 
   };
 
+  let ResultTypes { ok_ty, err_ty } = extract_result_types(&f.sig.output)?;
+
+  let method_fn = http.method.as_reqwest_fn();
+  let url_fmt = &http.path;
+
+  let original_params: TokenStream = new_params?
+    .iter()
+    .map(|transformed_args| transformed_args.no_attrs.clone())
+    .collect();
+
+  let client_trait_method = quote! {
+      async fn #fname(#original_params)
+          -> Result<#ok_ty, spec_derive_core::RequestError<#err_ty>>
+      {
+          let res = self.inner
+              .#method_fn(format!("{}{}", self.base_url, #url_fmt))
+              .send()
+              .await
+              .map_err(spec_derive_core::RequestError::Network)?;
+
+          if !res.status().is_success() {
+              let bytes = res.bytes()
+                  .await
+                  .map_err(spec_derive_core::RequestError::Network)?;
+
+              let server_err = <#err_ty as spec_derive_core::Decode>::decode(bytes)
+                  .map_err(spec_derive_core::RequestError::Decode)?;
+
+              return Err(spec_derive_core::RequestError::Server(server_err));
+          }
+
+          let bytes = res.bytes()
+              .await
+              .map_err(spec_derive_core::RequestError::Network)?;
+
+          <#ok_ty as spec_derive_core::Decode>::decode(bytes)
+              .map_err(spec_derive_core::RequestError::Decode)
+      }
+  };
+
   match &f.sig.asyncness {
-    Some(_) => Ok(new_fn_tokens),
+    Some(_) => Ok(GeneratedFns {
+      client_trait_method,
+      server_handler: new_fn_tokens,
+    }),
     None => Err(syn::Error::new_spanned(f, "Method must be async")),
   }
 }
@@ -269,9 +365,20 @@ impl TryFrom<&syn::Path> for Extractor {
   }
 }
 
-fn parse_sig_param(arg: &FnArg) -> Result<TokenStream, syn::Error> {
+#[derive(Clone)]
+struct TransformedArgs {
+  ident: TokenStream,
+  no_attrs: TokenStream,
+  with_extractors: TokenStream,
+}
+
+fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
   match arg {
-    FnArg::Receiver(_) => Ok(quote! {}), // this is the self arg
+    FnArg::Receiver(pat_receiv) => Ok(TransformedArgs {
+      ident: quote! { self },
+      no_attrs: quote! {#pat_receiv},
+      with_extractors: quote! {},
+    }), // this is the self arg
     FnArg::Typed(pat_type) => {
       let filtered: Vec<&Attribute> = pat_type
         .attrs
@@ -279,8 +386,20 @@ fn parse_sig_param(arg: &FnArg) -> Result<TokenStream, syn::Error> {
         .filter(|attr| attr.style == syn::AttrStyle::Outer)
         .collect();
 
+      let ident_string = match pat_type.pat.as_ref() {
+        syn::Pat::Ident(syn::PatIdent { ident, .. }) => Ok(ident),
+        _ => Err(syn::Error::new_spanned(
+          &pat_type.pat,
+          "expected a simple identifier as argument name",
+        )),
+      }?;
+
       match filtered.len() {
-        0 => Ok(quote! { #arg }),
+        0 => Ok(TransformedArgs {
+          ident: quote! { #ident_string },
+          no_attrs: quote! { #arg },
+          with_extractors: quote! { #arg },
+        }),
         1 => {
           let attr = filtered[0];
           let extractor: Extractor = match &attr.meta {
@@ -302,11 +421,15 @@ fn parse_sig_param(arg: &FnArg) -> Result<TokenStream, syn::Error> {
           let ty = pat_type.ty.as_ref();
 
           // use axum::{Json, extract::State, response::IntoResponse};
-          Ok(match extractor {
-            Extractor::Json => quote! { axum::Json(#ident_string): axum::Json<#ty> },
-            Extractor::Query => {
-              quote! { axum::extract::Query(#ident_string): axum::extract::Query<#ty> }
-            }
+          Ok(TransformedArgs {
+            ident: quote! { #ident_string },
+            with_extractors: match extractor {
+              Extractor::Json => quote! { axum::Json(#ident_string): axum::Json<#ty> },
+              Extractor::Query => {
+                quote! { axum::extract::Query(#ident_string): axum::extract::Query<#ty> }
+              }
+            },
+            no_attrs: quote! { #ident_string: #ty },
           })
         }
         _ => Err(syn::Error::new_spanned(
@@ -335,4 +458,94 @@ fn find_http_attr(f: &ImplItemFn) -> Result<Http, syn::Error> {
       format!("Failed to parse http attribute with error {}", e),
     )
   })
+}
+
+pub struct ResultTypes {
+  pub ok_ty: Type,
+  pub err_ty: Type,
+}
+
+pub fn extract_result_types(output: &ReturnType) -> syn::Result<ResultTypes> {
+  let ty = match output {
+    ReturnType::Type(_, ty) => ty.as_ref(),
+    ReturnType::Default => {
+      return Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "handler must return a Result<T, E> type",
+      ));
+    }
+  };
+
+  extract_from_type(ty)
+}
+
+fn extract_from_type(ty: &Type) -> syn::Result<ResultTypes> {
+  let type_path = match ty {
+    Type::Path(tp) => tp,
+    _ => {
+      return Err(syn::Error::new_spanned(
+        ty,
+        "expected a Result<T, E> return type",
+      ));
+    }
+  };
+
+  let segment = type_path
+    .path
+    .segments
+    .last()
+    .ok_or_else(|| syn::Error::new_spanned(ty, "empty type path"))?;
+
+  if segment.ident != "Result" {
+    return Err(syn::Error::new_spanned(
+      &segment.ident,
+      format!("expected Result<T, E>, found `{}`", segment.ident),
+    ));
+  }
+
+  let angle_args = match &segment.arguments {
+    PathArguments::AngleBracketed(args) => args,
+    _ => {
+      return Err(syn::Error::new_spanned(
+        segment,
+        "Result must have angle bracket arguments: Result<T, E>",
+      ));
+    }
+  };
+
+  let mut args = angle_args.args.iter();
+
+  let ok_ty = match args.next() {
+    Some(GenericArgument::Type(ty)) => ty.clone(),
+    Some(other) => {
+      return Err(syn::Error::new_spanned(
+        other,
+        "expected a type as the first argument of Result",
+      ));
+    }
+    None => {
+      return Err(syn::Error::new_spanned(
+        angle_args,
+        "Result is missing its Ok type argument",
+      ));
+    }
+  };
+
+  let err_ty = match args.next() {
+    Some(GenericArgument::Type(ty)) => ty.clone(),
+    Some(other) => {
+      return Err(syn::Error::new_spanned(
+        other,
+        "expected a type as the second argument of Result",
+      ));
+    }
+    None => {
+      return Err(syn::Error::new_spanned(
+        angle_args,
+        "Result is missing its Err type argument",
+      ));
+    }
+  };
+
+  Ok(ResultTypes { ok_ty, err_ty })
 }
