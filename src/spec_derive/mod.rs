@@ -1,15 +1,25 @@
+use axum::{Json, response::IntoResponse};
 use spec_derive::generate;
 
 struct Api;
 
-struct RoomResponse {
+#[derive(serde::Serialize)]
+struct Room {
   id: u64,
   name: String,
 }
 
+type RoomResponse = axum::Json<Room>;
+
 enum ApiError {
   Internal,
   BadId,
+}
+
+impl IntoResponse for ApiError {
+  fn into_response(self) -> axum::response::Response {
+    todo!()
+  }
 }
 
 trait RoomsApi {
@@ -20,17 +30,23 @@ trait RoomsApi {
 
 #[generate]
 impl RoomsApi for Api {
-  async fn get_room(&self, id: u64) -> Result<RoomResponse, ApiError> {
-    Ok(RoomResponse {
-      id,
+  #[http(GET, "/room")]
+  async fn get_room(&self, #[query] id: u8) -> Result<RoomResponse, ApiError> {
+    Ok(Json(Room {
+      id: id.into(),
       name: "general".into(),
-    })
+    }))
   }
 
-  // hemingway: compose the handlers into router, actually use the http annotation in this
-  // composition
   #[http(POST, "/create")]
-  async fn create_room(&self, new_id: u64, #[body] name: String) -> Result<RoomResponse, ApiError> {
-    Ok(RoomResponse { id: new_id, name })
+  async fn create_room(&self, #[json] name: String) -> Result<RoomResponse, ApiError> {
+    Ok(Json(Room {
+      id: u64::default(),
+      name,
+    }))
   }
+}
+
+fn test() {
+  rooms_api_handler();
 }

@@ -252,6 +252,7 @@ pub fn router() -> OpenApiRouter {
   //   .into();
 
   // let key = HS256Key::from_bytes(&key_bytes);
+  //  axum::Router::new().route(path, method_router)
 
   OpenApiRouter::new()
     .routes(routes!(login_handler))
