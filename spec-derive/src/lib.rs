@@ -1,14 +1,63 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::Item;
+use syn::{
+  LitStr, Token, Type,
+  parse::{Parse, ParseStream},
+};
+
+use crate::generate::GenerateArgs;
 
 mod generate;
 
+impl Parse for GenerateArgs {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let mut router = None;
+    let mut state = None;
+
+    while !input.is_empty() {
+      let key: syn::Ident = input.parse()?;
+      input.parse::<Token![=]>()?;
+
+      match key.to_string().as_str() {
+        "router" => {
+          let lit: LitStr = input.parse()?;
+          router = Some(lit.value());
+        }
+        "state" => {
+          // parse everything up to the next comma or end as a Type
+          let ty: Type = input.parse()?;
+          state = Some(ty);
+        }
+        other => {
+          return Err(syn::Error::new_spanned(
+            key,
+            format!("unknown argument `{other}`"),
+          ));
+        }
+      }
+
+      if input.peek(Token![,]) {
+        input.parse::<Token![,]>()?;
+      }
+    }
+
+    Ok(GenerateArgs {
+      router: router.ok_or_else(|| {
+        syn::Error::new(proc_macro2::Span::call_site(), "missing `router` argument")
+      })?,
+      state,
+    })
+  }
+}
+
 #[proc_macro_attribute]
-pub fn generate(_metadata: TokenStream, input: TokenStream) -> TokenStream {
+pub fn generate(metadata: TokenStream, input: TokenStream) -> TokenStream {
+  let args: GenerateArgs = syn::parse_macro_input!(metadata);
+
   let item: Item = syn::parse(input).expect("failed to parse input");
   if let Item::Impl(item_impl) = item {
-    generate::handle_trait(item_impl).into()
+    generate::handle_trait(item_impl, args).into()
   } else {
     let error = syn::Error::new_spanned(
       item,

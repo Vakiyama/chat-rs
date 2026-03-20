@@ -1,11 +1,10 @@
 use std::sync::{Arc, Mutex};
 
-use chat_rs::SERVER_URL;
-use utoipa_axum::router::OpenApiRouter;
-use utoipa_swagger_ui::SwaggerUi;
+use axum::Router;
+use chat_rs::{SERVER_URL, spec};
+use tower_http::trace::TraceLayer;
 
 mod api;
-mod library;
 mod websocket;
 
 #[tokio::main]
@@ -16,37 +15,19 @@ async fn main() {
 
   let manager = Arc::new(Mutex::new(websocket::Manager::default()));
 
-  let (app, mut api_spec) = OpenApiRouter::new()
+  // initialize the tracing subscriber — do this first
+  tracing_subscriber::fmt()
+    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .init();
+
+  let app = Router::new()
     .route(
       "/",
       axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
     )
     .with_state(state)
-    .nest("/api", api::router())
-    .split_for_parts();
-
-  api_spec.info.title = "ChatRS API".into();
-  api_spec.info.description = Some("Documentation for the ChatRS open api".into());
-  api_spec.info.contact = None;
-  api_spec.info.license = None;
-
-  let app = app
-    // .route(
-    //   "/api-docs/openapi.json",
-    //   axum::routing::get({ move || async move { axum::Json(api_spec) } }),
-    // )
-    .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", api_spec));
-
-  // let stringified = api_spec.to_json().expect("Api writes to json").to_string();
-
-  // println!(
-  //   "Writing openapi spec to disk at '{}' ...",
-  //   OPENAPI_SPEC_PATH
-  // );
-
-  // fs::write(OPENAPI_SPEC_PATH, stringified)
-  //   .expect("Critical: failed to write openapi.json to disk");
-  // println!("Done! \n");
+    .nest("/api", spec::auth::auth_handler())
+    .layer(TraceLayer::new_for_http()); // ← just this, no ServiceBuilder needed
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 

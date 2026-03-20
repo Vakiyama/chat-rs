@@ -31,6 +31,7 @@ tower = "0.5.3"
 spec-derive = { path = "spec-derive" }
 spec-derive-core = { path = "spec-derive-core" }
 reqwest = "0.13.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dependencies.uuid]
 version = "1.19.0"

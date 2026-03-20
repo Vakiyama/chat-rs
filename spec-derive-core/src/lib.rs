@@ -3,7 +3,7 @@ use bytes::Bytes;
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError<E>
 where
-  E: std::fmt::Debug + std::fmt::Display,
+  E: std::fmt::Debug, //+ std::fmt::Display,
 {
   #[error("network error: {0}")]
   Network(#[from] reqwest::Error),

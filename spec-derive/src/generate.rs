@@ -26,8 +26,17 @@ use syn::{
 //  Macro(ImplItemMacro),
 //  Verbatim(TokenStream),
 //}
+//
+pub struct GenerateArgs {
+  pub router: String,
+  pub state: Option<Type>,
+}
 
-pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
+pub fn handle_trait(item_impl: ItemImpl, generate_args: GenerateArgs) -> TokenStream {
+  let GenerateArgs {
+    router: router_name,
+    state,
+  } = generate_args;
   // each item can be turned into the naked tokenstream fn using quote!
   // we can then quote! compose these later
   let items = &item_impl.items;
@@ -72,51 +81,30 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
     )
     .collect();
 
-  let trait_name = &item_impl.trait_;
-
-  let (router_name, client_trait) = match trait_name {
-    Some((_, path, _)) => path
-      .segments
-      .last()
-      .map(|seg| {
-        let trait_name = seg.ident.to_string();
-
-        let mut router_name: Vec<char> = format!("{trait_name}_handler")
-          .chars()
-          .flat_map(|char: char| {
-            if char.is_uppercase() {
-              vec!['_', char]
-            } else {
-              vec![char]
-            }
-          })
-          .collect();
-
-        router_name.remove(0);
-
-        let router_name: String = router_name.into_iter().collect();
-
-        let router_name: syn::Ident = syn::Ident::from_string(&router_name.to_lowercase()).unwrap();
-
-        let client_trait = syn::Ident::from_string(format!("{trait_name}Client").as_str()).unwrap();
-
-        (quote! { #router_name }, quote! { #client_trait })
+  let router_name_handler = {
+    let router_name: Vec<char> = format!("{router_name}_handler")
+      .chars()
+      .flat_map(|char: char| {
+        if char.is_uppercase() {
+          vec!['_', char]
+        } else {
+          vec![char]
+        }
       })
-      .ok_or(
-        syn::Error::new_spanned(&item_impl, "Failed to find type name for trait impl")
-          .to_compile_error(),
-      ),
-    None => Err(
-      syn::Error::new_spanned(&item_impl, "Failed to find type name for trait impl")
-        .to_compile_error(),
-    ),
-  }
-  .unwrap_or_else(|e| (e, TokenStream::new()));
+      .collect();
+
+    let router_name: String = router_name.into_iter().collect();
+
+    let router_name: syn::Ident = syn::Ident::from_string(&router_name.to_lowercase()).unwrap();
+
+    quote! { #router_name }
+  };
 
   let router = quote! {
-    pub fn #router_name() -> axum::Router {
+    pub fn #router_name_handler() -> axum::Router {
         axum::Router::new()
             #routes
+            .with_state(#state::default())
     }
   };
 
@@ -175,6 +163,14 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
   let self_ty = &item_impl.self_ty;
 
+  let client_trait = syn::Ident::new(
+    &format!(
+      "{}Client",
+      capitalize(&router_name.to_string()) // "rooms" -> "RoomsClient"
+    ),
+    Span::call_site(),
+  );
+
   let router_handlers = quote! {
       #router
 
@@ -189,9 +185,15 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
       }
   };
 
-  eprintln!("{router_handlers}");
-
   router_handlers
+}
+
+fn capitalize(s: &str) -> String {
+  let mut c = s.chars();
+  match c.next() {
+    None => String::new(),
+    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+  }
 }
 
 fn parse_item_into_handler(
@@ -217,21 +219,39 @@ fn parse_item_into_handler(
 }
 
 fn parse_trait_fn_layer(f: &ImplItemFn) -> GeneratedFns {
-  let fname_handler = syn::Ident::new(
-    &format!("{}_layer", &f.sig.ident.to_string()),
-    Span::call_site(),
-  );
-
+  let fname = &f.sig.ident;
+  let fname_layer = syn::Ident::new(&format!("{}_layer", fname), Span::call_site());
   let freturn = &f.sig.output;
-
   let fblock = &f.block;
+
+  // Extract the return type to use in the bound assertion
+  let layer_ty = match &f.sig.output {
+    syn::ReturnType::Type(_, ty) => quote! { #ty },
+    syn::ReturnType::Default => quote! { () },
+  };
 
   GeneratedFns {
     client_trait_method: quote! {},
     client_trait_sig: quote! {},
     server_handler: quote! {
-          fn #fname_handler() #freturn
-              #fblock
+        fn #fname_layer() #freturn #fblock
+
+        // Compile-time assertion: the return type satisfies axum's layer bounds
+        const _: () = {
+            fn _assert_layer<L>()
+            where
+                L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+                L::Service: tower::Service<axum::http::Request<axum::body::Body>>
+                    + Clone + Send + Sync + 'static,
+                <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Response:
+                    axum::response::IntoResponse + 'static,
+                <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Error:
+                    Into<std::convert::Infallible> + 'static,
+                <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future:
+                    Send + 'static,
+            {}
+            fn _check() { _assert_layer::<#layer_ty>(); }
+        };
     },
   }
 }
@@ -344,10 +364,12 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
   );
   let freturn = &f.sig.output;
   let fblock = &f.block;
+  let fgeneric = &f.sig.generics;
+  let fbounds = &f.sig.generics.where_clause;
 
-  let new_fn_tokens = quote! {
-      #[axum::debug_handler]
-      async fn #fname_handler(#(#with_extractors),*) #freturn
+  let server_handler = quote! {
+      // #[axum::debug_handler]
+      async fn #fname_handler #fgeneric(#(#with_extractors),*) #freturn #fbounds
           #fblock
 
   };
@@ -360,6 +382,7 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
   let original_params: TokenStream = new_params
     .clone()?
     .iter()
+    .filter(|arg| !matches!(arg.arg_type, Some(ArgType::State)))
     .map(|transformed_args| transformed_args.no_attrs.clone())
     .collect();
 
@@ -439,7 +462,7 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
     Some(_) => Ok(GeneratedFns {
       client_trait_method,
       client_trait_sig,
-      server_handler: new_fn_tokens,
+      server_handler,
     }),
     None => Err(syn::Error::new_spanned(f, "Method must be async")),
   }
@@ -448,6 +471,7 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
 enum Extractor {
   Json,
   Query,
+  State,
   // ...
 }
 
@@ -463,6 +487,7 @@ impl TryFrom<&syn::Path> for Extractor {
     match ident.to_string().to_uppercase().as_str() {
       "JSON" => Ok(Extractor::Json),
       "QUERY" => Ok(Extractor::Query),
+      "STATE" => Ok(Extractor::State),
       _ => Err(syn::Error::new_spanned(
         ident,
         format!("unknown extractor `{ident}`, expected json, query, etc..."),
@@ -475,6 +500,7 @@ impl TryFrom<&syn::Path> for Extractor {
 enum ArgType {
   Body,
   Query,
+  State,
 }
 
 #[derive(Clone)]
@@ -525,8 +551,10 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
             )),
           }?;
 
-          let ident_string = match pat_type.pat.as_ref() {
-            syn::Pat::Ident(syn::PatIdent { ident, .. }) => Ok(ident),
+          let (ident, mutability) = match pat_type.pat.as_ref() {
+            syn::Pat::Ident(syn::PatIdent {
+              ident, mutability, ..
+            }) => Ok((ident, mutability)),
             _ => Err(syn::Error::new_spanned(
               &pat_type.pat,
               "expected a simple identifier as argument name",
@@ -537,17 +565,21 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
 
           // use axum::{Json, extract::State, response::IntoResponse};
           Ok(TransformedArgs {
-            ident: quote! { #ident_string },
+            ident: quote! { #ident },
             with_extractors: match extractor {
-              Extractor::Json => quote! { axum::Json(#ident_string): axum::Json<#ty> },
+              Extractor::Json => quote! { axum::Json(#ident): axum::Json<#ty> },
               Extractor::Query => {
-                quote! { axum::extract::Query(#ident_string): axum::extract::Query<#ty> }
+                quote! { axum::extract::Query(#ident): axum::extract::Query<#ty> }
+              }
+              Extractor::State => {
+                quote! { axum::extract::State(#mutability #ident): axum::extract::State<#ty> }
               }
             },
             no_attrs: quote! { #ident_string: #ty },
             arg_type: match extractor {
               Extractor::Json => Some(ArgType::Body),
               Extractor::Query => Some(ArgType::Query),
+              Extractor::State => Some(ArgType::State),
             },
           })
         }

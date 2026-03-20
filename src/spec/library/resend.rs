@@ -8,16 +8,16 @@ use rand::RngExt;
 use rand::distr::Alphanumeric;
 use resend_rs::types::CreateEmailBaseOptions;
 use resend_rs::{Resend, Result};
+use serde::Deserialize;
 
 const FROM: &str = "ChatRS <chatrs@resend.dev>";
 const SUBJECT: &str = "Login Code";
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub enum Error {
-  Api(resend_rs::Error),
-  EmailValidation(email_address::Error),
+  Api(String),
+  EmailValidation(String),
 }
-
 impl IntoResponse for Error {
   fn into_response(self) -> axum::response::Response {
     match self {
@@ -34,7 +34,8 @@ impl IntoResponse for Error {
 pub async fn send_auth_email(to: &String, resend: Arc<Resend>) -> Result<String, Error> {
   let _env = dotenv().unwrap();
 
-  let _valid = email_address::EmailAddress::from_str(to).map_err(Error::EmailValidation)?;
+  let _valid =
+    email_address::EmailAddress::from_str(to).map_err(|e| Error::EmailValidation(e.to_string()))?;
 
   let chars = {
     let mut rng = rand::rng();
@@ -48,7 +49,11 @@ pub async fn send_auth_email(to: &String, resend: Arc<Resend>) -> Result<String,
   let email = CreateEmailBaseOptions::new(FROM, [to], SUBJECT)
     .with_html(&format!("Your login code is: {}", chars));
 
-  let _result = resend.emails.send(email).await.map_err(Error::Api)?;
+  let _result = resend
+    .emails
+    .send(email)
+    .await
+    .map_err(|e| Error::Api(e.to_string()))?;
 
   Ok(chars)
 }

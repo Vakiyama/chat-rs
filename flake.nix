@@ -79,6 +79,10 @@
                 name = "RUST_BACKTRACE";
                 value = "0";
               }
+              {
+                name = "RUST_LOG";
+                value = "debug cargo run";
+              }
             ];
           };
         };
