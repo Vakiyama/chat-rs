@@ -1,7 +1,9 @@
 use std::fmt::Display;
+use tower_http::trace::TraceLayer;
 
 use axum::{Json, response::IntoResponse};
 use spec_derive::{client, generate};
+use tower::{ServiceBuilder, timeout::TimeoutLayer};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Room {
@@ -33,6 +35,7 @@ impl IntoResponse for ApiError {
   }
 }
 
+#[allow(dead_code)]
 trait RoomsApi {
   async fn get_room(&self, id: u64) -> Result<Room, ApiError>;
 
@@ -52,6 +55,18 @@ impl RoomsApi for Api {
     })
   }
 
+  #[layer]
+  fn with_timeout<T>() -> tower::ServiceBuilder<
+    tower::layer::util::Stack<
+      tower_http::trace::TraceLayer<
+        tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+      >,
+      tower::layer::util::Identity,
+    >,
+  > {
+    ServiceBuilder::new().layer(TraceLayer::new_for_http())
+  }
+
   #[http(POST, "/create")]
   async fn create_room(&self, #[json] name: String) -> Result<Room, ApiError> {
     Ok(Room {
@@ -61,8 +76,11 @@ impl RoomsApi for Api {
   }
 }
 
-fn test() {
-  let client = Api::new("localhost:3000");
-  client.create_room("me".into());
-  todo!()
-}
+// fn test() {
+//   let client = Api::new("localhost:3000");
+//   let _ = client.create_room("me".into());
+//   let _ = client.get_room(2);
+//   todo!()
+// }
+
+//

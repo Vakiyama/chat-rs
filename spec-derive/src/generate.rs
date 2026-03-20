@@ -37,7 +37,7 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   //   .map(|impl_item: &ImplItem| parse_item_into_handler(impl_item))
   //   .collect();
 
-  let with_http: Vec<Result<(GeneratedFns, Http, &syn::Ident), syn::Error>> = items
+  let with_http: Vec<Result<(GeneratedFns, AttributeType, &syn::Ident), syn::Error>> = items
     .iter()
     .map(|impl_item: &ImplItem| parse_item_into_handler(impl_item))
     .collect();
@@ -45,17 +45,31 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
   let routes: TokenStream = with_http
     .iter()
     .filter_map(|item| item.as_ref().ok())
-    .map(|(_, http, ident): &(GeneratedFns, Http, &syn::Ident)| {
-      let axum_method = http.method.as_axum_fn();
-      let path = http.path.value();
-      let stringified_ident = ident.to_string();
-      let handler_ident: &syn::Ident =
-        &syn::Ident::from_string(&format!("{stringified_ident}_handler")).unwrap();
+    .map(
+      |(_, attr_type, ident): &(GeneratedFns, AttributeType, &syn::Ident)| match attr_type {
+        AttributeType::Http(http) => {
+          let axum_method = http.method.as_axum_fn();
+          let path = http.path.value();
+          let stringified_ident = ident.to_string();
+          let handler_ident: &syn::Ident =
+            &syn::Ident::from_string(&format!("{stringified_ident}_handler")).unwrap();
 
-      quote! {
-          .route(#path, #axum_method(#handler_ident))
-      }
-    })
+          quote! {
+              .route(#path, #axum_method(#handler_ident))
+          }
+        }
+        AttributeType::Layer => {
+          let stringified_ident = ident.to_string();
+
+          let handler_ident: &syn::Ident =
+            &syn::Ident::from_string(&format!("{stringified_ident}_layer")).unwrap();
+
+          quote! {
+              .layer(#handler_ident())
+          }
+        }
+      },
+    )
     .collect();
 
   let trait_name = &item_impl.trait_;
@@ -118,6 +132,11 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
   let parsed_client_trait: TokenStream = with_http
     .iter()
+    .filter(|item| {
+      item
+        .as_ref()
+        .is_ok_and(|item| !matches!(item.1, AttributeType::Layer))
+    })
     .map(|item| {
       item
         .as_ref()
@@ -128,6 +147,11 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
   let parsed_client_trait_sigs: TokenStream = with_http
     .iter()
+    .filter(|item| {
+      item
+        .as_ref()
+        .is_ok_and(|item| !matches!(item.1, AttributeType::Layer))
+    })
     .map(|item| {
       item
         .as_ref()
@@ -172,13 +196,16 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
 fn parse_item_into_handler(
   impl_item: &ImplItem,
-) -> Result<(GeneratedFns, Http, &syn::Ident), syn::Error> {
+) -> Result<(GeneratedFns, AttributeType, &syn::Ident), syn::Error> {
   match impl_item {
     ImplItem::Fn(impl_item_fn) => {
-      let http = find_http_attr(impl_item_fn)?;
+      let attr = find_attr(impl_item_fn)?;
       Ok((
-        parse_trait_fn(impl_item_fn, &http)?,
-        http,
+        match attr {
+          AttributeType::Http(ref http) => parse_trait_fn_http(impl_item_fn, http)?,
+          AttributeType::Layer => parse_trait_fn_layer(impl_item_fn),
+        },
+        attr,
         &impl_item_fn.sig.ident,
       ))
     }
@@ -186,6 +213,26 @@ fn parse_item_into_handler(
       impl_item,
       "Trait item must be a function.",
     )),
+  }
+}
+
+fn parse_trait_fn_layer(f: &ImplItemFn) -> GeneratedFns {
+  let fname_handler = syn::Ident::new(
+    &format!("{}_layer", &f.sig.ident.to_string()),
+    Span::call_site(),
+  );
+
+  let freturn = &f.sig.output;
+
+  let fblock = &f.block;
+
+  GeneratedFns {
+    client_trait_method: quote! {},
+    client_trait_sig: quote! {},
+    server_handler: quote! {
+          fn #fname_handler() #freturn
+              #fblock
+    },
   }
 }
 
@@ -242,9 +289,14 @@ impl TryFrom<syn::Path> for HttpMethod {
   }
 }
 
+enum AttributeType {
+  Http(Http),
+  Layer,
+}
+
 pub struct Http {
-  pub method: HttpMethod, // Post, Get etc
-  pub path: LitStr,       // "/rooms/:id"
+  pub method: HttpMethod,
+  pub path: LitStr,
 }
 
 impl Parse for Http {
@@ -264,7 +316,7 @@ struct GeneratedFns {
   server_handler: TokenStream,
 }
 
-fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Error> {
+fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Error> {
   // we need to rebuild the arguments from #[body] request: SomeType, #[query] ... into
   // Json(request): SomeType, Query(query): ...
 
@@ -311,13 +363,20 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
     .map(|transformed_args| transformed_args.no_attrs.clone())
     .collect();
 
-  let body_ident: TokenStream = new_params?
+  let body_ident: TokenStream = new_params
+    .clone()?
     .iter()
-    .filter(|p| p.is_body)
+    .filter(|p| matches!(p.arg_type, Some(ArgType::Body)))
     .map(|p| p.ident.clone())
     .collect();
 
-  let client_send = if body_ident.is_empty() {
+  let query_ident: TokenStream = new_params?
+    .iter()
+    .filter(|p| matches!(p.arg_type, Some(ArgType::Query)))
+    .map(|p| p.ident.clone())
+    .collect();
+
+  let client_send = if body_ident.is_empty() && query_ident.is_empty() {
     quote! {
           let res = self.inner
               .#method_fn(format!("{}{}", self.base_url, #url_fmt))
@@ -325,11 +384,20 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
               .await
               .map_err(spec_derive_core::RequestError::Network)?;
     }
+  } else if query_ident.is_empty() {
+    quote! {
+         let res = self.inner
+             .#method_fn(format!("{}{}", self.base_url, #url_fmt))
+             .json(&#body_ident)
+             .send()
+             .await
+             .map_err(spec_derive_core::RequestError::Network)?;
+    }
   } else {
     quote! {
         let res = self.inner
         .#method_fn(format!("{}{}", self.base_url, #url_fmt))
-        .json(&#body_ident)
+        .query(&#query_ident)
         .send()
         .await
         .map_err(spec_derive_core::RequestError::Network)?;
@@ -404,11 +472,17 @@ impl TryFrom<&syn::Path> for Extractor {
 }
 
 #[derive(Clone)]
+enum ArgType {
+  Body,
+  Query,
+}
+
+#[derive(Clone)]
 struct TransformedArgs {
   ident: TokenStream,
   no_attrs: TokenStream,
   with_extractors: TokenStream,
-  is_body: bool,
+  arg_type: Option<ArgType>,
 }
 
 fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
@@ -417,7 +491,7 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
       ident: quote! { self },
       no_attrs: quote! {#pat_receiv},
       with_extractors: quote! {},
-      is_body: false,
+      arg_type: None,
     }), // this is the self arg
     FnArg::Typed(pat_type) => {
       let filtered: Vec<&Attribute> = pat_type
@@ -439,7 +513,7 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
           ident: quote! { #ident_string },
           no_attrs: quote! { #arg },
           with_extractors: quote! { #arg },
-          is_body: false,
+          arg_type: None,
         }),
         1 => {
           let attr = filtered[0];
@@ -471,9 +545,9 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
               }
             },
             no_attrs: quote! { #ident_string: #ty },
-            is_body: match extractor {
-              Extractor::Json => true,
-              _ => false,
+            arg_type: match extractor {
+              Extractor::Json => Some(ArgType::Body),
+              Extractor::Query => Some(ArgType::Query),
             },
           })
         }
@@ -486,23 +560,36 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
   }
 }
 
-fn find_http_attr(f: &ImplItemFn) -> Result<Http, syn::Error> {
-  let attr = f
-    .attrs
-    .iter()
-    .find(|attr| attr.path().is_ident("http"))
-    .map(Ok)
-    .unwrap_or(Err(syn::Error::new_spanned(
-      f,
-      "Method must have an attribute like: #[http(get, \"/path\")]",
-    )))?;
+fn find_attr(f: &ImplItemFn) -> Result<AttributeType, syn::Error> {
+  let attr_http = f.attrs.iter().find(|attr| attr.path().is_ident("http"));
 
-  attr.parse_args::<Http>().map_err(|e| {
-    syn::Error::new_spanned(
-      attr,
-      format!("Failed to parse http attribute with error {}", e),
-    )
-  })
+  let attr_layer = f.attrs.iter().find(|attr| attr.path().is_ident("layer"));
+
+  let attrs: Vec<Option<&Attribute>> = [attr_http, attr_layer]
+    .into_iter()
+    .filter(Option::is_some)
+    .collect();
+
+  if attrs.is_empty() || attrs.len() > 1 {
+    return Err(syn::Error::new_spanned(
+      f,
+      "Method must have an attribute like: #[http(get, \"/path\")] or #[layer]",
+    ));
+  };
+
+  if let Some(attr_http1) = attr_http {
+    attr_http1
+      .parse_args::<Http>()
+      .map(AttributeType::Http)
+      .map_err(|e| {
+        syn::Error::new_spanned(
+          attr_http,
+          format!("Failed to parse http attribute with error {}", e),
+        )
+      })
+  } else {
+    Ok(AttributeType::Layer)
+  }
 }
 
 pub struct ResultTypes {
