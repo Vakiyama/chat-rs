@@ -117,10 +117,21 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
     .collect();
 
   let parsed_client_trait: TokenStream = with_http
-    .into_iter()
+    .iter()
     .map(|item| {
       item
-        .map(|item| item.0.client_trait_method)
+        .as_ref()
+        .map(|item| item.0.client_trait_method.clone())
+        .unwrap_or_else(|e| e.to_compile_error())
+    })
+    .collect();
+
+  let parsed_client_trait_sigs: TokenStream = with_http
+    .iter()
+    .map(|item| {
+      item
+        .as_ref()
+        .map(|item| item.0.client_trait_sig.clone())
         .unwrap_or_else(|e| e.to_compile_error())
     })
     .collect();
@@ -145,10 +156,13 @@ pub fn handle_trait(item_impl: ItemImpl) -> TokenStream {
 
       #parsed_handlers
 
+      pub trait #client_trait {
+        #parsed_client_trait_sigs
+      }
+
       impl #client_trait for #self_ty {
         #parsed_client_trait
       }
-
   };
 
   eprintln!("{router_handlers}");
@@ -246,6 +260,7 @@ impl Parse for Http {
 
 struct GeneratedFns {
   client_trait_method: TokenStream,
+  client_trait_sig: TokenStream,
   server_handler: TokenStream,
 }
 
@@ -267,16 +282,11 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
     .map(|transformed_args| transformed_args.with_extractors.clone())
     .collect();
 
-  // bridge: pass along correct params when constructing the json body
-  let param_idents: Vec<TokenStream> = new_params
-    .clone()?
-    .iter()
-    .map(|p| p.ident.clone()) // just the name, no type
-    .collect();
-
   // at this point, we have the new params list, we can create the handler
 
-  let fname = syn::Ident::new(
+  let fname = &f.sig.ident;
+
+  let fname_handler = syn::Ident::new(
     &format!("{}_handler", &f.sig.ident.to_string()),
     Span::call_site(),
   );
@@ -285,7 +295,7 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
 
   let new_fn_tokens = quote! {
       #[axum::debug_handler]
-      async fn #fname(#(#with_extractors),*) #freturn
+      async fn #fname_handler(#(#with_extractors),*) #freturn
           #fblock
 
   };
@@ -295,20 +305,42 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
   let method_fn = http.method.as_reqwest_fn();
   let url_fmt = &http.path;
 
-  let original_params: TokenStream = new_params?
+  let original_params: TokenStream = new_params
+    .clone()?
     .iter()
     .map(|transformed_args| transformed_args.no_attrs.clone())
     .collect();
 
-  let client_trait_method = quote! {
-      async fn #fname(#original_params)
-          -> Result<#ok_ty, spec_derive_core::RequestError<#err_ty>>
-      {
+  let body_ident: TokenStream = new_params?
+    .iter()
+    .filter(|p| p.is_body)
+    .map(|p| p.ident.clone())
+    .collect();
+
+  let client_send = if body_ident.is_empty() {
+    quote! {
           let res = self.inner
               .#method_fn(format!("{}{}", self.base_url, #url_fmt))
               .send()
               .await
               .map_err(spec_derive_core::RequestError::Network)?;
+    }
+  } else {
+    quote! {
+        let res = self.inner
+        .#method_fn(format!("{}{}", self.base_url, #url_fmt))
+        .json(&#body_ident)
+        .send()
+        .await
+        .map_err(spec_derive_core::RequestError::Network)?;
+    }
+  };
+
+  let client_trait_method = quote! {
+      async fn #fname(&self, #original_params)
+          -> Result<#ok_ty, spec_derive_core::RequestError<#err_ty>>
+      {
+          #client_send
 
           if !res.status().is_success() {
               let bytes = res.bytes()
@@ -330,9 +362,15 @@ fn parse_trait_fn(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn::Erro
       }
   };
 
+  let client_trait_sig = quote! {
+      async fn #fname(&self, #original_params)
+          -> Result<#ok_ty, spec_derive_core::RequestError<#err_ty>>;
+  };
+
   match &f.sig.asyncness {
     Some(_) => Ok(GeneratedFns {
       client_trait_method,
+      client_trait_sig,
       server_handler: new_fn_tokens,
     }),
     None => Err(syn::Error::new_spanned(f, "Method must be async")),
@@ -370,6 +408,7 @@ struct TransformedArgs {
   ident: TokenStream,
   no_attrs: TokenStream,
   with_extractors: TokenStream,
+  is_body: bool,
 }
 
 fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
@@ -378,6 +417,7 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
       ident: quote! { self },
       no_attrs: quote! {#pat_receiv},
       with_extractors: quote! {},
+      is_body: false,
     }), // this is the self arg
     FnArg::Typed(pat_type) => {
       let filtered: Vec<&Attribute> = pat_type
@@ -399,6 +439,7 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
           ident: quote! { #ident_string },
           no_attrs: quote! { #arg },
           with_extractors: quote! { #arg },
+          is_body: false,
         }),
         1 => {
           let attr = filtered[0];
@@ -430,6 +471,10 @@ fn parse_sig_param(arg: &FnArg) -> Result<TransformedArgs, syn::Error> {
               }
             },
             no_attrs: quote! { #ident_string: #ty },
+            is_body: match extractor {
+              Extractor::Json => true,
+              _ => false,
+            },
           })
         }
         _ => Err(syn::Error::new_spanned(
