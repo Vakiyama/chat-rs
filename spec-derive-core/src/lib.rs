@@ -6,7 +6,7 @@ where
   E: std::fmt::Debug, //+ std::fmt::Display,
 {
   #[error("network error: {0}")]
-  Network(#[from] reqwest::Error),
+  Network(#[from] reqwest_middleware::Error),
 
   #[error("server error: {0}")]
   Server(E),

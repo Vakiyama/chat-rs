@@ -938,6 +938,7 @@ name = "chat-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "async-tungstenite",
  "axum",
  "bytes",
@@ -951,6 +952,7 @@ dependencies = [
  "jwt-simple",
  "rand 0.10.0",
  "reqwest",
+ "reqwest-middleware",
  "resend-rs",
  "rkyv 0.8.15",
  "sea-orm",
@@ -5073,6 +5075,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest-middleware"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199dda04a536b532d0cc04d7979e39b1c763ea749bf91507017069c00b96056f"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "http",
+ "reqwest",
+ "thiserror 2.0.18",
+ "tower-service",
+]
+
+[[package]]
 name = "resend-rs"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5924,6 +5940,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

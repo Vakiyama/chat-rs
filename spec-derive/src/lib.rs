@@ -78,16 +78,16 @@ pub fn client(_metadata: TokenStream, input: TokenStream) -> TokenStream {
 
     let struct_tokens = quote! {
       #vis struct #ident {
-          pub inner: reqwest::Client,
+          pub inner: reqwest_middleware::ClientWithMiddleware,
           pub base_url: std::sync::Arc<String>,
       }
     };
 
     let new_impl = quote! {
         impl #ident {
-            #vis fn new(base_url: impl Into<String>) -> Self {
+            #vis fn new(base_url: impl Into<String>, client: reqwest_middleware::ClientWithMiddleware) -> Self {
                 Self {
-                    inner: reqwest::Client::new(),
+                    inner: client,
                     base_url: std::sync::Arc::new(base_url.into())
                 }
             }
@@ -100,7 +100,7 @@ pub fn client(_metadata: TokenStream, input: TokenStream) -> TokenStream {
         #new_impl
     };
 
-    eprintln!("{tokens}");
+    // eprintln!("{tokens}");
 
     tokens.into()
   } else {

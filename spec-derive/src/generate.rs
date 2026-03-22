@@ -411,7 +411,7 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
     quote! {
          let res = self.inner
              .#method_fn(format!("{}{}", self.base_url, #url_fmt))
-             .json(&#body_ident)
+             .body(serde_json::to_vec(&#body_ident).expect("Failed to encode json body"))
              .send()
              .await
              .map_err(spec_derive_core::RequestError::Network)?;
@@ -436,7 +436,9 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
           if !res.status().is_success() {
               let bytes = res.bytes()
                   .await
-                  .map_err(spec_derive_core::RequestError::Network)?;
+                  .map_err(|e| spec_derive_core::RequestError::Network(
+                    reqwest_middleware::Error::Reqwest(e)
+                  ))?;
 
               let server_err = <#err_ty as spec_derive_core::Decode>::decode(bytes)
                   .map_err(spec_derive_core::RequestError::Decode)?;
@@ -446,7 +448,9 @@ fn parse_trait_fn_http(f: &ImplItemFn, http: &Http) -> Result<GeneratedFns, syn:
 
           let bytes = res.bytes()
               .await
-              .map_err(spec_derive_core::RequestError::Network)?;
+              .map_err(|e| spec_derive_core::RequestError::Network(
+                reqwest_middleware::Error::Reqwest(e)
+              ))?;
 
           <#ok_ty as spec_derive_core::Decode>::decode(bytes)
               .map_err(spec_derive_core::RequestError::Decode)

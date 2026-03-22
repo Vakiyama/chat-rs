@@ -72,8 +72,8 @@ trait RefreshTokenStore {
   async fn remove_all_for_user(&self, user_id: &UserId) -> Result<(), RefreshTokenStoreError>;
 }
 
-type Token = String;
-type UserId = Uuid;
+pub type Token = String;
+pub type UserId = Uuid;
 
 /// This struct has no guarantees about token validity across server restarts
 /// the intention is to re-implement the refresh token store trait for either a redis or db based solution.
@@ -438,14 +438,14 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct RefreshBody {
-  refresh_token: String,
+pub struct RefreshBody {
+  pub refresh_token: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct RefreshResponse {
-  access_token: String,
-  refresh_token: String,
+pub struct RefreshResponse {
+  pub access_token: String,
+  pub refresh_token: String,
 }
 
 impl IntoResponse for RefreshResponse {
