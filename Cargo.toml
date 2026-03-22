@@ -17,12 +17,9 @@ bytes = "1.11.1"
 rand = "0.10.0"
 resend-rs = "0.21.1"
 email_address = "0.2.9"
-utoipa-axum = "0.2.0"
-utoipa = { version = "5.4.0", features = [ "uuid" ] }
 serde = "1.0.228"
 jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
 hex = "0.4.3"
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 tower-http = { version = "0.6.8", features = ["auth", "trace"] }
 http-body-util = { version = "0.1.3", features = [ "full" ] }
 http = "1.4.0"

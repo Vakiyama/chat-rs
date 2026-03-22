@@ -1,10 +1,11 @@
 use std::{
   collections::{HashMap, HashSet},
+  fmt::Debug,
   sync::{Arc, Mutex},
   time::Duration,
 };
 
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{Json, response::IntoResponse};
 use bytes::Bytes;
 use futures_util::{TryFutureExt, future::BoxFuture};
 use http::{Request, Response, StatusCode};
@@ -13,6 +14,7 @@ use jwt_simple::{
   prelude::{HS256Key, MACLike},
   reexports::serde_json,
 };
+use serde::Deserialize;
 use spec_derive::generate;
 use tower_http::auth::AsyncAuthorizeRequest;
 
@@ -275,9 +277,87 @@ impl Api {
 
     Ok(LoginResponse { identifier })
   }
+
+  #[http(POST, "/verify")]
+  async fn verify_handler<C, R>(
+    #[state] state: RouterState<C, R>,
+    #[json] payload: VerifyBody,
+  ) -> Result<VerifyResponse, VerifyError>
+  where
+    C: CodeStore + Send + Sync + 'static,
+    R: RefreshTokenStore + Send + Sync + 'static,
+  {
+    let VerifyBody {
+      identifier,
+      email: incoming_email,
+      code: code_attempt,
+    } = payload;
+
+    let EmailCodePair { code, email } = state
+      .code_store
+      .get_email_code_pair(&identifier)
+      .await
+      .map(Ok)
+      .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
+
+    let TokenPair {
+      access_token,
+      refresh_token,
+    } = generate_tokens(identifier, state.jwt_key.get())
+      .map_err(|_| VerifyError::Internal)
+      .await?;
+
+    if &code_attempt == code && email == &incoming_email {
+      Ok(VerifyResponse {
+        access_token,
+        refresh_token,
+        duration_milliseconds: JWT_ACCESS_DURATION.as_millis(),
+      })
+    } else {
+      Err(VerifyError::InvalidCode)
+    }
+  }
+
+  #[http(POST, "/refresh")]
+  async fn refresh_handler<C, R>(
+    #[state] state: RouterState<C, R>,
+    #[json] body: RefreshBody,
+  ) -> Result<RefreshResponse, RefreshError>
+  where
+    C: CodeStore + Send + Sync + 'static,
+    R: RefreshTokenStore + Send + Sync + 'static,
+  {
+    let RefreshBody {
+      refresh_token: incoming_refresh_token,
+    } = body;
+
+    let user_id = state
+      .refresh_store
+      .has(&incoming_refresh_token)
+      .await
+      .map_err(|err| -> RefreshError { err.into() })?;
+
+    let TokenPair {
+      access_token,
+      refresh_token,
+    } = generate_tokens(user_id, state.jwt_key.get())
+      .await
+      .map_err(|_| RefreshError::Internal)?;
+
+    state
+      .refresh_store
+      .rotate(&incoming_refresh_token, refresh_token.clone())
+      .await
+      .map_err(|err| -> RefreshError { err.into() })?;
+
+    Ok(RefreshResponse {
+      access_token,
+      refresh_token,
+    })
+  }
 }
 
-#[derive(utoipa::ToSchema, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LoginResponse {
   identifier: Uuid,
 }
@@ -288,63 +368,32 @@ impl IntoResponse for LoginResponse {
   }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct LoginBody {
   email: String,
 }
 
-#[utoipa::path(
-    post,
-    path = "/login",
-    request_body(content = LoginBody, description = "Email to attempt login with", content_type = "application/json"),
-    // params(("email" = String, Query, description = "Email to send verification code to")), 
-    responses(
-      (status = 200, body = LoginResponse),
-      (status = 422, description = "Missing or invalid body params"),
-      (status = 400, description = "Resend API error"),
-    )
- )
-]
-
-async fn login_handler_old<C, R>(
-  State(mut state): State<RouterState<C, R>>,
-  Json(payload): Json<LoginBody>,
-) -> Result<Json<LoginResponse>, resend::Error>
-where
-  C: CodeStore + Send + Sync + 'static,
-  R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let identifier = Uuid::new_v4();
-  let code = resend::send_auth_email(&payload.email, state.resend).await?;
-
-  state
-    .code_store
-    .insert(
-      identifier,
-      EmailCodePair {
-        code,
-        email: payload.email,
-      },
-    )
-    .await;
-
-  Ok(Json(LoginResponse { identifier }))
-}
-
-#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct VerifyBody {
   identifier: Uuid,
   email: String,
   code: String,
 }
 
-#[derive(serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct VerifyResponse {
   access_token: String,
   refresh_token: String,
   duration_milliseconds: u128,
 }
 
+impl IntoResponse for VerifyResponse {
+  fn into_response(self) -> axum::response::Response {
+    Json(self).into_response()
+  }
+}
+
+#[derive(Debug, Deserialize)]
 enum VerifyError {
   InvalidCode,
   UnknownIdentifier,
@@ -353,58 +402,15 @@ enum VerifyError {
 
 impl IntoResponse for VerifyError {
   fn into_response(self) -> axum::response::Response {
-    todo!()
-  }
-}
-
-#[utoipa::path(
-    post,
-    path = "/verify",
-    request_body(content = VerifyBody, description = "Verification details for token exchange", content_type = "application/json"),
-    responses(
-      (status = 200, body = VerifyResponse),
-      (status = 422, description = "Missing or invalid body params"),
-      (status = 400, description = "Invalid identifier"),
-      (status = 500, description = "Internal server error"),
-     )
-   )
-]
-async fn verify_handler<C, R>(
-  State(state): State<RouterState<C, R>>,
-  Json(payload): Json<VerifyBody>,
-) -> Result<Json<VerifyResponse>, VerifyError>
-where
-  C: CodeStore + Send + Sync + 'static,
-  R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let VerifyBody {
-    identifier,
-    email: incoming_email,
-    code: code_attempt,
-  } = payload;
-
-  let EmailCodePair { code, email } = state
-    .code_store
-    .get_email_code_pair(&identifier)
-    .await
-    .map(Ok)
-    .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
-
-  let TokenPair {
-    access_token,
-    refresh_token,
-  } = generate_tokens(identifier, state.jwt_key.get())
-    .map_err(|_| VerifyError::Internal)
-    .await?;
-
-  if &code_attempt == code && email == &incoming_email {
-    Ok(Json(VerifyResponse {
-      access_token,
-      refresh_token,
-      duration_milliseconds: JWT_ACCESS_DURATION.as_millis(),
-    }))
-  } else {
-    Err(VerifyError::InvalidCode)
+    match self {
+      VerifyError::InvalidCode => (StatusCode::UNAUTHORIZED, "Invalid code").into_response(),
+      VerifyError::UnknownIdentifier => {
+        (StatusCode::BAD_REQUEST, "No such identifier").into_response()
+      }
+      VerifyError::Internal => {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+      }
+    }
   }
 }
 
@@ -431,17 +437,24 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   })
 }
 
-#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct RefreshBody {
   refresh_token: String,
 }
 
-#[derive(serde::Serialize, utoipa::ToSchema)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct RefreshResponse {
   access_token: String,
   refresh_token: String,
 }
 
+impl IntoResponse for RefreshResponse {
+  fn into_response(self) -> axum::response::Response {
+    Json(self).into_response()
+  }
+}
+
+#[derive(Deserialize, Debug)]
 pub enum RefreshError {
   Unauthorized,
   UnknownIdentifier,
@@ -463,61 +476,20 @@ impl From<RefreshTokenStoreError> for RefreshError {
 
 impl IntoResponse for RefreshError {
   fn into_response(self) -> axum::response::Response {
-    todo!()
+    match self {
+      RefreshError::Unauthorized => (StatusCode::UNAUTHORIZED, "Not authorized").into_response(),
+      RefreshError::UnknownIdentifier => {
+        (StatusCode::BAD_REQUEST, "No such identifier").into_response()
+      }
+      RefreshError::Expired => (StatusCode::UNAUTHORIZED, "Refresh token expired").into_response(),
+      RefreshError::Internal => {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+      }
+    }
   }
 }
 
-/// given a valid refresh token, a new token is issued
-#[utoipa::path(
-    post,
-    path = "/refresh",
-    request_body(content = RefreshBody, description = "Verification details for token exchange", content_type = "application/json"),
-    responses(
-      (status = 200, body = RefreshResponse),
-      (status = 401, description = "Unauthorized"),
-      (status = 422, description = "Missing bearer token"),
-      (status = 500, description = "Internal server error"),
-     )
-   )
-]
-async fn refresh_handler<C, R>(
-  State(state): State<RouterState<C, R>>,
-  Json(body): Json<RefreshBody>,
-) -> Result<Json<RefreshResponse>, RefreshError>
-where
-  C: CodeStore + Send + Sync + 'static,
-  R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let RefreshBody {
-    refresh_token: incoming_refresh_token,
-  } = body;
-
-  let user_id = state
-    .refresh_store
-    .has(&incoming_refresh_token)
-    .await
-    .map_err(|err| -> RefreshError { err.into() })?;
-
-  let TokenPair {
-    access_token,
-    refresh_token,
-  } = generate_tokens(user_id, state.jwt_key.get())
-    .await
-    .map_err(|_| RefreshError::Internal)?;
-
-  state
-    .refresh_store
-    .rotate(&incoming_refresh_token, refresh_token.clone())
-    .await
-    .map_err(|err| -> RefreshError { err.into() })?;
-
-  Ok(Json(RefreshResponse {
-    access_token,
-    refresh_token,
-  }))
-}
-
-// Middleware
+// ---------------------------------- Middleware -------------------------------------
 
 #[derive(Clone)]
 pub struct JWTAuthorized
