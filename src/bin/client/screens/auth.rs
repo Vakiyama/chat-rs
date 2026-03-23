@@ -1,4 +1,10 @@
+use async_tungstenite::tungstenite::Error;
+use chat_rs::spec::{
+  auth::{AuthClient, LoginBody, LoginResponse, Token},
+  library::resend,
+};
 use email_address;
+use spec_derive_core::RequestError;
 use std::{str::FromStr, sync::Arc};
 
 use iced::{
@@ -11,16 +17,22 @@ use iced::{
     float, row, space, text, text_input, text_input::Style as TextStyle,
   },
 };
-use resend_rs::Resend;
 
-use crate::SPACE_GRID;
+use crate::{SPACE_GRID, client::ApiClient};
 
 // -------------------- MODEL --------------------
 
 pub enum Mode {
-  Login { error_message: Option<&'static str> },
-  Register { error_message: Option<&'static str> },
-  Code { error_message: Option<&'static str> },
+  Login {
+    error_message: Option<&'static str>,
+  },
+  Register {
+    error_message: Option<&'static str>,
+  },
+  Code {
+    error_message: Option<&'static str>,
+    identifier: Option<Token>,
+  },
 }
 
 impl Default for Mode {
@@ -31,11 +43,22 @@ impl Default for Mode {
   }
 }
 
-#[derive(Default)]
 pub struct Model {
   mode: Mode,
   email_input: String,
   remember_me_checked: bool,
+  client: Arc<ApiClient>,
+}
+
+impl Model {
+  pub fn new(client: Arc<ApiClient>) -> Self {
+    Model {
+      mode: Default::default(),
+      email_input: Default::default(),
+      remember_me_checked: Default::default(),
+      client,
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +68,7 @@ pub enum Message {
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
-  ResendSentEmail(Arc<Result<String, axum::Error>>),
+  ApiSentLogin(Result<LoginResponse, Arc<RequestError<resend::Error>>>),
 }
 
 // -------------------- UPDATE --------------------
@@ -62,12 +85,25 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
           Mode::Login { error_message } | Mode::Register { error_message } => {
             *error_message = Some("Invalid email.")
           }
-          Mode::Code { error_message } => (), // shouldn't happen
+          Mode::Code {
+            error_message: _,
+            identifier: _,
+          } => (), // shouldn't happen
         };
         Task::none()
       } else {
+        let client = model.client.clone();
+        let email_input = model.email_input.clone();
         // send off req as task
-        todo!();
+        Task::perform(
+          async move {
+            client
+              .auth_client
+              .login(LoginBody { email: email_input })
+              .await
+          },
+          move |response| Message::ApiSentLogin(response.map_err(Arc::new)),
+        )
       }
     }
     Message::UserToggledRememberMe => {
@@ -86,25 +122,25 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
       };
       Task::none()
     }
-    Message::ResendSentEmail(response) => {
+    Message::ApiSentLogin(response) => {
       println!("{response:?}");
 
-      let new_err_msg = match *response {
+      let new_err_msg = match response {
         Ok(_) => None,
         Err(_) => {
           Some("An error ocurred while sending your confirmation email. Please try again later.")
         }
       };
 
-      match (&mut model.mode, &*response) {
+      match (&mut model.mode, response) {
         (Mode::Login { error_message }, Err(_)) | (Mode::Register { error_message }, Err(_)) => {
           *error_message = new_err_msg;
         }
-        (Mode::Login { .. }, Ok(_)) | (Mode::Register { .. }, Ok(_)) => {
+        (Mode::Login { .. }, Ok(res)) | (Mode::Register { .. }, Ok(res)) => {
           model.mode = Mode::Code {
             error_message: None,
+            identifier: Some(res.identifier.into()),
           }
-          // todo here
         }
         (Mode::Code { .. }, _) => (), // ignore responses when already in code view
       };

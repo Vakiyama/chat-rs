@@ -1,3 +1,4 @@
+use crate::client::ApiClient;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use chat_rs::schema::user::Model as User;
@@ -29,22 +30,9 @@ pub enum Screen {
 
 impl Default for Model {
   fn default() -> Self {
-    // generate_api!("src/spec/openapi.json");
-
     Model {
-      screen: Screen::Auth(Default::default()),
+      screen: Screen::Auth(AuthModel::new(ApiClient::default().into())),
       user: Auth::NotLoggedIn,
     }
   }
-
-  // debug version vvvv
-  // fn default() -> Self {
-  //   Model {
-  //     screen: Screen::Chat(Default::default()),
-  //     user: Auth::LoggedIn(User {
-  //       id: Uuid::new_v4(),
-  //       name: "RootPoison".into(),
-  //     }),
-  //   }
-  // }
 }

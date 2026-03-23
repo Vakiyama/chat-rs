@@ -13,7 +13,7 @@ use serde::Deserialize;
 const FROM: &str = "ChatRS <chatrs@resend.dev>";
 const SUBJECT: &str = "Login Code";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub enum Error {
   Api(String),
   EmailValidation(String),

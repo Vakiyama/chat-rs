@@ -21,9 +21,9 @@ use spec_derive_core::RequestError;
 
 // ----------------------------- ApiClient ----------------------------
 
-struct ApiClient {
-  auth_client: Api, // this "Api" should be given a different name
-  tokens: Arc<Mutex<TokenStore>>,
+pub struct ApiClient {
+  pub auth_client: Api, // this "Api" should be given a different name
+  pub tokens: Arc<Mutex<TokenStore>>,
 }
 
 impl Default for ApiClient {
@@ -33,14 +33,14 @@ impl Default for ApiClient {
     let middleware = AuthMiddleware {
       tokens: tokens.clone(),
       auth_client: Arc::new(AMutex::new(Api::new(
-        format!("{}/api/auth", SERVER_URL),
+        format!("http://{}/api/auth", SERVER_URL),
         ClientBuilder::new(Client::new()).build(),
       ))),
     };
 
     let client = ClientBuilder::new(Client::new()).with(middleware).build();
 
-    let auth_client = Api::new(format!("{}/api/auth", SERVER_URL), client);
+    let auth_client = Api::new(format!("http://{}/api/auth", SERVER_URL), client);
 
     Self {
       auth_client,

@@ -357,9 +357,9 @@ impl Api {
   }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LoginResponse {
-  identifier: Uuid,
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct LoginResponse {
+  pub identifier: Uuid,
 }
 
 impl IntoResponse for LoginResponse {
@@ -369,8 +369,8 @@ impl IntoResponse for LoginResponse {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct LoginBody {
-  email: String,
+pub struct LoginBody {
+  pub email: String,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
