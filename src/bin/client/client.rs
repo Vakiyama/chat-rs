@@ -73,6 +73,7 @@ impl Middleware for AuthMiddleware {
     extensions: &mut Extensions,
     next: Next<'_>,
   ) -> Result<Response> {
+    println!("middleware handle fired");
     if let Some(token) = &self.tokens.lock().unwrap().access_token {
       req.headers_mut().insert(
         http::header::AUTHORIZATION,

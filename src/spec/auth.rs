@@ -262,7 +262,9 @@ impl Api {
     R: RefreshTokenStore + Send + Sync + 'static,
   {
     let identifier = Uuid::new_v4();
+    println!("req got");
     let code = resend::send_auth_email(&payload.email, state.resend).await?;
+    println!("code: {code}");
 
     state
       .code_store
@@ -274,6 +276,8 @@ impl Api {
         },
       )
       .await;
+
+    println!("{identifier}");
 
     Ok(LoginResponse { identifier })
   }

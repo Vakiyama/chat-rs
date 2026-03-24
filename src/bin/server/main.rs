@@ -26,7 +26,7 @@ async fn main() {
       axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
     )
     .with_state(state)
-    .nest("/api", spec::auth::auth_handler())
+    .nest("/api/auth", spec::auth::auth_handler())
     .layer(TraceLayer::new_for_http()); // ← just this, no ServiceBuilder needed
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
