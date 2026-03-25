@@ -262,9 +262,7 @@ impl Api {
     R: RefreshTokenStore + Send + Sync + 'static,
   {
     let identifier = Uuid::new_v4();
-    println!("req got");
     let code = resend::send_auth_email(&payload.email, state.resend).await?;
-    println!("code: {code}");
 
     state
       .code_store
@@ -276,8 +274,6 @@ impl Api {
         },
       )
       .await;
-
-    println!("{identifier}");
 
     Ok(LoginResponse { identifier })
   }
@@ -377,18 +373,18 @@ pub struct LoginBody {
   pub email: String,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-struct VerifyBody {
-  identifier: Uuid,
-  email: String,
-  code: String,
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct VerifyBody {
+  pub identifier: Uuid,
+  pub email: String,
+  pub code: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct VerifyResponse {
-  access_token: String,
-  refresh_token: String,
-  duration_milliseconds: u128,
+pub struct VerifyResponse {
+  pub access_token: String,
+  pub refresh_token: String,
+  pub duration_milliseconds: u128,
 }
 
 impl IntoResponse for VerifyResponse {
@@ -397,8 +393,8 @@ impl IntoResponse for VerifyResponse {
   }
 }
 
-#[derive(Debug, Deserialize)]
-enum VerifyError {
+#[derive(Debug, Deserialize, Clone)]
+pub enum VerifyError {
   InvalidCode,
   UnknownIdentifier,
   Internal,

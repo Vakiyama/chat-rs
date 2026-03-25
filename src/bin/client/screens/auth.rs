@@ -1,11 +1,11 @@
-use async_tungstenite::tungstenite::Error;
 use chat_rs::spec::{
-  auth::{AuthClient, LoginBody, LoginResponse, Token},
+  auth::{AuthClient, LoginBody, LoginResponse, Token, VerifyBody, VerifyError},
   library::resend,
 };
 use email_address;
 use spec_derive_core::RequestError;
 use std::{str::FromStr, sync::Arc};
+use uuid::uuid;
 
 use iced::{
   Border, Color, Element,
@@ -31,7 +31,8 @@ pub enum Mode {
   },
   Code {
     error_message: Option<&'static str>,
-    identifier: Option<Token>,
+    identifier: Token,
+    code_input: String,
   },
 }
 
@@ -59,6 +60,14 @@ impl Model {
       client,
     }
   }
+
+  fn action_text_for_mode(&self) -> &str {
+    match &self.mode {
+      Mode::Code { .. } => "Submit",
+      Mode::Login { .. } => "Login",
+      Mode::Register { .. } => "Register",
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +78,7 @@ pub enum Message {
   UserNavigatedLogin,
   UserToggledRememberMe,
   ApiSentLogin(Result<LoginResponse, Arc<RequestError<resend::Error>>>),
+  ApiVerifiedCode(Result<VerifyBody, Arc<RequestError<VerifyError>>>),
 }
 
 // -------------------- UPDATE --------------------
@@ -83,14 +93,35 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
       if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
         match &mut model.mode {
           Mode::Login { error_message } | Mode::Register { error_message } => {
-            *error_message = Some("Invalid email.")
+            *error_message = Some("Invalid email.");
+            Task::none()
           }
           Mode::Code {
             error_message: _,
-            identifier: _,
-          } => (), // shouldn't happen
-        };
-        Task::none()
+            identifier,
+            code_input,
+          } => {
+            let client = model.client.clone();
+            let email_input = model.email_input.clone();
+            let code_input = code_input.clone();
+            let identifier = identifier.clone();
+
+            Task::perform(
+              async move {
+                client
+                  .auth_client
+                  .verify_handler(VerifyBody {
+                    identifier: uuid::Uuid::from_str(&identifier)
+                      .expect("Identifier from BE is valid"),
+                    email: email_input,
+                    code: code_input.to_string(),
+                  })
+                  .await
+              },
+              |res| todo!("handle verify response"),
+            )
+          }
+        }
       } else {
         let client = model.client.clone();
         let email_input = model.email_input.clone();
@@ -139,7 +170,8 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
         (Mode::Login { .. }, Ok(res)) | (Mode::Register { .. }, Ok(res)) => {
           model.mode = Mode::Code {
             error_message: None,
-            identifier: Some(res.identifier.into()),
+            identifier: res.identifier.into(),
+            code_input: "".to_string(),
           }
         }
         (Mode::Code { .. }, _) => (), // ignore responses when already in code view
@@ -147,12 +179,13 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
 
       Task::none()
     }
+    Message::ApiVerifiedCode(verify_body) => todo!(),
   }
 }
 
 // -------------------- VIEW --------------------
 
-pub fn view<'a>(model: &Model) -> Element<'a, Message> {
+pub fn view<'a>(model: &'a Model) -> Element<'a, Message> {
   row![left_card(model), hero()]
     .spacing(Pixels(SPACE_GRID.into()))
     .width(Fill)
@@ -160,12 +193,12 @@ pub fn view<'a>(model: &Model) -> Element<'a, Message> {
     .into()
 }
 
-fn left_card<'a>(model: &Model) -> Element<'a, Message> {
+fn left_card<'a>(model: &'a Model) -> Element<'a, Message> {
   container(
     container(
       column![
         render_left_content(model),
-        button(container("Login").center_x(Fill))
+        button(container(model.action_text_for_mode()).center_x(Fill))
           .on_press(Message::UserSubmittedForm)
           .width(Fill)
           .style(|_theme: &Theme, _status| {
@@ -216,16 +249,16 @@ fn left_card<'a>(model: &Model) -> Element<'a, Message> {
 }
 
 fn render_left_content<'a>(model: &Model) -> Element<'a, Message> {
-  match model.mode {
+  match &model.mode {
     Mode::Login { .. } => login_content(model),
     Mode::Register { .. } => todo!(),
-    Mode::Code { .. } => code_input_content(model),
+    Mode::Code { code_input, .. } => code_input_content(model, code_input),
   }
 }
 
-fn code_input_content<'a>(model: &Model) -> Element<'a, Message> {
+fn code_input_content<'a>(_model: &Model, code_input: &String) -> Element<'a, Message> {
   column![
-    text_input("Enter Code", &model.email_input)
+    text_input("Enter Code", code_input)
       .on_input(Message::UserChangedLoginInput)
       .on_submit(Message::UserSubmittedForm)
       .style(|theme: &Theme, status| {
