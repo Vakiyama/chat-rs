@@ -1,11 +1,10 @@
 use axum::Router;
 use bytes::Bytes;
-use chat_rs::spec::{
-  self,
-  auth::{JWTAuthorized, JWTKey},
-};
+use chat_rs::shared::auth::JWTKey;
 use jwt_simple::prelude::HS256Key;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
+
+use crate::api::auth::JWTAuthorized;
 
 mod auth;
 
@@ -18,7 +17,7 @@ pub fn router() -> Router {
 
   Router::new()
     // ------ public api routes --------
-    .nest("/auth", spec::auth::auth_handler())
+    .nest("/auth", auth::router())
     .layer(
       tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
         key: JWTKey { key }.into(),

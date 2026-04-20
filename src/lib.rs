@@ -2,7 +2,7 @@ use bytes::Bytes;
 use rkyv::{Archive, Deserialize, Serialize, rancor};
 
 pub mod schema;
-pub mod spec;
+pub mod shared;
 
 use crate::schema::user::Model as User;
 

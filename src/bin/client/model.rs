@@ -1,4 +1,3 @@
-use crate::client::ApiClient;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use chat_rs::schema::user::Model as User;
@@ -31,7 +30,7 @@ pub enum Screen {
 impl Default for Model {
   fn default() -> Self {
     Model {
-      screen: Screen::Auth(AuthModel::new(ApiClient::default().into())),
+      screen: Screen::Auth(AuthModel::default()),
       user: Auth::NotLoggedIn,
     }
   }

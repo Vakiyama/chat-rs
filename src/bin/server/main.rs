@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use chat_rs::{SERVER_URL, spec};
+use chat_rs::SERVER_URL;
 use tower_http::trace::TraceLayer;
 
 mod api;
+mod library;
 mod websocket;
 
 #[tokio::main]
@@ -26,8 +27,8 @@ async fn main() {
       axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
     )
     .with_state(state)
-    .nest("/api/auth", spec::auth::auth_handler())
-    .layer(TraceLayer::new_for_http()); // ← just this, no ServiceBuilder needed
+    .nest("/api", api::router())
+    .layer(TraceLayer::new_for_http());
 
   let listener = tokio::net::TcpListener::bind(SERVER_URL).await.unwrap();
 
