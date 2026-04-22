@@ -26,6 +26,14 @@ pub fn router() -> Router {
       "/login",
       post(login_handler::<InMemoryStore, InMemoryTokenStore>),
     )
+    .route(
+      "/refresh",
+      post(refresh_handler::<InMemoryStore, InMemoryTokenStore>),
+    )
+    .route(
+      "/verify",
+      post(verify_handler::<InMemoryStore, InMemoryTokenStore>),
+    )
     .with_state(RouterState::default())
 }
 
