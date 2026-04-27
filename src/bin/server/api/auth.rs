@@ -3,8 +3,10 @@ use http::{Request, Response, StatusCode};
 use std::{
   collections::{HashMap, HashSet},
   sync::{Arc, Mutex},
+  thread::{self, sleep},
   time::Duration,
 };
+use tokio::{spawn, time::timeout};
 
 use axum::{Json, Router, extract::State, routing::post};
 use chat_rs::shared::auth::{
@@ -41,24 +43,37 @@ pub fn router() -> Router {
 
 #[derive(Default, Clone)]
 pub struct InMemoryStore {
-  pending: HashMap<Uuid, EmailCodePair>,
+  pending: Arc<Mutex<HashMap<Uuid, EmailCodePair>>>,
 }
 
 impl CodeStore for InMemoryStore {
-  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<&EmailCodePair> {
-    self.pending.get(uuid)
+  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<EmailCodePair> {
+    self.pending.lock().unwrap().get(uuid).cloned()
   }
 
   async fn insert(&mut self, uuid: Uuid, email_code: EmailCodePair) -> Option<EmailCodePair> {
-    self.pending.insert(uuid, email_code)
+    let store = self.pending.clone();
+
+    tokio::spawn(async move {
+      tokio::time::sleep(Duration::from_mins(15)).await;
+      store.lock().unwrap().remove_entry(&uuid);
+    });
+
+    self.pending.lock().unwrap().insert(uuid, email_code)
+  }
+
+  async fn delete(&mut self, uuid: &Uuid) {
+    self.pending.lock().unwrap().remove_entry(uuid);
   }
 }
 
 pub trait CodeStore {
   /// given an uuid, gets the pending
-  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<&EmailCodePair>;
+  async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<EmailCodePair>;
 
   async fn insert(&mut self, uuid: Uuid, email_code: EmailCodePair) -> Option<EmailCodePair>;
+
+  async fn delete(&mut self, uuid: &Uuid);
 }
 
 #[derive(Debug)]

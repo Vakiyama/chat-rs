@@ -1,21 +1,10 @@
-use std::{
-  collections::{HashMap, HashSet},
-  fmt::Debug,
-  sync::{Arc, Mutex},
-  time::Duration,
-};
+use std::fmt::Debug;
 
 use axum::{Json, response::IntoResponse};
 use bytes::Bytes;
-use futures_util::{TryFutureExt, future::BoxFuture};
-use http::{Request, Response, StatusCode};
-use jwt_simple::{
-  claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
-  prelude::{HS256Key, MACLike},
-  reexports::serde_json,
-};
+use http::StatusCode;
+use jwt_simple::{prelude::HS256Key, reexports::serde_json};
 use serde::Deserialize;
-use tower_http::auth::AsyncAuthorizeRequest;
 
 use uuid::Uuid;
 

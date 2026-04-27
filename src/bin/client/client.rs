@@ -17,6 +17,7 @@ struct TokenStore {
   refresh_token: Option<Token>,
 }
 
+#[derive(Clone)]
 pub struct ApiClient {
   pub_client: reqwest::Client,
   private_client: reqwest_middleware::ClientWithMiddleware,
@@ -24,28 +25,29 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-  pub async fn login(self, email: String) -> Result<Uuid> {
+  pub async fn login(self, body: LoginBody) -> Result<LoginResponse> {
     let req = self
       .pub_client
-      .post(format!("{}{}", SERVER_URL, "/api/auth/login"))
-      .json(&LoginBody { email })
+      .post(format!("http://{}{}", SERVER_URL, "/api/auth/login"))
+      .json(&body)
       .send()
       .await?;
 
-    let LoginResponse { identifier } = req.json::<LoginResponse>().await?;
+    println!("{req:?}");
+    if req.status() == 200 {
+      let res = req.json::<LoginResponse>().await?;
 
-    Ok(identifier)
+      Ok(res)
+    } else {
+      todo!()
+    }
   }
 
-  pub async fn verify(self, code: String, identifier: Uuid, email: String) -> Result<()> {
+  pub async fn verify(self, body: VerifyBody) -> Result<()> {
     let req = self
       .pub_client
       .post(format!("{}{}", SERVER_URL, "/api/auth/verify"))
-      .json(&VerifyBody {
-        identifier,
-        email,
-        code,
-      })
+      .json(&body)
       .send()
       .await?;
 

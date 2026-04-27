@@ -1,3 +1,6 @@
+use std::sync::{Arc, Mutex};
+
+use crate::client::ApiClient;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use chat_rs::schema::user::Model as User;
@@ -17,7 +20,7 @@ pub enum Auth {
 pub struct Model {
   pub screen: Screen,
   pub user: Auth,
-  // pub client: generate
+  pub client: ApiClient,
 }
 
 pub enum Screen {
@@ -29,8 +32,11 @@ pub enum Screen {
 
 impl Default for Model {
   fn default() -> Self {
+    let client = ApiClient::default();
+
     Model {
-      screen: Screen::Auth(AuthModel::default()),
+      client: client.clone(),
+      screen: Screen::Auth(AuthModel::new(client)),
       user: Auth::NotLoggedIn,
     }
   }

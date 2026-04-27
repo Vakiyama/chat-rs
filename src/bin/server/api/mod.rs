@@ -16,12 +16,12 @@ pub fn router() -> Router {
   let key = HS256Key::from_bytes(&key_bytes);
 
   Router::new()
-    // ------ public api routes --------
-    .nest("/auth", auth::router())
+    // ------ private api routes --------
     .layer(
       tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
         key: JWTKey { key }.into(),
       })),
     )
-  // ------ private api routes --------
+    // ------ public api routes --------
+    .nest("/auth", auth::router())
 }
