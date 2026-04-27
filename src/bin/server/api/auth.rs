@@ -375,7 +375,7 @@ where
     .await
     .map_err(|_| VerifyError::Internal)?;
 
-  if &code_attempt == code && email == &incoming_email {
+  if code_attempt == code && email == incoming_email {
     Ok(VerifyResponse {
       access_token,
       refresh_token,
