@@ -1,6 +1,6 @@
 use axum::Router;
 use bytes::Bytes;
-use chat_rs::shared::auth::JWTKey;
+// use chat_rs::shared::auth::JWTKey;
 use jwt_simple::prelude::HS256Key;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
 
@@ -9,19 +9,20 @@ use crate::api::auth::JWTAuthorized;
 mod auth;
 
 pub fn router() -> Router {
-  let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
-    .expect("Invalid JWT_KEY, decode failed")
-    .into();
+  todo!()
+  // let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+  //   .expect("Invalid JWT_KEY, decode failed")
+  //   .into();
 
-  let key = HS256Key::from_bytes(&key_bytes);
+  // let key = HS256Key::from_bytes(&key_bytes);
 
-  Router::new()
-    // ------ private api routes --------
-    .layer(
-      tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
-        key: JWTKey { key }.into(),
-      })),
-    )
-    // ------ public api routes --------
-    .nest("/auth", auth::router())
+  // Router::new()
+  //   // ------ private api routes --------
+  //   .layer(
+  //     tower::ServiceBuilder::new().layer(AsyncRequireAuthorizationLayer::new(JWTAuthorized {
+  //       key: JWTKey { key }.into(),
+  //     })),
+  //   )
+  //   // ------ public api routes --------
+  //   .nest("/auth", auth::router())
 }

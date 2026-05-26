@@ -1,0 +1,39 @@
+syntax = "proto3";
+package auth.v1;
+
+import "google/protobuf/duration.proto";
+
+service AuthService {
+  rpc Login   (LoginRequest)   returns (LoginResponse);
+  rpc Verify  (VerifyRequest)  returns (VerifyResponse);
+  rpc Refresh (RefreshRequest) returns (RefreshResponse);
+}
+
+// -- Login --
+message LoginRequest {
+  string email = 1;
+}
+message LoginResponse {
+  string identifier = 1; 
+}
+
+// -- Verify --
+message VerifyRequest {
+  string identifier = 1;
+  string email      = 2;
+  string code       = 3;
+}
+message VerifyResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+  google.protobuf.Duration token_duration = 3; 
+}
+
+// -- Refresh --
+message RefreshRequest {
+  string refresh_token = 1;
+}
+message RefreshResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+}

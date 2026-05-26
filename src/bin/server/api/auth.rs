@@ -1,3 +1,10 @@
+use chat_rs::shared::{
+  convert::proto::auth::{
+    LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
+    auth_service_server::AuthService,
+  },
+  domain::auth::{RefreshError, Token, TokenPair, UserId},
+};
 use futures_util::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use std::{
@@ -8,11 +15,8 @@ use std::{
 };
 use tokio::{spawn, time::timeout};
 
+use crate::library::resend;
 use axum::{Json, Router, extract::State, routing::post};
-use chat_rs::shared::auth::{
-  EmailCodePair, JWTKey, LoginBody, LoginResponse, RefreshBody, RefreshError, RefreshResponse,
-  Token, TokenPair, UserId, VerifyBody, VerifyError, VerifyResponse,
-};
 use jwt_simple::{
   claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
   prelude::{HS256Key, MACLike},
@@ -20,33 +24,61 @@ use jwt_simple::{
 use tower_http::auth::AsyncAuthorizeRequest;
 use uuid::Uuid;
 
-use crate::library::resend;
+// pub fn router() -> Router {
+//   Router::new()
+//     .route(
+//       "/login",
+//       post(login_handler::<InMemoryCodeStore, InMemoryTokenStore>),
+//     )
+//     .route(
+//       "/refresh",
+//       post(refresh_handler::<InMemoryCodeStore, InMemoryTokenStore>),
+//     )
+//     .route(
+//       "/verify",
+//       post(verify_handler::<InMemoryCodeStore, InMemoryTokenStore>),
+//     )
+//     .with_state(RouterState::default())
+// }
 
-pub fn router() -> Router {
-  Router::new()
-    .route(
-      "/login",
-      post(login_handler::<InMemoryStore, InMemoryTokenStore>),
-    )
-    .route(
-      "/refresh",
-      post(refresh_handler::<InMemoryStore, InMemoryTokenStore>),
-    )
-    .route(
-      "/verify",
-      post(verify_handler::<InMemoryStore, InMemoryTokenStore>),
-    )
-    .with_state(RouterState::default())
+#[derive(Default, Clone)]
+pub struct EmailCodePair {
+  pub code: String,
+  pub email: String,
+}
+
+#[derive(Clone)]
+pub struct JWTKey {
+  pub key: HS256Key,
+}
+
+impl Default for JWTKey {
+  fn default() -> Self {
+    let key_bytes: bytes::Bytes =
+      hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+        .expect("Invalid key, decode failed")
+        .into();
+
+    let key: HS256Key = HS256Key::from_bytes(&key_bytes);
+
+    Self { key }
+  }
+}
+
+impl JWTKey {
+  pub fn get(&self) -> &HS256Key {
+    &self.key
+  }
 }
 
 // ------------------------- Stores -------------------------
 
 #[derive(Default, Clone)]
-pub struct InMemoryStore {
+pub struct InMemoryCodeStore {
   pending: Arc<Mutex<HashMap<Uuid, EmailCodePair>>>,
 }
 
-impl CodeStore for InMemoryStore {
+impl CodeStore for InMemoryCodeStore {
   async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<EmailCodePair> {
     self.pending.lock().unwrap().get(uuid).cloned()
   }
@@ -314,116 +346,154 @@ const JWT_REFRESH_DURATION: Duration = Duration::from_hours(24 * 30);
 
 #[derive(Default, Clone)]
 struct RouterState<CodeStore, RefreshStore> {
-  code_store: CodeStore,
+  code_store: Arc<tokio::sync::Mutex<CodeStore>>,
   refresh_store: RefreshStore,
   resend: Arc<resend_rs::Resend>,
   jwt_key: JWTKey,
 }
 
-// ------------------------ Routes ------------------------
-
-async fn login_handler<C, R>(
-  State(mut state): State<RouterState<C, R>>,
-  Json(payload): Json<LoginBody>,
-) -> Result<LoginResponse, resend::Error>
-where
+#[derive(Default)]
+pub struct AuthServer<
   C: CodeStore + Send + Sync + 'static,
   R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let identifier = Uuid::new_v4();
-  let code = resend::send_auth_email(&payload.email, state.resend).await?;
-
-  state
-    .code_store
-    .insert(
-      identifier,
-      EmailCodePair {
-        code,
-        email: payload.email,
-      },
-    )
-    .await;
-
-  Ok(LoginResponse { identifier })
+> {
+  pub state: RouterState<C, R>,
 }
 
-async fn verify_handler<C, R>(
-  State(state): State<RouterState<C, R>>,
-  Json(payload): Json<VerifyBody>,
-) -> Result<VerifyResponse, VerifyError>
-where
-  C: CodeStore + Send + Sync + 'static,
-  R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let VerifyBody {
-    identifier,
-    email: incoming_email,
-    code: code_attempt,
-  } = payload;
+#[tonic::async_trait]
+impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
+  async fn login(
+    &self,
+    request: tonic::Request<LoginRequest>,
+  ) -> Result<tonic::Response<LoginResponse>, tonic::Status> {
+    let identifier = Uuid::new_v4();
+    let inner_request = request.into_inner();
 
-  let EmailCodePair { code, email } = state
-    .code_store
-    .get_email_code_pair(&identifier)
-    .await
-    .map(Ok)
-    .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
+    let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
 
-  let TokenPair {
-    access_token,
-    refresh_token,
-  } = generate_tokens(identifier, state.jwt_key.get())
-    .await
-    .map_err(|_| VerifyError::Internal)?;
+    self
+      .state
+      .code_store
+      .lock()
+      .await
+      .insert(
+        identifier,
+        EmailCodePair {
+          code,
+          email: inner_request.email,
+        },
+      )
+      .await;
 
-  if code_attempt == code && email == incoming_email {
-    Ok(VerifyResponse {
-      access_token,
-      refresh_token,
-      duration_milliseconds: JWT_ACCESS_DURATION.as_millis(),
-    })
-  } else {
-    Err(VerifyError::InvalidCode)
+    Ok(tonic::Response::new(LoginResponse {
+      identifier: identifier.into(),
+    }))
+  }
+
+  async fn verify(
+    &self,
+    request: tonic::Request<VerifyRequest>,
+  ) -> Result<tonic::Response<VerifyResponse>, tonic::Status> {
+    todo!()
+  }
+
+  async fn refresh(
+    &self,
+    request: tonic::Request<RefreshRequest>,
+  ) -> Result<tonic::Response<RefreshResponse>, tonic::Status> {
+    todo!()
   }
 }
 
-async fn refresh_handler<C, R>(
-  State(state): State<RouterState<C, R>>,
-  Json(body): Json<RefreshBody>,
-) -> Result<RefreshResponse, RefreshError>
-where
-  C: CodeStore + Send + Sync + 'static,
-  R: RefreshTokenStore + Send + Sync + 'static,
-{
-  let RefreshBody {
-    refresh_token: incoming_refresh_token,
-  } = body;
-
-  let user_id = state
-    .refresh_store
-    .has(&incoming_refresh_token)
-    .await
-    .map_err(|err| -> RefreshError { err.into() })?;
-
-  let TokenPair {
-    access_token,
-    refresh_token,
-  } = generate_tokens(user_id, state.jwt_key.get())
-    .await
-    .map_err(|_| RefreshError::Internal)?;
-
-  state
-    .refresh_store
-    .rotate(&incoming_refresh_token, refresh_token.clone())
-    .await
-    .map_err(|err| -> RefreshError { err.into() })?;
-
-  Ok(RefreshResponse {
-    access_token,
-    refresh_token,
-  })
-}
-
-/// expects the user id as identifier
+// ------------------------ Routes ------------------------
+//
+// async fn login_handler<C, R>(
+//   State(mut state): State<RouterState<C, R>>,
+//   Json(payload): Json<LoginBody>,
+// ) -> Result<LoginResponse, resend::Error>
+// where
+//   C: CodeStore + Send + Sync + 'static,
+//   R: RefreshTokenStore + Send + Sync + 'static,
+// {
+// }
+//
+// async fn verify_handler<C, R>(
+//   State(state): State<RouterState<C, R>>,
+//   Json(payload): Json<VerifyBody>,
+// ) -> Result<VerifyResponse, VerifyError>
+// where
+//   C: CodeStore + Send + Sync + 'static,
+//   R: RefreshTokenStore + Send + Sync + 'static,
+// {
+//   let VerifyBody {
+//     identifier,
+//     email: incoming_email,
+//     code: code_attempt,
+//   } = payload;
+//
+//   let EmailCodePair { code, email } = state
+//     .code_store
+//     .get_email_code_pair(&identifier)
+//     .await
+//     .map(Ok)
+//     .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
+//
+//   let TokenPair {
+//     access_token,
+//     refresh_token,
+//   } = generate_tokens(identifier, state.jwt_key.get())
+//     .await
+//     .map_err(|_| VerifyError::Internal)?;
+//
+//   if code_attempt == code && email == incoming_email {
+//     Ok(VerifyResponse {
+//       access_token,
+//       refresh_token,
+//       duration_milliseconds: JWT_ACCESS_DURATION.as_millis(),
+//     })
+//   } else {
+//     Err(VerifyError::InvalidCode)
+//   }
+// }
+//
+// async fn refresh_handler<C, R>(
+//   State(state): State<RouterState<C, R>>,
+//   Json(body): Json<RefreshBody>,
+// ) -> Result<RefreshResponse, RefreshError>
+// where
+//   C: CodeStore + Send + Sync + 'static,
+//   R: RefreshTokenStore + Send + Sync + 'static,
+// {
+//   let RefreshBody {
+//     refresh_token: incoming_refresh_token,
+//   } = body;
+//
+//   let user_id = state
+//     .refresh_store
+//     .has(&incoming_refresh_token)
+//     .await
+//     .map_err(|err| -> RefreshError { err.into() })?;
+//
+//   let TokenPair {
+//     access_token,
+//     refresh_token,
+//   } = generate_tokens(user_id, state.jwt_key.get())
+//     .await
+//     .map_err(|_| RefreshError::Internal)?;
+//
+//   state
+//     .refresh_store
+//     .rotate(&incoming_refresh_token, refresh_token.clone())
+//     .await
+//     .map_err(|err| -> RefreshError { err.into() })?;
+//
+//   Ok(RefreshResponse {
+//     access_token,
+//     refresh_token,
+//   })
+// }
+//
+// /// expects the user id as identifier
 async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair, anyhow::Error> {
   let claims = Claims::create(JWT_ACCESS_DURATION.into()).with_subject(identifier.to_string());
   let access_token = key
@@ -438,6 +508,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   Ok(TokenPair {
     access_token,
     refresh_token,
+    duration: JWT_REFRESH_DURATION,
   })
 }
 

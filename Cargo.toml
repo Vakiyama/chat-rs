@@ -29,6 +29,10 @@ reqwest = "0.13.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest-middleware = "0.5.1"
 async-trait = "0.1.89"
+tonic = "0.14.6"
+prost = "0.14.3"
+prost-types = "0.14.3"
+tonic-prost = "0.14.6"
 
 [dependencies.uuid]
 version = "1.19.0"
@@ -36,3 +40,7 @@ features = [
     "v4",
     "serde"
 ]
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+protoc-bin-vendored = "3"

@@ -59,6 +59,7 @@
               pkgs.watchexec
               pkgs.openssl
               pkgs.tokei
+              pkgs.grpc-tools
             ]
             ++ guiLibs;
 

@@ -1,14 +1,13 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use dotenvy::dotenv;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use resend_rs::types::CreateEmailBaseOptions;
 use resend_rs::{Resend, Result};
 use serde::Deserialize;
+use tonic::Status;
 
 const FROM: &str = "ChatRS <chatrs@resend.dev>";
 const SUBJECT: &str = "Login Code";
@@ -18,13 +17,12 @@ pub enum Error {
   Api(String),
   EmailValidation(String),
 }
-impl IntoResponse for Error {
-  fn into_response(self) -> axum::response::Response {
-    match self {
-      Error::Api(_) => (StatusCode::BAD_REQUEST, "Resend API Error").into_response(),
-      Error::EmailValidation(_error) => {
-        (StatusCode::UNPROCESSABLE_ENTITY, "Invalid Email").into_response()
-      }
+
+impl From<Error> for tonic::Status {
+  fn from(error: Error) -> tonic::Status {
+    match error {
+      Error::Api(message) => Status::internal(message),
+      Error::EmailValidation(_error) => Status::invalid_argument("Invalid email."),
     }
   }
 }
