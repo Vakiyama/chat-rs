@@ -11,6 +11,8 @@ use crate::schema::user::Model as User;
 pub const WS_PORT: i32 = 8000;
 pub const WS_URL: &str = "ws://127.0.0.1:8000";
 pub const SERVER_URL: &str = "127.0.0.1:3000";
+// todo: this is horrid
+pub const SERVER_URL_HTTP: &str = "http://127.0.0.1:3000";
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ChatMessage {
