@@ -12,6 +12,8 @@ use std::{
   sync::{Arc, Mutex},
   time::Duration,
 };
+use tonic::body::Body;
+use tonic_middleware::RequestInterceptor;
 
 use crate::library::resend;
 use jwt_simple::{
@@ -262,41 +264,34 @@ impl From<RefreshTokenStoreError> for RefreshError {
 
 // ---------------------------------- Middleware -------------------------------------
 
-#[derive(Clone)]
-pub struct JWTAuthorized
+#[derive(Clone, Default)]
+pub struct JWTAuthorizedInterceptor
 where
   JWTKey: 'static,
 {
   pub key: Arc<JWTKey>,
 }
 
-impl AsyncAuthorizeRequest<axum::body::Body> for JWTAuthorized {
-  type RequestBody = axum::body::Body;
-  type ResponseBody = axum::body::Body;
-  type Future = BoxFuture<'static, Result<Request<axum::body::Body>, Response<Self::ResponseBody>>>;
-
-  fn authorize(&mut self, mut request: Request<axum::body::Body>) -> Self::Future {
+#[tonic::async_trait]
+impl RequestInterceptor for JWTAuthorizedInterceptor {
+  async fn intercept(
+    &self,
+    mut request: http::Request<Body>,
+  ) -> Result<http::Request<Body>, tonic::Status> {
     let key = self.key.clone();
 
-    Box::pin(async {
-      if let Some(user_id) = check_auth(&request, key) {
-        request.extensions_mut().insert(user_id);
-        Ok(request)
-      } else {
-        let unauthorized_response = Response::builder()
-          .status(StatusCode::UNAUTHORIZED)
-          .body(axum::body::Body::default())
-          .unwrap();
+    if let Some(user_id) = check_auth(&request, key) {
+      request.extensions_mut().insert(user_id);
 
-        Err(unauthorized_response)
-      }
-    })
+      Ok(request)
+    } else {
+      Err(tonic::Status::unauthenticated("Unauthenticated"))
+    }
   }
 }
 
 fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
-  let header = req.headers().get("Authorization")?.to_str().ok()?;
-  let token = header.strip_prefix("Bearer ")?;
+  let token = req.headers().get("authorization")?.to_str().ok()?;
 
   get_uuid_from_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
 }
@@ -332,7 +327,9 @@ pub struct RouterState<CodeStore, RefreshStore> {
   jwt_key: JWTKey,
 }
 
-#[derive(Default)]
+// ------------------------ Routes ------------------------
+
+#[derive(Default, Clone)]
 pub struct AuthServer<
   C: CodeStore + Send + Sync + 'static,
   R: RefreshTokenStore + Send + Sync + 'static,
@@ -458,38 +455,6 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
   }
 }
 
-// ------------------------ Routes ------------------------
-//
-// async fn login_handler<C, R>(
-//   State(mut state): State<RouterState<C, R>>,
-//   Json(payload): Json<LoginBody>,
-// ) -> Result<LoginResponse, resend::Error>
-// where
-//   C: CodeStore + Send + Sync + 'static,
-//   R: RefreshTokenStore + Send + Sync + 'static,
-// {
-// }
-//
-// async fn verify_handler<C, R>(
-//   State(state): State<RouterState<C, R>>,
-//   Json(payload): Json<VerifyBody>,
-// ) -> Result<VerifyResponse, VerifyError>
-// where
-//   C: CodeStore + Send + Sync + 'static,
-//   R: RefreshTokenStore + Send + Sync + 'static,
-// {
-// }
-//
-// async fn refresh_handler<C, R>(
-//   State(state): State<RouterState<C, R>>,
-//   Json(body): Json<RefreshBody>,
-// ) -> Result<RefreshResponse, RefreshError>
-// where
-//   C: CodeStore + Send + Sync + 'static,
-//   R: RefreshTokenStore + Send + Sync + 'static,
-// {
-// }
-//
 // /// expects the user id as identifier
 async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair, anyhow::Error> {
   let claims = Claims::create(JWT_ACCESS_DURATION.into()).with_subject(identifier.to_string());

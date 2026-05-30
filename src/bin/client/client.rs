@@ -1,3 +1,5 @@
+//
+
 // use std::sync::{Arc, Mutex};
 //
 // use chat_rs::{
@@ -204,3 +206,36 @@
 //     Ok(())
 //   }
 // }
+
+use chat_rs::SERVER_URL;
+use tokio::sync::OnceCell;
+use tonic::transport::Channel;
+
+pub mod proto {
+  pub mod auth {
+    include!(concat!(env!("OUT_DIR"), "/auth.v1.rs"));
+  }
+}
+
+#[non_exhaustive]
+#[derive(Clone)]
+pub struct HTTPClient {
+  pub auth: proto::auth::auth_service_client::AuthServiceClient<Channel>,
+}
+
+static HTTP_CLIENT: tokio::sync::OnceCell<HTTPClient> = OnceCell::const_new();
+
+pub async fn get() -> HTTPClient {
+  HTTP_CLIENT
+    .get_or_init(|| async {
+      HTTPClient {
+        auth: proto::auth::auth_service_client::AuthServiceClient::connect(format!(
+          "http://{SERVER_URL}"
+        ))
+        .await
+        .unwrap(),
+      }
+    })
+    .await
+    .clone()
+}

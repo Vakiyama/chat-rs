@@ -33,6 +33,7 @@ tonic = "0.14.6"
 prost = "0.14.3"
 prost-types = "0.14.3"
 tonic-prost = "0.14.6"
+tonic-middleware = "0.4.1"
 
 [dependencies.uuid]
 version = "1.19.0"

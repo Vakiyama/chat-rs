@@ -1,10 +1,6 @@
-use chat_rs::shared::auth::{LoginBody, LoginResponse, Token, VerifyBody, VerifyResponse};
+use chat_rs::shared::domain::auth::Token;
 use email_address;
-use std::{
-  str::FromStr,
-  sync::{Arc, Mutex},
-};
-use uuid::uuid;
+use std::{str::FromStr, sync::Arc};
 
 use iced::{
   Border, Color, Element,
@@ -17,7 +13,13 @@ use iced::{
   },
 };
 
-use crate::{SPACE_GRID, client::ApiClient};
+use crate::{
+  SPACE_GRID,
+  client::{
+    self,
+    proto::auth::{LoginRequest, LoginResponse, VerifyRequest, VerifyResponse},
+  },
+};
 
 // -------------------- MODEL --------------------
 
@@ -44,19 +46,17 @@ impl Default for Mode {
 }
 
 pub struct Model {
-  client: ApiClient,
   mode: Mode,
   email_input: String,
   remember_me_checked: bool,
 }
 
 impl Model {
-  pub fn new(client: ApiClient) -> Self {
+  pub fn new() -> Self {
     Model {
       mode: Default::default(),
       email_input: Default::default(),
       remember_me_checked: Default::default(),
-      client,
     }
   }
 
@@ -76,8 +76,8 @@ pub enum Message {
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
-  ApiSentLogin(Result<LoginResponse, Arc<reqwest_middleware::Error>>),
-  ApiVerifiedCode(Result<VerifyResponse, Arc<reqwest_middleware::Error>>),
+  ApiSentLogin(Result<LoginResponse, Arc<tonic::Status>>),
+  ApiVerifiedCode(Result<VerifyResponse, Arc<tonic::Status>>),
 }
 
 // -------------------- UPDATE --------------------
@@ -103,30 +103,37 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
             let email_input = model.email_input.clone();
             let code_input = code_input.clone();
             let identifier = identifier.clone();
-            let client = model.client.clone();
 
             Task::perform(
               async move {
-                client
-                  .verify(VerifyBody {
-                    identifier: uuid::Uuid::from_str(&identifier)
-                      .expect("Identifier from BE is valid"),
+                client::get()
+                  .await
+                  .auth
+                  .verify(VerifyRequest {
+                    identifier,
                     email: email_input,
-                    code: code_input.to_string(),
+                    code: code_input,
                   })
                   .await
               },
-              |res| todo!("handle verify response"),
+              |response| todo!("handle verify response"),
             )
           }
         }
       } else {
         let email_input = model.email_input.clone();
-        let client = model.client.clone();
         // send off req as task
         Task::perform(
-          async move { client.login(LoginBody { email: email_input }).await },
-          move |response| Message::ApiSentLogin(response.map_err(Arc::new)),
+          async move {
+            client::get()
+              .await
+              .auth
+              .login(LoginRequest { email: email_input })
+              .await
+          },
+          move |response| {
+            Message::ApiSentLogin(response.map(|res| res.into_inner()).map_err(Arc::new))
+          },
         )
       }
     }

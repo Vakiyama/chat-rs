@@ -4,9 +4,13 @@ use axum::Router;
 use chat_rs::{
   SERVER_URL, WS_PORT, WS_URL, shared::convert::proto::auth::auth_service_server::AuthServiceServer,
 };
-use tonic::transport::Server;
+use tonic::{service::LayerExt, transport::Server};
+use tonic_middleware::RequestInterceptorLayer;
+use tower::ServiceBuilder;
 
-use crate::api::auth::{AuthServer, InMemoryCodeStore, InMemoryTokenStore};
+use crate::api::auth::{
+  AuthServer, InMemoryCodeStore, InMemoryTokenStore, JWTAuthorizedInterceptor,
+};
 
 mod api;
 mod library;
@@ -21,9 +25,17 @@ async fn main() {
   let manager = Arc::new(Mutex::new(websocket::Manager::default()));
 
   let auth_service: AuthServer<InMemoryCodeStore, InMemoryTokenStore> = AuthServer::default();
+  let jwt_interceptor = JWTAuthorizedInterceptor::default();
+
+  let public_service = ServiceBuilder::new().service(AuthServiceServer::new(auth_service));
+
+  // let private_service = ServiceBuilder::new()
+  // .service(...)
+  // .layer(RequestInterceptorLayer::new(jwt_interceptor));
 
   let grpc = Server::builder()
-    .add_service(AuthServiceServer::new(auth_service))
+    // .add_service(private_service)
+    .add_service(public_service)
     .serve(SERVER_URL.parse().unwrap());
 
   let app = Router::new()
