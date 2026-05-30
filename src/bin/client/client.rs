@@ -1,155 +1,20 @@
-//
-
-use http_body_util::{BodyExt, Full};
+use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
+use chat_rs::{SERVER_URL_HTTP, shared::domain::auth::Token};
+use http_body_util::BodyExt;
+use http_body_util::Full;
 use std::{
-  io::Bytes,
   pin::Pin,
   sync::{Arc, Mutex},
 };
 use tokio::sync::OnceCell;
-use tonic::{IntoRequest, body::Body, transport::Channel};
-use tonic_middleware::{Middleware, ServiceBound};
-
-use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
-
-use chat_rs::{
-  SERVER_URL, SERVER_URL_HTTP,
-  shared::{
-    convert::proto::auth::RefreshResponse,
-    domain::auth::{RefreshCommand, Token},
-  },
-};
-use http::{Extensions, Request, Response};
+use tonic::transport::Channel;
+use tower::Service;
 
 #[derive(Default)]
 struct TokenStore {
   access_token: Option<Token>,
   refresh_token: Option<Token>,
 }
-//
-// #[derive(Clone)]
-// pub struct ApiClient {
-//   pub_client: reqwest::Client,
-//   private_client: reqwest_middleware::ClientWithMiddleware,
-//   tokens: Arc<Mutex<TokenStore>>,
-// }
-//
-// impl ApiClient {
-//   pub async fn login(self, body: LoginBody) -> Result<LoginResponse> {
-//     let req = self
-//       .pub_client
-//       .post(format!("http://{}{}", SERVER_URL, "/api/auth/login"))
-//       .json(&body)
-//       .send()
-//       .await?;
-//
-//     println!("{req:?}");
-//     if req.status() == 200 {
-//       let res = req.json::<LoginResponse>().await?;
-//
-//       Ok(res)
-//     } else {
-//       todo!()
-//     }
-//   }
-//
-//   pub async fn verify(self, body: VerifyBody) -> Result<()> {
-//     let req = self
-//       .pub_client
-//       .post(format!("{}{}", SERVER_URL, "/api/auth/verify"))
-//       .json(&body)
-//       .send()
-//       .await?;
-//
-//     let VerifyResponse {
-//       access_token,
-//       refresh_token,
-//       ..
-//     } = req.json::<VerifyResponse>().await?;
-//
-//     {
-//       let mut token_store = self.tokens.lock().unwrap();
-//       token_store.access_token = Some(access_token);
-//       token_store.refresh_token = Some(refresh_token);
-//     }
-//
-//     Ok(())
-//   }
-// }
-//
-// impl Default for ApiClient {
-//   fn default() -> Self {
-//     let client = reqwest::Client::new();
-//     let auth_middleware = AuthMiddleware::default();
-//     let private_client = ClientBuilder::new(client).with(auth_middleware).build();
-//
-//     Self {
-//       pub_client: Default::default(),
-//       private_client,
-//       tokens: Default::default(),
-//     }
-//   }
-// }
-//
-// // // need some auth middleware between client requests
-// // // 1. place to store auth/refresh tokens in memory
-// // // 2. handle refresh token semantics on unauthed reqs
-// // // 3. some teardown
-// //
-// // use std::sync::{Arc, Mutex};
-// //
-// // use tokio::sync::Mutex as AMutex;
-// //
-// // use chat_rs::{
-// //   SERVER_URL,
-// //   spec::{
-// //     Api,
-// //     auth::{AuthClient, RefreshBody, Token},
-// //   },
-// // };
-// // use http::Extensions;
-// // use reqwest::{Client, Request, Response};
-// // use reqwest_middleware::{ClientBuilder, Middleware, Next, Result};
-// // use spec_derive_core::RequestError;
-// //
-// // // ----------------------------- ApiClient ----------------------------
-// //
-// // pub struct ApiClient {
-// //   pub auth_client: Api, // this "Api" should be given a different name
-// //   pub tokens: Arc<Mutex<TokenStore>>,
-// // }
-// //
-// // impl Default for ApiClient {
-// //   fn default() -> Self {
-// //     let tokens: Arc<Mutex<TokenStore>> = Arc::default();
-// //
-// //     let middleware = AuthMiddleware {
-// //       tokens: tokens.clone(),
-// //       auth_client: Arc::new(AMutex::new(Api::new(
-// //         format!("http://{}/api/auth", SERVER_URL),
-// //         ClientBuilder::new(Client::new()).build(),
-// //       ))),
-// //     };
-// //
-// //     let client = ClientBuilder::new(Client::new()).with(middleware).build();
-// //
-// //     let auth_client = Api::new(format!("http://{}/api/auth", SERVER_URL), client);
-// //
-// //     Self {
-// //       auth_client,
-// //       tokens,
-// //     }
-// //   }
-// // }
-// //
-// // // impl ApiClient {}
-// //
-// // // ---------------------------- Middleware ---------------------------
-// //
-// //
-
-// use tonic::body::BoxBody;
-use tower::{Service, ServiceBuilder};
 
 #[derive(Clone)]
 pub struct AuthService {
@@ -158,11 +23,8 @@ pub struct AuthService {
 }
 
 impl AuthService {
-  pub fn new(inner: tonic::transport::Channel) -> Self {
-    Self {
-      inner,
-      tokens: Arc::new(Mutex::new(TokenStore::default())),
-    }
+  pub fn new(inner: tonic::transport::Channel, tokens: Arc<Mutex<TokenStore>>) -> Self {
+    Self { inner, tokens }
   }
 }
 
@@ -188,7 +50,6 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
 
     Box::pin(async move {
       // Buffer the body bytes so we can replay
-      use http_body_util::BodyExt;
       let body_bytes = body.collect().await?.to_bytes();
 
       let make_req = |tokens: &Arc<Mutex<TokenStore>>| {
@@ -263,11 +124,6 @@ pub async fn get() -> HTTPClient {
         .await
         .unwrap();
 
-      // let tokens = Arc::new(Mutex::new(TokenStore::default()));
-
-      // how to create a service:
-      // let auth_channel = ;
-
       HTTPClient {
         auth: AuthServiceClient::new(channel),
       }
@@ -276,8 +132,11 @@ pub async fn get() -> HTTPClient {
     .clone()
 }
 
-fn private_channel(channel: tonic::transport::Channel) -> AuthService {
+fn private_channel(
+  channel: tonic::transport::Channel,
+  tokens: Arc<Mutex<TokenStore>>,
+) -> AuthService {
   tower::ServiceBuilder::new()
-    .layer_fn(AuthService::new)
+    .layer_fn(|channel| AuthService::new(channel, tokens.clone()))
     .service(channel)
 }
