@@ -1,0 +1,38 @@
+syntax = "proto3";
+package stream.v1;
+
+service StreamService {
+  rpc ConnectStream (stream ClientMessage) returns (stream ServerMessage);
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+}
+
+message ChatMessage {
+  User from = 1;
+  string text = 2;
+}
+
+message JoinedRoom {
+  User from = 1;
+}
+
+message LeftRoom {
+  User from = 1;
+}
+
+message ServerMessage {
+  oneof payload {
+    JoinedRoom  joined_room = 1;
+    LeftRoom    left_room   = 2;
+    ChatMessage chat        = 3;
+  }
+}
+
+message ClientMessage {
+  oneof payload {
+    ChatMessage chat = 1;
+  }
+}

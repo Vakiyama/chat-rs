@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod stream;
 
 pub trait IntoStatus {
   fn into_status(self) -> tonic::Status;

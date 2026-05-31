@@ -37,22 +37,17 @@ async fn main() {
     .add_service(public_service)
     .serve(SERVER_URL.parse().unwrap());
 
-  let app = Router::new()
-    .route(
-      "/",
-      axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
-    )
-    .with_state(state);
-  let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{WS_PORT}"))
-    .await
-    .unwrap();
+  //  let app = Router::new()
+  //    .route(
+  //      "/",
+  //      axum::routing::any(|socket, state| websocket::ws_handler(socket, state, manager)),
+  //    )
+  //    .with_state(state);
 
   println!("gRPC listening on: {SERVER_URL}");
-  println!("WS listening on: {WS_URL}");
 
-  // run both forever, bail if either fails
-  tokio::select! {
-      res = grpc => { eprintln!("gRPC exited: {:?}", res); }
-      res = axum::serve(listener, app) => { eprintln!("WS exited: {:?}", res); }
-  }
+  grpc
+    .await
+    .map_err(|e| eprintln!("gRPC exited: {:?}", e))
+    .unwrap();
 }

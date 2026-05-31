@@ -9,7 +9,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .build_server(true)
     .build_client(true)
     .compile_protos(
-      &["./src/shared/proto/auth/v1/auth.proto"],
+      &[
+        "./src/shared/proto/auth/v1/auth.proto",
+        "./src/shared/proto/stream/v1/stream.proto",
+      ],
       &["./src/shared/proto/"],
     )?;
   Ok(())
