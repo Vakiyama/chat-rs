@@ -23,6 +23,7 @@ use crate::{
 
 // -------------------- MODEL --------------------
 
+#[derive(Debug)]
 pub enum Mode {
   Login {
     error_message: Option<&'static str>,
@@ -45,6 +46,7 @@ impl Default for Mode {
   }
 }
 
+#[derive(Debug)]
 pub struct Model {
   mode: Mode,
   email_input: String,
@@ -78,6 +80,7 @@ pub enum Message {
   UserToggledRememberMe,
   ApiSentLogin(Result<LoginReturn, Arc<tonic::Status>>),
   ApiVerifiedCode(Result<VerifyReturn, Arc<tonic::Status>>),
+  None,
 }
 
 // -------------------- UPDATE --------------------
@@ -85,69 +88,85 @@ pub enum Message {
 pub fn update(model: &mut Model, message: Message) -> Task<Message> {
   match message {
     Message::UserChangedLoginInput(new) => {
-      model.email_input = new;
+      match model.mode {
+        Mode::Login { .. } => model.email_input = new,
+        Mode::Register { .. } => todo!(),
+        Mode::Code {
+          ref mut code_input, ..
+        } => *code_input = new,
+      }
       Task::none()
     }
     Message::UserSubmittedForm => {
-      if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
-        match &mut model.mode {
-          Mode::Login { error_message } | Mode::Register { error_message } => {
-            *error_message = Some("Invalid email.");
-            Task::none()
-          }
-          Mode::Code {
-            error_message: _,
-            identifier,
-            code_input,
-          } => {
-            let email_input = model.email_input.clone();
-            let code_input = code_input.clone();
-            let identifier = identifier.clone();
+      println!("user submitted");
+      println!("{:?}", model.mode);
 
+      match &mut model.mode {
+        // todo: handle register command + fix this matching
+        Mode::Login { error_message } => {
+          if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
+            match &mut model.mode {
+              Mode::Login { error_message } | Mode::Register { error_message } => {
+                *error_message = Some("Invalid email.");
+                Task::none()
+              }
+              _ => Task::none(),
+            }
+          } else {
+            let email_input = model.email_input.clone();
+            // send off req as task
             Task::perform(
               async move {
                 client::get()
                   .await
                   .auth
-                  .verify(
-                    VerifyCommand {
-                      identifier: identifier.try_into().unwrap(),
-                      email: email_input,
-                      code: code_input,
-                    }
-                    .into_proto(),
-                  )
+                  .login(LoginCommand { email: email_input }.into_proto())
                   .await
               },
-              |response| todo!("handle verify response"),
+              move |response| {
+                Message::ApiSentLogin(
+                  response
+                    .map(|res| res.into_inner().try_into_domain().unwrap())
+                    .map_err(Arc::new),
+                )
+              },
             )
           }
         }
-      } else {
-        let email_input = model.email_input.clone();
-        // send off req as task
-        Task::perform(
-          async move {
-            client::get()
-              .await
-              .auth
-              .login(LoginCommand { email: email_input }.into_proto())
-              .await
-          },
-          move |response| {
-            Message::ApiSentLogin(
-              response
-                .map(|res| {
-                  let t = res.into_inner();
+        Mode::Register { error_message } => todo!(),
+        Mode::Code {
+          error_message: _,
+          identifier,
+          code_input,
+        } => {
+          let email_input = model.email_input.clone();
+          let code_input = code_input.clone();
+          let identifier = identifier.clone();
 
-                  let login_res: LoginReturn = t.try_into_domain().unwrap();
-
-                  login_res
-                })
-                .map_err(Arc::new),
-            )
-          },
-        )
+          Task::perform(
+            async move {
+              client::get()
+                .await
+                .auth
+                .verify(
+                  VerifyCommand {
+                    identifier: identifier.try_into().unwrap(),
+                    email: email_input,
+                    code: code_input,
+                  }
+                  .into_proto(),
+                )
+                .await
+            },
+            |response| {
+              Message::ApiVerifiedCode(
+                response
+                  .map(|res| res.into_inner().try_into_domain().unwrap())
+                  .map_err(Arc::new),
+              )
+            },
+          )
+        }
       }
     }
     Message::UserToggledRememberMe => {
@@ -192,7 +211,43 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
 
       Task::none()
     }
-    Message::ApiVerifiedCode(verify_body) => todo!(),
+    Message::ApiVerifiedCode(Ok(body)) => Task::future(async {
+      client::get().await.insert_tokens(body);
+      Message::UserNavigatedLogin
+    }),
+    Message::ApiVerifiedCode(Err(status)) => {
+      // VerifyError::InvalidCode => Status::unauthenticated("invalid code"),
+      // VerifyError::UnknownIdentifier => Status::not_found("unknown identifier"),
+      // VerifyError::Internal => Status::internal("internal error"),
+      match status.code() {
+        tonic::Code::Unauthenticated => {
+          if let Mode::Code {
+            ref mut error_message,
+            ..
+          } = model.mode
+          {
+            *error_message = Some("Invalid code. Please double check your code and try again.");
+          }
+        }
+        tonic::Code::NotFound => {
+          model.mode = Mode::Login {
+            error_message: Some("Your code has expired. Please request a new one."),
+          };
+        }
+        _ => {
+          if let Mode::Code {
+            ref mut error_message,
+            ..
+          } = model.mode
+          {
+            *error_message = Some("An unknown error occurred.");
+          }
+        }
+      };
+
+      Task::none()
+    }
+    Message::None => Task::none(),
   }
 }
 
@@ -226,13 +281,16 @@ fn left_card<'a>(model: &'a Model) -> Element<'a, Message> {
             }
           }),
         {
-          if let Mode::Login {
-            error_message: Some(err),
-          } = model.mode
-          {
-            float(text(err).color(Color::from_rgb(1., 0.5, 0.5)).size(12))
-          } else {
-            float(text("").height(0))
+          match model.mode {
+            Mode::Login { error_message }
+            | Mode::Register { error_message }
+            | Mode::Code { error_message, .. } => {
+              if let Some(err) = error_message {
+                float(text(err).color(Color::from_rgb(1., 0.5, 0.5)).size(12))
+              } else {
+                float(text("").height(0))
+              }
+            }
           }
         },
       ]
@@ -269,7 +327,7 @@ fn render_left_content<'a>(model: &Model) -> Element<'a, Message> {
   }
 }
 
-fn code_input_content<'a>(_model: &Model, code_input: &String) -> Element<'a, Message> {
+fn code_input_content<'a>(_model: &Model, code_input: &str) -> Element<'a, Message> {
   column![
     text_input("Enter Code", code_input)
       .on_input(Message::UserChangedLoginInput)

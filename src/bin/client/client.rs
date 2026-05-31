@@ -1,6 +1,6 @@
 use chat_rs::shared::convert::IntoProto;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
-use chat_rs::shared::domain::auth::RefreshCommand;
+use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
 // use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
 use chat_rs::{SERVER_URL_HTTP, shared::domain::auth::Token};
 use http_body_util::BodyExt;
@@ -109,6 +109,15 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
 #[derive(Clone)]
 pub struct HTTPClient {
   pub auth: AuthServiceClient<Channel>,
+  tokens: Arc<Mutex<TokenStore>>,
+}
+
+impl HTTPClient {
+  pub fn insert_tokens(self, response: VerifyReturn) {
+    let mut tokens = self.tokens.lock().unwrap();
+    tokens.access_token = Some(response.access_token);
+    tokens.refresh_token = Some(response.refresh_token);
+  }
 }
 
 static HTTP_CLIENT: tokio::sync::OnceCell<HTTPClient> = OnceCell::const_new();
@@ -123,6 +132,7 @@ pub async fn get() -> HTTPClient {
 
       HTTPClient {
         auth: AuthServiceClient::new(channel),
+        tokens: Default::default(),
       }
     })
     .await

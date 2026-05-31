@@ -69,7 +69,7 @@ impl IntoProto<VerifyResponse> for VerifyReturn {
       refresh_token: self.refresh_token,
       token_duration: Some(prost_types::Duration {
         seconds: self.token_duration.as_secs().try_into().unwrap(),
-        nanos: self.token_duration.as_nanos().try_into().unwrap(),
+        nanos: 0,
       }),
     }
   }

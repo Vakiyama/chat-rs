@@ -6,9 +6,9 @@ use crate::websocket::Connection;
 use chat_rs::WebSocketMessage;
 use chat_rs::schema::post::Model as Post;
 use chat_rs::schema::user::Model as User;
-use iced::Pixels;
 use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
+use iced::{Pixels, Task};
 
 // --------------------------------- MODEL ---------------------------------
 
@@ -108,28 +108,41 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
 }
 // --------------------------------- UPDATE ---------------------------------
 
-pub fn update(model: &mut Model, message: Message, user: &User) {
+pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message> {
   match message {
     Message::UserChangedChatInput(new) => {
       model.input = new;
+      Task::none()
     }
     Message::UserSubmittedChatInput => {
-      if let Err(Error::NoConnection) = model.send(&user) {
+      if let Err(Error::NoConnection) = model.send(user) {
         println!("Not connected...")
       }
+      Task::none()
     }
     Message::Disconnected => {
       model.websocket = WebSocket::Disconnected;
+      Task::none()
     }
     Message::Connected(connection) => {
       model.websocket = WebSocket::Connected(connection);
+      Task::none()
     }
     Message::Websocket(server_message) => match server_message {
       chat_rs::WebSocketMessage::JoinedRoom { from } => {
-        println!("User joined room: {from:?}")
+        println!("User joined room: {from:?}");
+        Task::none()
       }
-      chat_rs::WebSocketMessage::LeftRoom { from } => println!("User left room: {from:?}"),
-      chat_rs::WebSocketMessage::Chat { from, text } => model.receive(&text, &from.name),
+      chat_rs::WebSocketMessage::LeftRoom { from } => {
+        println!("User left room: {from:?}");
+
+        Task::none()
+      }
+      chat_rs::WebSocketMessage::Chat { from, text } => {
+        model.receive(&text, &from.name);
+
+        Task::none()
+      }
     },
   }
 }

@@ -1,5 +1,5 @@
 use iced::widget::container;
-use iced::{Element, Subscription};
+use iced::{Element, Subscription, Task};
 
 mod websocket;
 
@@ -35,16 +35,17 @@ fn subscription(_model: &model::Model) -> Subscription<Message> {
 enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
+  None,
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
+  // println!("{message:#?}");
   match message {
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
-        chat::update(chat_model, msg, user);
-        iced::Task::none()
+        chat::update(chat_model, msg, user).map(Message::Chat)
       } else {
         iced::Task::none()
       }
@@ -53,11 +54,22 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Auth::NotLoggedIn = &model.user
         && let Screen::Auth(auth_model) = &mut model.screen
       {
-        auth::update(auth_model, msg).map(Message::Auth)
+        match msg {
+          auth::Message::ApiVerifiedCode(Ok(response)) => {
+            model.screen = Screen::Chat(Default::default());
+
+            Task::future(async {
+              client::get().await.insert_tokens(response);
+              Message::None
+            })
+          }
+          msg => auth::update(auth_model, msg).map(Message::Auth),
+        }
       } else {
         iced::Task::none()
       }
     }
+    Message::None => iced::Task::none(),
   }
 }
 
