@@ -1,15 +1,17 @@
 use chat_rs::shared::{
   convert::{
-    IntoProto, TryIntoProto,
+    IntoProto, IntoStatus, TryIntoDomain,
     auth::proto::{
       LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
       auth_service_server::AuthService,
     },
   },
-  domain::auth::{LoginReturn, RefreshError, Token, TokenPair, UserId, VerifyCommand, VerifyError},
+  domain::auth::{
+    LoginReturn, RefreshCommand, RefreshError, RefreshReturn, Token, TokenPair, UserId,
+    VerifyCommand, VerifyError, VerifyReturn,
+  },
 };
-use futures_util::future::BoxFuture;
-use http::{Request, Response, StatusCode};
+use http::Request;
 use std::{
   collections::{HashMap, HashSet},
   sync::{Arc, Mutex},
@@ -23,7 +25,6 @@ use jwt_simple::{
   claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
   prelude::{HS256Key, MACLike},
 };
-use tower_http::auth::AsyncAuthorizeRequest;
 use uuid::Uuid;
 
 #[derive(Default, Clone)]
@@ -383,7 +384,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       identifier,
       email: incoming_email,
       code: code_attempt,
-    } = inner_request.try_into_proto()?;
+    } = inner_request.try_into_domain()?;
 
     let EmailCodePair { code, email } = self
       .state
@@ -393,7 +394,8 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       .get_email_code_pair(&identifier)
       .await
       .map(Ok)
-      .unwrap_or(Err(VerifyError::UnknownIdentifier))?;
+      .unwrap_or(Err(VerifyError::UnknownIdentifier))
+      .map_err(|e| e.into_status())?;
 
     let TokenPair {
       access_token,
@@ -401,19 +403,20 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       duration,
     } = generate_tokens(identifier, self.state.jwt_key.get())
       .await
-      .map_err(|_| VerifyError::Internal)?;
+      .map_err(|_| VerifyError::Internal)
+      .map_err(|e| e.into_status())?;
 
     if code_attempt == code && email == incoming_email {
-      Ok(tonic::Response::new(VerifyResponse {
-        access_token,
-        refresh_token,
-        token_duration: Some(prost_types::Duration {
-          seconds: duration.as_secs().try_into().expect("Positive duration"),
-          nanos: 0,
-        }),
-      }))
+      Ok(tonic::Response::new(
+        VerifyReturn {
+          access_token,
+          refresh_token,
+          token_duration: duration,
+        }
+        .into_proto(),
+      ))
     } else {
-      Err(VerifyError::InvalidCode.into())
+      Err(VerifyError::InvalidCode.into_status())
     }
   }
 
@@ -423,16 +426,17 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
   ) -> Result<tonic::Response<RefreshResponse>, tonic::Status> {
     let request_inner = request.into_inner();
 
-    let RefreshRequest {
+    let RefreshCommand {
       refresh_token: incoming_refresh_token,
-    } = request_inner;
+    } = request_inner.try_into_domain()?;
 
     let user_id = self
       .state
       .refresh_store
       .has(&incoming_refresh_token)
       .await
-      .map_err(|err| -> RefreshError { err.into() })?;
+      .map_err(|err| -> RefreshError { err.into() })
+      .map_err(|e| e.into_status())?;
 
     let TokenPair {
       access_token,
@@ -440,20 +444,22 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       duration: _,
     } = generate_tokens(user_id, self.state.jwt_key.get())
       .await
-      .map_err(|_| RefreshError::Internal)?;
+      .map_err(|_| RefreshError::Internal.into_status())?;
 
     self
       .state
       .refresh_store
       .rotate(&incoming_refresh_token, refresh_token.clone())
       .await
-      .map_err(|err| -> RefreshError { err.into() })?;
+      .map_err(|err| -> RefreshError { err.into() })
+      .map_err(|err| err.into_status())?;
 
     Ok(
-      RefreshResponse {
+      RefreshReturn {
         access_token,
         refresh_token,
       }
+      .into_proto()
       .into(),
     )
   }

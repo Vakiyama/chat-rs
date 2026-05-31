@@ -2,11 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use chat_rs::{
-  SERVER_URL, WS_PORT, WS_URL,
-  shared::convert_old::proto::auth::auth_service_server::AuthServiceServer,
+  SERVER_URL, WS_PORT, WS_URL, shared::convert::auth::proto::auth_service_server::AuthServiceServer,
 };
-use tonic::{service::LayerExt, transport::Server};
-use tonic_middleware::RequestInterceptorLayer;
+use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use crate::api::auth::{

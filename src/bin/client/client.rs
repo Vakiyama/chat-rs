@@ -1,4 +1,7 @@
-use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
+use chat_rs::shared::convert::IntoProto;
+use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
+use chat_rs::shared::domain::auth::RefreshCommand;
+// use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
 use chat_rs::{SERVER_URL_HTTP, shared::domain::auth::Token};
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -86,7 +89,7 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
       let token_res = get()
         .await
         .auth
-        .refresh(RefreshRequest { refresh_token })
+        .refresh(RefreshCommand { refresh_token }.into_proto())
         .await?
         .into_inner();
 
@@ -102,16 +105,10 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
   }
 }
 
-pub mod proto {
-  pub mod auth {
-    include!(concat!(env!("OUT_DIR"), "/auth.v1.rs"));
-  }
-}
-
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct HTTPClient {
-  pub auth: proto::auth::auth_service_client::AuthServiceClient<Channel>,
+  pub auth: AuthServiceClient<Channel>,
 }
 
 static HTTP_CLIENT: tokio::sync::OnceCell<HTTPClient> = OnceCell::const_new();

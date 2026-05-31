@@ -1,10 +1,9 @@
 use chat_rs::shared::{
-  convert::TryIntoProto,
+  convert::{IntoProto, TryIntoDomain},
   domain::auth::{LoginCommand, LoginReturn, Token, VerifyCommand, VerifyReturn},
 };
 use email_address;
 use std::{str::FromStr, sync::Arc};
-use tonic::Status;
 
 use iced::{
   Border, Color, Element,
@@ -116,8 +115,7 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
                       email: email_input,
                       code: code_input,
                     }
-                    .try_into_proto()
-                    .unwrap(),
+                    .into_proto(),
                   )
                   .await
               },
@@ -133,7 +131,7 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
             client::get()
               .await
               .auth
-              .login(LoginCommand { email: email_input }.into())
+              .login(LoginCommand { email: email_input }.into_proto())
               .await
           },
           move |response| {
@@ -142,7 +140,7 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
                 .map(|res| {
                   let t = res.into_inner();
 
-                  let login_res: LoginReturn = t.try_into().unwrap();
+                  let login_res: LoginReturn = t.try_into_domain().unwrap();
 
                   login_res
                 })

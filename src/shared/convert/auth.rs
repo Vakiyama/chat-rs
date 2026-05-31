@@ -8,7 +8,7 @@ pub mod proto {
 }
 
 use crate::shared::convert::auth::proto::*;
-use crate::shared::convert::{IntoProto, TryFromProto};
+use crate::shared::convert::{IntoProto, IntoStatus, TryFromProto};
 use crate::shared::domain::auth::*;
 
 // impl TryFromProto<LoginResponse> for LoginReturn {
@@ -25,6 +25,52 @@ impl IntoProto<LoginResponse> for LoginReturn {
   fn into_proto(self) -> LoginResponse {
     LoginResponse {
       identifier: self.identifier.to_string(),
+    }
+  }
+}
+
+impl IntoProto<LoginRequest> for LoginCommand {
+  fn into_proto(self) -> LoginRequest {
+    LoginRequest { email: self.email }
+  }
+}
+
+impl IntoProto<RefreshRequest> for RefreshCommand {
+  fn into_proto(self) -> RefreshRequest {
+    RefreshRequest {
+      refresh_token: self.refresh_token,
+    }
+  }
+}
+
+impl IntoProto<VerifyRequest> for VerifyCommand {
+  fn into_proto(self) -> VerifyRequest {
+    VerifyRequest {
+      identifier: self.identifier.to_string(),
+      email: self.email,
+      code: self.code,
+    }
+  }
+}
+
+impl IntoProto<RefreshResponse> for RefreshReturn {
+  fn into_proto(self) -> RefreshResponse {
+    RefreshResponse {
+      access_token: self.access_token,
+      refresh_token: self.refresh_token,
+    }
+  }
+}
+
+impl IntoProto<VerifyResponse> for VerifyReturn {
+  fn into_proto(self) -> VerifyResponse {
+    VerifyResponse {
+      access_token: self.access_token,
+      refresh_token: self.refresh_token,
+      token_duration: Some(prost_types::Duration {
+        seconds: self.token_duration.as_secs().try_into().unwrap(),
+        nanos: self.token_duration.as_nanos().try_into().unwrap(),
+      }),
     }
   }
 }
@@ -140,5 +186,26 @@ impl TryFromProto<LoginResponse> for LoginReturn {
     };
 
     Ok(LoginReturn { identifier })
+  }
+}
+
+impl IntoStatus for VerifyError {
+  fn into_status(self) -> tonic::Status {
+    match self {
+      VerifyError::InvalidCode => Status::unauthenticated("invalid code"),
+      VerifyError::UnknownIdentifier => Status::not_found("unknown identifier"),
+      VerifyError::Internal => Status::internal("internal error"),
+    }
+  }
+}
+
+impl IntoStatus for RefreshError {
+  fn into_status(self) -> tonic::Status {
+    match self {
+      RefreshError::Unauthorized => Status::unauthenticated("not authorized"),
+      RefreshError::UnknownIdentifier => Status::not_found("unknown identifier"),
+      RefreshError::Expired => Status::unauthenticated("refresh token expired"),
+      RefreshError::Internal => Status::internal("internal error"),
+    }
   }
 }
