@@ -41,6 +41,24 @@ impl From<TokenPair> for RefreshResponse {
   }
 }
 
+impl From<LoginReturn> for LoginResponse {
+  fn from(result: LoginReturn) -> Self {
+    LoginResponse {
+      identifier: result.identifier.to_string(),
+    }
+  }
+}
+
+impl From<VerifyCommand> for VerifyRequest {
+  fn from(command: VerifyCommand) -> Self {
+    VerifyRequest {
+      identifier: command.identifier.to_string(),
+      email: command.email,
+      code: command.code,
+    }
+  }
+}
+
 // --- TryFrom proto (wire → domain) ---
 
 impl TryFrom<LoginRequest> for LoginCommand {
@@ -81,7 +99,81 @@ impl TryFrom<RefreshRequest> for RefreshCommand {
   }
 }
 
-// impl TryFrom<RefreshResponse> for Refresh
+impl TryFrom<RefreshResponse> for RefreshReturn {
+  type Error = Status;
+
+  fn try_from(res: RefreshResponse) -> Result<Self, Self::Error> {
+    if res.refresh_token.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include refresh token",
+      ));
+    }
+
+    if res.access_token.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include access_token token",
+      ));
+    }
+
+    Ok(RefreshReturn {
+      access_token: res.access_token,
+      refresh_token: res.refresh_token,
+    })
+  }
+}
+
+impl TryFrom<VerifyResponse> for VerifyReturn {
+  type Error = Status;
+
+  fn try_from(res: VerifyResponse) -> Result<Self, Self::Error> {
+    if res.refresh_token.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include refresh token",
+      ));
+    }
+
+    if res.access_token.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include access_token token",
+      ));
+    }
+
+    let Some(token_duration) = res.token_duration else {
+      return Err(Status::invalid_argument("duration is empty"));
+    };
+    let seconds: u64 = token_duration.seconds.try_into().map_err(|_| {
+      Status::invalid_argument("Incoming duration failed to parse into u64 from i64")
+    })?;
+
+    let nanos: u32 = token_duration.nanos.try_into().map_err(|_| {
+      Status::invalid_argument("Incoming duration failed to parse into u32 from i32")
+    })?;
+
+    Ok(VerifyReturn {
+      access_token: res.access_token,
+      refresh_token: res.refresh_token,
+      token_duration: Duration::new(seconds, nanos),
+    })
+  }
+}
+
+impl TryFrom<LoginResponse> for LoginReturn {
+  type Error = Status;
+
+  fn try_from(res: LoginResponse) -> Result<Self, Self::Error> {
+    if res.identifier.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include identifier",
+      ));
+    }
+
+    let Ok(identifier) = res.identifier.try_into() else {
+      return Err(Status::invalid_argument("Invalid identifier"));
+    };
+
+    Ok(LoginReturn { identifier })
+  }
+}
 
 // --- Error → Status ---
 

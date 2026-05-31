@@ -1,9 +1,12 @@
 use chat_rs::shared::{
-  convert::proto::auth::{
-    LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
-    auth_service_server::AuthService,
+  convert::{
+    IntoProto, TryIntoProto,
+    auth::proto::{
+      LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
+      auth_service_server::AuthService,
+    },
   },
-  domain::auth::{RefreshError, Token, TokenPair, UserId, VerifyError},
+  domain::auth::{LoginReturn, RefreshError, Token, TokenPair, UserId, VerifyCommand, VerifyError},
 };
 use futures_util::future::BoxFuture;
 use http::{Request, Response, StatusCode};
@@ -362,9 +365,12 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       )
       .await;
 
-    Ok(tonic::Response::new(LoginResponse {
-      identifier: identifier.into(),
-    }))
+    Ok(tonic::Response::new(
+      LoginReturn {
+        identifier: identifier.into(),
+      }
+      .into_proto(),
+    ))
   }
 
   async fn verify(
@@ -373,13 +379,11 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
   ) -> Result<tonic::Response<VerifyResponse>, tonic::Status> {
     let inner_request = request.into_inner();
 
-    let VerifyRequest {
+    let VerifyCommand {
       identifier,
       email: incoming_email,
       code: code_attempt,
-    } = inner_request;
-
-    let identifier = Uuid::parse_str(&identifier).expect("Valid uuid");
+    } = inner_request.try_into_proto()?;
 
     let EmailCodePair { code, email } = self
       .state

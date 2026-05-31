@@ -1,6 +1,10 @@
-use chat_rs::shared::domain::auth::Token;
+use chat_rs::shared::{
+  convert::TryIntoProto,
+  domain::auth::{LoginCommand, LoginReturn, Token, VerifyCommand, VerifyReturn},
+};
 use email_address;
 use std::{str::FromStr, sync::Arc};
+use tonic::Status;
 
 use iced::{
   Border, Color, Element,
@@ -15,10 +19,7 @@ use iced::{
 
 use crate::{
   SPACE_GRID,
-  client::{
-    self,
-    proto::auth::{LoginRequest, LoginResponse, VerifyRequest, VerifyResponse},
-  },
+  client::{self},
 };
 
 // -------------------- MODEL --------------------
@@ -76,8 +77,8 @@ pub enum Message {
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
-  ApiSentLogin(Result<LoginResponse, Arc<tonic::Status>>),
-  ApiVerifiedCode(Result<VerifyResponse, Arc<tonic::Status>>),
+  ApiSentLogin(Result<LoginReturn, Arc<tonic::Status>>),
+  ApiVerifiedCode(Result<VerifyReturn, Arc<tonic::Status>>),
 }
 
 // -------------------- UPDATE --------------------
@@ -109,11 +110,15 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
                 client::get()
                   .await
                   .auth
-                  .verify(VerifyRequest {
-                    identifier,
-                    email: email_input,
-                    code: code_input,
-                  })
+                  .verify(
+                    VerifyCommand {
+                      identifier: identifier.try_into().unwrap(),
+                      email: email_input,
+                      code: code_input,
+                    }
+                    .try_into_proto()
+                    .unwrap(),
+                  )
                   .await
               },
               |response| todo!("handle verify response"),
@@ -128,11 +133,21 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
             client::get()
               .await
               .auth
-              .login(LoginRequest { email: email_input })
+              .login(LoginCommand { email: email_input }.into())
               .await
           },
           move |response| {
-            Message::ApiSentLogin(response.map(|res| res.into_inner()).map_err(Arc::new))
+            Message::ApiSentLogin(
+              response
+                .map(|res| {
+                  let t = res.into_inner();
+
+                  let login_res: LoginReturn = t.try_into().unwrap();
+
+                  login_res
+                })
+                .map_err(Arc::new),
+            )
           },
         )
       }
