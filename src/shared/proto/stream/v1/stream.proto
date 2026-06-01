@@ -5,22 +5,22 @@ service StreamService {
   rpc ConnectStream (stream ClientMessage) returns (stream ServerMessage);
 }
 
-message User {
+message DisplayUser {
   string id = 1;
   string name = 2;
 }
 
 message ChatMessage {
-  User from = 1;
+  DisplayUser from = 1;
   string text = 2;
 }
 
 message JoinedRoom {
-  User from = 1;
+  DisplayUser from = 1;
 }
 
 message LeftRoom {
-  User from = 1;
+  DisplayUser from = 1;
 }
 
 message ServerMessage {

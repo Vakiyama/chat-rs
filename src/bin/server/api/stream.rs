@@ -95,16 +95,20 @@ use std::{
   sync::{Arc, Mutex},
 };
 
-use chat_rs::shared::convert::stream::proto::{
-  ClientMessage, ServerMessage, stream_service_server::StreamService,
+use chat_rs::shared::{
+  convert::{
+    IntoProto, TryIntoDomain,
+    stream::proto::{ClientMessage, ServerMessage, stream_service_server::StreamService},
+  },
+  domain::stream::{Client, Server},
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::SendError};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
 use uuid::Uuid;
 
 struct Manager {
-  sockets: HashMap<Uuid, mpsc::Sender<ClientMessage>>,
+  sockets: HashMap<Uuid, mpsc::Sender<Result<ServerMessage, tonic::Status>>>,
 }
 
 pub struct StreamServer {
@@ -119,17 +123,16 @@ impl Manager {
   }
 
   fn add(&mut self, id: Uuid, sender: mpsc::Sender<Result<ServerMessage, tonic::Status>>) {
-    todo!()
-    // println!("Adding new socket id: {id}");
+    println!("Adding new socket id: {id}");
 
-    // self.sockets.insert(id, sender);
+    self.sockets.insert(id, sender);
   }
 
-  async fn send(sender: &mpsc::Sender<ClientMessage>, message: &ClientMessage) -> Result<(), ()> {
-    todo!();
-    // let bytes = message.try_into().map_err(Error::Decode);
-
-    // sender.send(bytes?).await.map_err(Error::Send)
+  async fn send(
+    sender: &mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    message: ServerMessage,
+  ) -> Result<(), SendError<Result<ServerMessage, tonic::Status>>> {
+    sender.send(Ok(message)).await
   }
 
   // /// emits messages to all sockets in manager
@@ -141,28 +144,27 @@ impl Manager {
   //     .collect::<Vec<Result<(), _>>>()
   // }
 
-  fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<ClientMessage>> {
-    todo!()
-    // self
-    //   .sockets
-    //   .iter()
-    //   .filter_map(|(id, sender)| {
-    //     if id != from {
-    //       Some(sender.clone())
-    //     } else {
-    //       None
-    //     }
-    //   })
-    //   .collect()
+  fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<Result<ServerMessage, tonic::Status>>> {
+    self
+      .sockets
+      .iter()
+      .filter_map(|(id, sender)| {
+        if id != from {
+          Some(sender.clone())
+        } else {
+          None
+        }
+      })
+      .collect()
   }
   /// broadcasts to all passed in targets
-  async fn emit(targets: Vec<mpsc::Sender<ClientMessage>>, message: &ClientMessage) {
-    todo!()
-    // for sender in &targets {
-    //   if let Ok(bytes) = Bytes::try_from(message) {
-    //     let _ = sender.send(bytes).await;
-    //   }
-    // }
+  async fn emit(
+    targets: Vec<mpsc::Sender<Result<ServerMessage, tonic::Status>>>,
+    message: ServerMessage,
+  ) {
+    for sender in &targets {
+      let _ = sender.send(Ok(message.clone())).await;
+    }
   }
 }
 
@@ -185,8 +187,14 @@ impl StreamService for StreamServer {
       while let Some(msg) = inner_stream.next().await {
         match msg {
           Ok(msg) => {
-            let targets = manager.lock().unwrap().targets(&socket_id);
-            Manager::emit(targets, &msg).await;
+            // handler: atm, we only deal with chat message relaying
+            if let Ok(Client::ChatMessage { from, text }) = msg.try_into_domain() {
+              let targets = manager.lock().unwrap().targets(&socket_id);
+
+              let server_msg = Server::ChatMessage { from, text };
+
+              Manager::emit(targets, server_msg.into_proto()).await;
+            }
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
