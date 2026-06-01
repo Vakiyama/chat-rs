@@ -107,15 +107,17 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
 use uuid::Uuid;
 
+#[derive(Default)]
 struct Manager {
   sockets: HashMap<Uuid, mpsc::Sender<Result<ServerMessage, tonic::Status>>>,
 }
 
+#[derive(Default, Clone)]
 pub struct StreamServer {
   manager: Arc<Mutex<Manager>>,
 }
 
-type ResponseStream = Pin<Box<dyn Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>;
+pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>;
 
 impl Manager {
   fn remove(&mut self, id: &Uuid) {
@@ -187,7 +189,7 @@ impl StreamService for StreamServer {
       while let Some(msg) = inner_stream.next().await {
         match msg {
           Ok(msg) => {
-            // handler: atm, we only deal with chat message relaying
+            // handler: atm, we only deal with chat message relaying and ignore others
             if let Ok(Client::ChatMessage { from, text }) = msg.try_into_domain() {
               let targets = manager.lock().unwrap().targets(&socket_id);
 

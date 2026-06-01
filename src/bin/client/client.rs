@@ -107,12 +107,12 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
 
 #[non_exhaustive]
 #[derive(Clone)]
-pub struct HTTPClient {
+pub struct GrpcClient {
   pub auth: AuthServiceClient<Channel>,
   tokens: Arc<Mutex<TokenStore>>,
 }
 
-impl HTTPClient {
+impl GrpcClient {
   pub fn insert_tokens(self, response: VerifyReturn) {
     let mut tokens = self.tokens.lock().unwrap();
     tokens.access_token = Some(response.access_token);
@@ -120,17 +120,17 @@ impl HTTPClient {
   }
 }
 
-static HTTP_CLIENT: tokio::sync::OnceCell<HTTPClient> = OnceCell::const_new();
+static GRPC_CLIENT: tokio::sync::OnceCell<GrpcClient> = OnceCell::const_new();
 
-pub async fn get() -> HTTPClient {
-  HTTP_CLIENT
+pub async fn get() -> GrpcClient {
+  GRPC_CLIENT
     .get_or_init(|| async {
       let channel = tonic::transport::Channel::from_static(SERVER_URL_HTTP)
         .connect()
         .await
         .unwrap();
 
-      HTTPClient {
+      GrpcClient {
         auth: AuthServiceClient::new(channel),
         tokens: Default::default(),
       }

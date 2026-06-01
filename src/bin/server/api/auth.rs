@@ -5,6 +5,7 @@ use chat_rs::shared::{
       LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
       auth_service_server::AuthService,
     },
+    stream::proto::ClientMessage,
   },
   domain::auth::{
     LoginReturn, RefreshCommand, RefreshError, RefreshReturn, Token, TokenPair, UserId,
@@ -14,13 +15,15 @@ use chat_rs::shared::{
 use http::Request;
 use std::{
   collections::{HashMap, HashSet},
+  pin::Pin,
   sync::{Arc, Mutex},
   time::Duration,
 };
-use tonic::body::Body;
+use tonic::{Status, body::Body};
 use tonic_middleware::RequestInterceptor;
+use tower::Service;
 
-use crate::library::resend;
+use crate::{api::stream::ResponseStream, library::resend};
 use jwt_simple::{
   claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
   prelude::{HS256Key, MACLike},
