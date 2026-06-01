@@ -3,9 +3,8 @@ use crate::{SPACE_GRID, model::WebSocket};
 
 use crate::types::async_data::AsyncData;
 use crate::websocket::Connection;
-use chat_rs::WebSocketMessage;
 use chat_rs::schema::post::Model as Post;
-use chat_rs::schema::user::Model as User;
+use chat_rs::shared::domain::stream::{Client, Server, User};
 use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
 use iced::{Pixels, Task};
@@ -32,23 +31,22 @@ impl Model {
   pub fn send(&mut self, user: &User) -> Result<(), Error> {
     match &mut self.websocket {
       WebSocket::Connected(connection) => {
-        todo!()
-        // let name = user.name.clone();
-        // let input = self.input.clone();
+        let name = user.name.clone();
+        let input = self.input.clone();
 
-        // self
-        //   .posts
-        //   .as_mut()
-        //   .map(|posts| posts.push(Post::new(&input, &name)));
+        self
+          .posts
+          .as_mut()
+          .map(|posts| posts.push(Post::new(&input, &name)));
 
-        // self.input = "".to_string();
+        self.input = "".to_string();
 
-        // connection.send(WebSocketMessage::Chat {
-        //   from: user.clone(),
-        //   text: input,
-        // });
+        connection.send(Client::ChatMessage {
+          from: user.clone(),
+          text: input,
+        });
 
-        // Ok(())
+        Ok(())
       }
       WebSocket::Disconnected => Err(Error::NoConnection),
     }
@@ -68,7 +66,7 @@ pub enum Message {
   UserSubmittedChatInput,
   Disconnected,
   Connected(Connection),
-  Websocket(chat_rs::WebSocketMessage),
+  Websocket(Server),
 }
 
 pub enum Error {
@@ -130,20 +128,19 @@ pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message>
       Task::none()
     }
     Message::Websocket(server_message) => match server_message {
-      chat_rs::WebSocketMessage::JoinedRoom { from } => {
+      Server::JoinedRoom { from } => {
         println!("User joined room: {from:?}");
         Task::none()
       }
-      chat_rs::WebSocketMessage::LeftRoom { from } => {
+      Server::LeftRoom { from } => {
         println!("User left room: {from:?}");
 
         Task::none()
       }
-      chat_rs::WebSocketMessage::Chat { from, text } => {
-        todo!()
-        // model.receive(&text, &from.name);
+      Server::ChatMessage { from, text } => {
+        model.receive(&text, &from.name);
 
-        // Task::none()
+        Task::none()
       }
     },
   }

@@ -1,7 +1,7 @@
 use chat_rs::shared::convert::IntoProto;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
+use chat_rs::shared::convert::stream::proto::stream_service_client::StreamServiceClient;
 use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
-// use crate::client::proto::auth::{RefreshRequest, auth_service_client::AuthServiceClient};
 use chat_rs::{SERVER_URL_HTTP, shared::domain::auth::Token};
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -14,7 +14,7 @@ use tonic::transport::Channel;
 use tower::Service;
 
 #[derive(Default)]
-struct TokenStore {
+pub struct TokenStore {
   access_token: Option<Token>,
   refresh_token: Option<Token>,
 }
@@ -109,11 +109,12 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
 #[derive(Clone)]
 pub struct GrpcClient {
   pub auth: AuthServiceClient<Channel>,
+  pub stream: StreamServiceClient<AuthService>,
   tokens: Arc<Mutex<TokenStore>>,
 }
 
 impl GrpcClient {
-  pub fn insert_tokens(self, response: VerifyReturn) {
+  pub fn insert_tokens(&self, response: VerifyReturn) {
     let mut tokens = self.tokens.lock().unwrap();
     tokens.access_token = Some(response.access_token);
     tokens.refresh_token = Some(response.refresh_token);
@@ -130,20 +131,17 @@ pub async fn get() -> GrpcClient {
         .await
         .unwrap();
 
+      let tokens: Arc<Mutex<TokenStore>> = Default::default();
+
+      let auth_channel = AuthService::new(channel.clone(), tokens.clone());
+      let stream = StreamServiceClient::new(auth_channel);
+
       GrpcClient {
-        auth: AuthServiceClient::new(channel),
-        tokens: Default::default(),
+        auth: AuthServiceClient::new(channel.clone()),
+        stream,
+        tokens,
       }
     })
     .await
     .clone()
-}
-
-fn private_channel(
-  channel: tonic::transport::Channel,
-  tokens: Arc<Mutex<TokenStore>>,
-) -> AuthService {
-  tower::ServiceBuilder::new()
-    .layer_fn(|channel| AuthService::new(channel, tokens.clone()))
-    .service(channel)
 }

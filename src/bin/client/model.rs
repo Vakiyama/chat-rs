@@ -1,6 +1,7 @@
+use chat_rs::shared::domain::stream::User;
+
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
-use chat_rs::schema::user::Model as User;
 
 use crate::websocket;
 
