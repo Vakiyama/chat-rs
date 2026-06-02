@@ -1,6 +1,6 @@
 use chat_rs::config::CONFIG;
-use chat_rs::shared::convert::stream::proto::stream_service_server::StreamServiceServer;
 use chat_rs::shared::convert::auth::proto::auth_service_server::AuthServiceServer;
+use chat_rs::shared::convert::stream::proto::stream_service_server::StreamServiceServer;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
@@ -11,6 +11,7 @@ use crate::api::auth::{
 use crate::api::stream::StreamServer;
 
 mod api;
+mod entities;
 mod library;
 
 #[tokio::main]

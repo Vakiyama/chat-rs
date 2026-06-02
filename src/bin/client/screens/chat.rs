@@ -3,7 +3,6 @@ use crate::{SPACE_GRID, model::WebSocket};
 
 use crate::types::async_data::AsyncData;
 use crate::websocket::Connection;
-use chat_rs::schema::post::Model as Post;
 use chat_rs::shared::domain::stream::{Client, Server, User};
 use iced::widget::container;
 use iced::widget::{Column, column, row, text, text_input};
@@ -12,7 +11,7 @@ use iced::{Pixels, Task};
 // --------------------------------- MODEL ---------------------------------
 
 pub struct Model {
-  posts: AsyncData<Vec<Post>, ()>,
+  posts: AsyncData<Vec<()>, ()>,
   input: String,
   websocket: WebSocket,
 }
@@ -31,32 +30,33 @@ impl Model {
   pub fn send(&mut self, user: &User) -> Result<(), Error> {
     match &mut self.websocket {
       WebSocket::Connected(connection) => {
-        let name = user.name.clone();
-        let input = self.input.clone();
+        todo!()
+        //  let name = user.name.clone();
+        //  let input = self.input.clone();
 
-        self
-          .posts
-          .as_mut()
-          .map(|posts| posts.push(Post::new(&input, &name)));
+        //  self
+        //    .posts
+        //    .as_mut()
+        //    .map(|posts| posts.push(Post::new(&input, &name)));
 
-        self.input = "".to_string();
+        //  self.input = "".to_string();
 
-        connection.send(Client::ChatMessage {
-          from: user.clone(),
-          text: input,
-        });
+        //  connection.send(Client::ChatMessage {
+        //    from: user.clone(),
+        //    text: input,
+        //  });
 
-        Ok(())
+        //  Ok(())
       }
       WebSocket::Disconnected => Err(Error::NoConnection),
     }
   }
 
   pub fn receive(&mut self, message: &str, username: &str) {
-    self
-      .posts
-      .as_mut()
-      .map(|posts| posts.push(Post::new(message, username)));
+    self.posts.as_mut().map(|posts| {
+      todo!()
+      // posts.push(Post::new(message, username))
+    });
   }
 }
 
@@ -82,11 +82,13 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
     .get_or(&vec![]) // temp: replace get_or with showing a proper loading view...
     .iter()
     .map(|post| {
-      let element: Element<Message> =
-        row![text(post.author_name.clone()), text(post.content.clone())]
-          .spacing(Pixels(SPACE_GRID.into()))
-          .into();
-      element
+      let element: Element<Message> = {
+        todo!()
+        //   row![text(post.author_name.clone()), text(post.content.clone())]
+        //     .spacing(Pixels(SPACE_GRID.into()))
+        //     .into();
+        // element
+      };
     })
     .collect::<Vec<_>>();
 
