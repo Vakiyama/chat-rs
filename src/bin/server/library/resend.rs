@@ -1,7 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use dotenvy::dotenv;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use resend_rs::types::CreateEmailBaseOptions;
@@ -30,8 +29,6 @@ impl From<Error> for tonic::Status {
 /// sends an authentication email to the address
 /// returns the auth code for confirmation that the user received it
 pub async fn send_auth_email(to: &String, resend: Arc<Resend>) -> Result<String, Error> {
-  let _env = dotenv().unwrap();
-
   let _valid =
     email_address::EmailAddress::from_str(to).map_err(|e| Error::EmailValidation(e.to_string()))?;
 

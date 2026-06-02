@@ -14,8 +14,6 @@ mod types;
 const SPACE_GRID: u16 = 8;
 
 fn main() -> iced::Result {
-  let _env = dotenvy::dotenv().unwrap();
-
   iced::application(new, update, view)
     .subscription(subscription)
     .run()

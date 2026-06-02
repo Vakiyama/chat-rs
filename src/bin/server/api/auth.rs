@@ -1,3 +1,4 @@
+use chat_rs::config::CONFIG;
 use chat_rs::shared::{
   convert::{
     IntoProto, IntoStatus, TryIntoDomain,
@@ -44,7 +45,7 @@ pub struct JWTKey {
 impl Default for JWTKey {
   fn default() -> Self {
     let key_bytes: bytes::Bytes =
-      hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+      hex::decode(&CONFIG.auth.jwt_key_hex)
         .expect("Invalid key, decode failed")
         .into();
 
@@ -323,8 +324,13 @@ fn get_uuid_from_token(
 
 // ------------------------ Config ------------------------
 
-const JWT_ACCESS_DURATION: Duration = Duration::from_hours(8);
-const JWT_REFRESH_DURATION: Duration = Duration::from_hours(24 * 30);
+fn jwt_access_duration() -> Duration {
+  Duration::from_secs(CONFIG.auth.jwt_access_duration_secs)
+}
+
+fn jwt_refresh_duration() -> Duration {
+  Duration::from_secs(CONFIG.auth.jwt_refresh_duration_secs)
+}
 
 #[derive(Default, Clone)]
 pub struct RouterState<CodeStore, RefreshStore> {
@@ -470,12 +476,15 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
 
 // /// expects the user id as identifier
 async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair, anyhow::Error> {
-  let claims = Claims::create(JWT_ACCESS_DURATION.into()).with_subject(identifier.to_string());
+  let access_duration = jwt_access_duration();
+  let refresh_duration = jwt_refresh_duration();
+
+  let claims = Claims::create(access_duration.into()).with_subject(identifier.to_string());
   let access_token = key
     .authenticate(claims)
     .map_err(|_| anyhow::anyhow!("Internal"))?;
 
-  let claims = Claims::create(JWT_REFRESH_DURATION.into()).with_subject(identifier.to_string());
+  let claims = Claims::create(refresh_duration.into()).with_subject(identifier.to_string());
   let refresh_token = key
     .authenticate(claims)
     .map_err(|_| anyhow::anyhow!("Internal"))?;
@@ -483,7 +492,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   Ok(TokenPair {
     access_token,
     refresh_token,
-    duration: JWT_REFRESH_DURATION,
+    duration: refresh_duration,
   })
 }
 
@@ -497,16 +506,15 @@ mod tests {
   use std::time::Duration;
 
   fn test_key() -> HS256Key {
-    let _env = dotenvy::dotenv();
-
-    let key_bytes: Bytes = hex::decode(std::env::var("JWT_KEY").expect("Missing JWT_KEY env var"))
+    let key_bytes: Bytes = hex::decode(&CONFIG.auth.jwt_key_hex)
       .expect("Invalid key, decode failed")
       .into();
     HS256Key::from_bytes(&key_bytes)
   }
 
   fn make_valid_token(key: &HS256Key, user_id: UserId) -> Token {
-    let claims = Claims::create(JWT_REFRESH_DURATION.into())
+    let refresh_duration = super::jwt_refresh_duration();
+    let claims = Claims::create(refresh_duration.into())
       .with_subject(user_id.to_string())
       .with_jwt_id(Uuid::new_v4().to_string());
 

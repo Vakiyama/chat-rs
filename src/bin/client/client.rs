@@ -1,8 +1,9 @@
+use chat_rs::config::CONFIG;
 use chat_rs::shared::convert::IntoProto;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
 use chat_rs::shared::convert::stream::proto::stream_service_client::StreamServiceClient;
 use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
-use chat_rs::{SERVER_URL_HTTP, shared::domain::auth::Token};
+use chat_rs::shared::domain::auth::Token;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use std::{
@@ -126,7 +127,10 @@ static GRPC_CLIENT: tokio::sync::OnceCell<GrpcClient> = OnceCell::const_new();
 pub async fn get() -> GrpcClient {
   GRPC_CLIENT
     .get_or_init(|| async {
-      let channel = tonic::transport::Channel::from_static(SERVER_URL_HTTP)
+      let server_url = format!("http://{}", CONFIG.server.grpc_address);
+
+      let channel = tonic::transport::Endpoint::new(server_url)
+        .unwrap()
         .connect()
         .await
         .unwrap();
@@ -144,4 +148,4 @@ pub async fn get() -> GrpcClient {
     })
     .await
     .clone()
-}
+  }
