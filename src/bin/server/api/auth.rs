@@ -44,10 +44,9 @@ pub struct JWTKey {
 
 impl Default for JWTKey {
   fn default() -> Self {
-    let key_bytes: bytes::Bytes =
-      hex::decode(&CONFIG.auth.jwt_key_hex)
-        .expect("Invalid key, decode failed")
-        .into();
+    let key_bytes: bytes::Bytes = hex::decode(&CONFIG.auth.jwt_key_hex)
+      .expect("Invalid key, decode failed")
+      .into();
 
     let key: HS256Key = HS256Key::from_bytes(&key_bytes);
 
