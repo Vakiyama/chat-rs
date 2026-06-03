@@ -362,7 +362,12 @@ impl RequestInterceptor for ClientRateLimitInterceptor {
 }
 
 fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
-  let token = req.headers().get("authorization")?.to_str().ok()?;
+  let token = req
+    .headers()
+    .get(http::header::AUTHORIZATION)?
+    .to_str()
+    .ok()?
+    .strip_prefix("Bearer ")?;
 
   get_uuid_from_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
 }
@@ -384,7 +389,7 @@ fn get_uuid_from_token(
   let subject = claims.subject?;
   let audiences = claims.audiences?;
 
-  if audiences.into_string().ok()? == "access" {
+  if audiences.into_string().ok()? == JWT_AUTH_TOKEN_AUD {
     return Uuid::parse_str(&subject).ok();
   };
 
@@ -408,7 +413,7 @@ fn is_valid_verify_token(
   let subject = claims.subject?;
   let audiences = claims.audiences?;
 
-  if audiences.into_string().ok()? == "verify" {
+  if audiences.into_string().ok()? == JWT_REFRESH_TOKEN_AUD {
     return Uuid::parse_str(&subject).ok();
   };
 
@@ -432,6 +437,9 @@ pub struct RouterState<CodeStore, RefreshStore> {
   resend: Arc<resend_rs::Resend>,
   jwt_key: JWTKey,
 }
+
+static JWT_AUTH_TOKEN_AUD: &str = "authorization";
+static JWT_REFRESH_TOKEN_AUD: &str = "refresh";
 
 // ------------------------ Routes ------------------------
 
@@ -681,7 +689,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
 
   let claims = Claims::create(access_duration.into())
     .with_subject(identifier.to_string())
-    .with_audience("access")
+    .with_audience(JWT_AUTH_TOKEN_AUD.to_string())
     .with_jwt_id(Uuid::new_v4());
   let access_token = key
     .authenticate(claims)
@@ -690,7 +698,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   let claims = Claims::create(refresh_duration.into())
     .with_subject(identifier.to_string())
     .with_jwt_id(Uuid::new_v4())
-    .with_audience("refresh");
+    .with_audience(JWT_REFRESH_TOKEN_AUD.to_string());
 
   let refresh_token = key
     .authenticate(claims)
