@@ -38,7 +38,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     },
     auth: AuthConfig {
       jwt_key_hex: env("JWT_KEY").expect("JWT_KEY must be set"),
-      jwt_access_duration_secs: env("JWT_ACCESS_DURATION_SECS").unwrap_or(28800),
+      jwt_access_duration_secs: env("JWT_ACCESS_DURATION_SECS").unwrap_or(900),
       jwt_refresh_duration_secs: env("JWT_REFRESH_DURATION_SECS").unwrap_or(2592000),
     },
     email: EmailConfig {

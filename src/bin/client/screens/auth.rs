@@ -1,6 +1,8 @@
 use chat_rs::shared::{
   convert::{IntoProto, TryIntoDomain},
-  domain::auth::{LoginCommand, LoginReturn, Token, VerifyCommand, VerifyReturn},
+  domain::auth::{
+    LoginCommand, LoginReturn, RegisterCommand, RegisterReturn, Token, VerifyCommand, VerifyReturn,
+  },
 };
 use email_address;
 use std::{str::FromStr, sync::Arc};
@@ -30,6 +32,7 @@ pub enum Mode {
   },
   Register {
     error_message: Option<&'static str>,
+    username_input: String,
   },
   Code {
     error_message: Option<&'static str>,
@@ -73,93 +76,69 @@ impl Model {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-  UserChangedLoginInput(String),
+  UserChangedEmailInput(String),
+  UserChangedUsernameInput(String),
+  UserChangedCodeInput(String),
+
   UserSubmittedForm,
   UserNavigatedRegister,
   UserNavigatedLogin,
   UserToggledRememberMe,
   ApiSentLogin(Result<LoginReturn, Arc<tonic::Status>>),
+  ApiSentRegister(Result<RegisterReturn, Arc<tonic::Status>>),
   ApiVerifiedCode(Result<VerifyReturn, Arc<tonic::Status>>),
-  None,
+  // None,
 }
 
 // -------------------- UPDATE --------------------
 
 pub fn update(model: &mut Model, message: Message) -> Task<Message> {
   match message {
-    Message::UserChangedLoginInput(new) => {
-      match model.mode {
-        Mode::Login { .. } => model.email_input = new,
-        Mode::Register { .. } => todo!(),
-        Mode::Code {
-          ref mut code_input, ..
-        } => *code_input = new,
-      }
+    Message::UserChangedEmailInput(new) => {
+      if let Mode::Login { .. } | Mode::Register { .. } = model.mode {
+        model.email_input = new;
+      };
+
       Task::none()
     }
-    Message::UserSubmittedForm => {
-      println!("user submitted");
-      println!("{:?}", model.mode);
+    Message::UserChangedCodeInput(new) => {
+      if let Mode::Code {
+        ref mut code_input, ..
+      } = model.mode
+      {
+        *code_input = new;
+      };
 
-      match &mut model.mode {
-        // todo: handle register command + fix this matching
-        Mode::Login { error_message } => {
-          if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
-            match &mut model.mode {
-              Mode::Login { error_message } | Mode::Register { error_message } => {
-                *error_message = Some("Invalid email.");
-                Task::none()
-              }
-              _ => Task::none(),
-            }
-          } else {
-            let email_input = model.email_input.clone();
-            // send off req as task
-            Task::perform(
-              async move {
-                client::get()
-                  .await
-                  .auth
-                  .login(LoginCommand { email: email_input }.into_proto())
-                  .await
-              },
-              move |response| {
-                Message::ApiSentLogin(
-                  response
-                    .map(|res| res.into_inner().try_into_domain().unwrap())
-                    .map_err(Arc::new),
-                )
-              },
-            )
-          }
-        }
-        Mode::Register { error_message } => todo!(),
-        Mode::Code {
-          error_message: _,
-          identifier,
-          code_input,
-        } => {
+      Task::none()
+    }
+    Message::UserChangedUsernameInput(new) => {
+      if let Mode::Register {
+        ref mut username_input,
+        ..
+      } = model.mode
+      {
+        *username_input = new;
+      };
+
+      Task::none()
+    }
+    Message::UserSubmittedForm => match &mut model.mode {
+      Mode::Login { error_message } => {
+        if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
+          *error_message = Some("Invalid email.");
+          Task::none()
+        } else {
           let email_input = model.email_input.clone();
-          let code_input = code_input.clone();
-          let identifier = identifier.clone();
-
           Task::perform(
             async move {
               client::get()
                 .await
                 .auth
-                .verify(
-                  VerifyCommand {
-                    identifier: identifier.try_into().unwrap(),
-                    email: email_input,
-                    code: code_input,
-                  }
-                  .into_proto(),
-                )
+                .login(LoginCommand { email: email_input }.into_proto())
                 .await
             },
-            |response| {
-              Message::ApiVerifiedCode(
+            move |response| {
+              Message::ApiSentLogin(
                 response
                   .map(|res| res.into_inner().try_into_domain().unwrap())
                   .map_err(Arc::new),
@@ -168,7 +147,75 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
           )
         }
       }
-    }
+      Mode::Register {
+        error_message,
+        username_input,
+      } => {
+        if let Err(_valid) = email_address::EmailAddress::from_str(&model.email_input) {
+          *error_message = Some("Invalid email.");
+          Task::none()
+        } else {
+          let email_input = model.email_input.clone();
+          let username_input = username_input.clone();
+
+          Task::perform(
+            async move {
+              client::get()
+                .await
+                .auth
+                .register(
+                  RegisterCommand {
+                    email: email_input,
+                    username: username_input,
+                  }
+                  .into_proto(),
+                )
+                .await
+            },
+            move |response| {
+              Message::ApiSentRegister(
+                response
+                  .map(|res| res.into_inner().try_into_domain().unwrap())
+                  .map_err(Arc::new),
+              )
+            },
+          )
+        }
+      }
+      Mode::Code {
+        error_message: _,
+        identifier,
+        code_input,
+      } => {
+        let email_input = model.email_input.clone();
+        let code_input = code_input.clone();
+        let identifier = identifier.clone();
+
+        Task::perform(
+          async move {
+            client::get()
+              .await
+              .auth
+              .verify(
+                VerifyCommand {
+                  identifier: identifier.try_into().unwrap(),
+                  email: email_input,
+                  code: code_input,
+                }
+                .into_proto(),
+              )
+              .await
+          },
+          |response| {
+            Message::ApiVerifiedCode(
+              response
+                .map(|res| res.into_inner().try_into_domain().unwrap())
+                .map_err(Arc::new),
+            )
+          },
+        )
+      }
+    },
     Message::UserToggledRememberMe => {
       model.remember_me_checked = !model.remember_me_checked;
       Task::none()
@@ -176,6 +223,7 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
     Message::UserNavigatedRegister => {
       model.mode = Mode::Register {
         error_message: None,
+        username_input: "".to_string(),
       };
       Task::none()
     }
@@ -186,27 +234,27 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
       Task::none()
     }
     Message::ApiSentLogin(response) => {
-      println!("{response:?}");
-
-      let new_err_msg = match response {
-        Ok(_) => None,
-        Err(_) => {
-          Some("An error ocurred while sending your confirmation email. Please try again later.")
-        }
-      };
+      let new_err_msg = response
+        .clone()
+        .map_err(|err| match err.code() {
+          tonic::Code::NotFound => "Email was not found.",
+          _ => "An error ocurred while sending your confirmation email. Please try again later.",
+        })
+        .map(|_| -> Option<&str> { None })
+        .err();
 
       match (&mut model.mode, response) {
-        (Mode::Login { error_message }, Err(_)) | (Mode::Register { error_message }, Err(_)) => {
+        (Mode::Login { error_message }, Err(_)) => {
           *error_message = new_err_msg;
         }
-        (Mode::Login { .. }, Ok(res)) | (Mode::Register { .. }, Ok(res)) => {
+        (Mode::Login { .. }, Ok(res)) => {
           model.mode = Mode::Code {
             error_message: None,
             identifier: res.identifier.into(),
             code_input: "".to_string(),
           }
         }
-        (Mode::Code { .. }, _) => (), // ignore responses when already in code view
+        (_, _) => (),
       };
 
       Task::none()
@@ -247,10 +295,37 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
 
       Task::none()
     }
-    Message::None => Task::none(),
+    // Message::None => Task::none(),
+    Message::ApiSentRegister(response) => {
+      let new_err_msg = response
+        .clone()
+        .map_err(|err| match err.code() {
+          tonic::Code::AlreadyExists => "Email already exists, please login instead.",
+          _ => "An error ocurred while sending your confirmation email. Please try again later.",
+        })
+        .map(|_| -> Option<&str> { None })
+        .err();
+
+      match (&mut model.mode, response) {
+        (Mode::Register { error_message, .. }, Err(_)) => {
+          *error_message = new_err_msg;
+        }
+        (Mode::Register { .. }, Ok(res)) => {
+          model.mode = Mode::Code {
+            error_message: None,
+            identifier: res.identifier.into(),
+            code_input: "".to_string(),
+          }
+        }
+        (_, _) => (), // ignore responses when already in code view
+      };
+
+      Task::none()
+    }
   }
 }
 
+// bridge: add loading states, use async data
 // -------------------- VIEW --------------------
 
 pub fn view<'a>(model: &'a Model) -> Element<'a, Message> {
@@ -283,7 +358,7 @@ fn left_card<'a>(model: &'a Model) -> Element<'a, Message> {
         {
           match model.mode {
             Mode::Login { error_message }
-            | Mode::Register { error_message }
+            | Mode::Register { error_message, .. }
             | Mode::Code { error_message, .. } => {
               if let Some(err) = error_message {
                 float(text(err).color(Color::from_rgb(1., 0.5, 0.5)).size(12))
@@ -322,15 +397,92 @@ fn left_card<'a>(model: &'a Model) -> Element<'a, Message> {
 fn render_left_content<'a>(model: &Model) -> Element<'a, Message> {
   match &model.mode {
     Mode::Login { .. } => login_content(model),
-    Mode::Register { .. } => todo!(),
+    Mode::Register { username_input, .. } => register_content(model, username_input),
     Mode::Code { code_input, .. } => code_input_content(model, code_input),
   }
+}
+
+fn register_content<'a>(model: &Model, username_input: &str) -> Element<'a, Message> {
+  column![
+    text_input("Email", &model.email_input)
+      .on_input(Message::UserChangedEmailInput)
+      .on_submit(Message::UserSubmittedForm)
+      .style(|theme: &Theme, status| {
+        let palette = theme.extended_palette();
+
+        TextStyle {
+          border: Border {
+            width: 0.0,
+            ..Border::default()
+          },
+          background: iced::Background::Color(palette.background.stronger.color),
+          value: palette.background.stronger.text,
+          placeholder: palette.background.strong.text,
+          ..text_input::default(theme, status)
+        }
+      }),
+    container(space())
+      .width(Fill)
+      .height(2)
+      .style(container::bordered_box),
+    space().height(8),
+    text_input("Username", username_input)
+      .on_input(Message::UserChangedUsernameInput)
+      .on_submit(Message::UserSubmittedForm)
+      .style(|theme: &Theme, status| {
+        let palette = theme.extended_palette();
+
+        TextStyle {
+          border: Border {
+            width: 0.0,
+            ..Border::default()
+          },
+          background: iced::Background::Color(palette.background.stronger.color),
+          value: palette.background.stronger.text,
+          placeholder: palette.background.strong.text,
+          ..text_input::default(theme, status)
+        }
+      }),
+    container(space())
+      .width(Fill)
+      .height(2)
+      .style(container::bordered_box),
+    row![
+      container("").width(Fill),
+      button(
+        text("Login")
+          .align_x(text::Alignment::Right)
+          .size(12)
+          .color(Color::from_rgba(1., 1., 1., 0.8))
+      )
+      .on_press(Message::UserNavigatedLogin)
+      .style(|theme: &Theme, _status| {
+        let palette = theme.extended_palette();
+
+        ButtonStyle {
+          background: None,
+          text_color: palette.background.weakest.text,
+          border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.,
+            radius: border::radius(0),
+          },
+          ..ButtonStyle::default()
+        }
+      })
+      .width(100)
+      .padding(0)
+    ]
+    .padding(SPACE_GRID)
+    .width(Fill)
+  ]
+  .into()
 }
 
 fn code_input_content<'a>(_model: &Model, code_input: &str) -> Element<'a, Message> {
   column![
     text_input("Enter Code", code_input)
-      .on_input(Message::UserChangedLoginInput)
+      .on_input(Message::UserChangedCodeInput)
       .on_submit(Message::UserSubmittedForm)
       .style(|theme: &Theme, status| {
         let palette = theme.extended_palette();
@@ -385,7 +537,7 @@ fn code_input_content<'a>(_model: &Model, code_input: &str) -> Element<'a, Messa
 fn login_content<'a>(model: &Model) -> Element<'a, Message> {
   column![
     text_input("Email", &model.email_input)
-      .on_input(Message::UserChangedLoginInput)
+      .on_input(Message::UserChangedEmailInput)
       .on_submit(Message::UserSubmittedForm)
       .style(|theme: &Theme, status| {
         let palette = theme.extended_palette();

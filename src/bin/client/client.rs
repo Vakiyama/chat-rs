@@ -2,8 +2,8 @@ use chat_rs::config::CONFIG;
 use chat_rs::shared::convert::IntoProto;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
 use chat_rs::shared::convert::stream::proto::stream_service_client::StreamServiceClient;
-use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
 use chat_rs::shared::domain::auth::Token;
+use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use std::{
@@ -127,13 +127,32 @@ static GRPC_CLIENT: tokio::sync::OnceCell<GrpcClient> = OnceCell::const_new();
 pub async fn get() -> GrpcClient {
   GRPC_CLIENT
     .get_or_init(|| async {
-      let server_url = format!("http://{}", CONFIG.server.grpc_address);
+      let channel: Channel;
 
-      let channel = tonic::transport::Endpoint::new(server_url)
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+      loop {
+        let server_url = format!("http://{}", CONFIG.server.grpc_address);
+        let channel_connect = tonic::transport::Endpoint::new(server_url.clone())
+          .unwrap_or_else(|_| panic!("Failed to parse server url {}", &server_url))
+          .connect()
+          .await;
+
+        match channel_connect {
+          Ok(connected) => {
+            channel = connected;
+            println!("Connected to grpc server.",);
+            break;
+          }
+          Err(_) => {
+            println!(
+              "Could not connect to grpc server at {}",
+              CONFIG.server.grpc_address
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            println!("Retrying...");
+            continue;
+          }
+        }
+      }
 
       let tokens: Arc<Mutex<TokenStore>> = Default::default();
 
@@ -148,4 +167,4 @@ pub async fn get() -> GrpcClient {
     })
     .await
     .clone()
-  }
+}

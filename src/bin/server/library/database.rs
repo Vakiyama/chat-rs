@@ -10,6 +10,7 @@ pub async fn get() -> &'static DatabaseConnection {
       let db = Database::connect(CONFIG.server.db_connection.clone())
         .await
         .unwrap();
+      println!("Connected to db on {}", CONFIG.server.db_connection);
 
       db.get_schema_registry(module_path!().split("::").next().unwrap())
         .sync(&db)

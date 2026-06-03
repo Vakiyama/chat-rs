@@ -415,8 +415,10 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
 
     let db = database::get().await;
 
+    println!("{inner_request:?}");
+
     let user = entities::user::Entity::find()
-      .filter(entities::user::Column::Username.contains(&inner_request.email))
+      .filter(entities::user::Column::Email.eq(&inner_request.email))
       .one(db)
       .await
       .map_err(|e| {

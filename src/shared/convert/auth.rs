@@ -187,6 +187,24 @@ impl TryFromProto<VerifyResponse> for VerifyReturn {
   }
 }
 
+impl TryFromProto<RegisterResponse> for RegisterReturn {
+  type Error = Status;
+
+  fn try_from_proto(res: RegisterResponse) -> Result<Self, Self::Error> {
+    if res.identifier.is_empty() {
+      return Err(Status::invalid_argument(
+        "response doesn't include identifier",
+      ));
+    }
+
+    let Ok(identifier) = res.identifier.try_into() else {
+      return Err(Status::invalid_argument("Invalid identifier"));
+    };
+
+    Ok(RegisterReturn { identifier })
+  }
+}
+
 impl TryFromProto<LoginResponse> for LoginReturn {
   type Error = Status;
 
