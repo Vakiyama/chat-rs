@@ -1073,7 +1073,9 @@ dependencies = [
  "resend-rs",
  "sea-orm",
  "serde",
+ "subtle",
  "tokio",
+ "tokio-rate-limit",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
  "tonic",
@@ -1983,6 +1985,18 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "spin",
+]
+
+[[package]]
+name = "flurry"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf5efcf77a4da27927d3ab0509dec5b0954bb3bc59da5a1de9e52642ebd4cdf9"
+dependencies = [
+ "ahash 0.8.12",
+ "num_cpus",
+ "parking_lot",
+ "seize",
 ]
 
 [[package]]
@@ -4006,6 +4020,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
+
+[[package]]
 name = "num_enum"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5854,6 +5878,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "seize"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "689224d06523904ebcc9b482c6a3f4f7fb396096645c4cd10c0d2ff7371a34d3"
+
+[[package]]
 name = "self_cell"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6822,6 +6852,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
 dependencies = [
  "native-tls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-rate-limit"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae467448273dfbe9396db99e17d0c806c2c776e2703703102bbed076aaf0fcb"
+dependencies = [
+ "async-trait",
+ "flurry",
+ "parking_lot",
+ "thiserror 2.0.18",
  "tokio",
 ]
 

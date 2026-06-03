@@ -20,6 +20,7 @@ pub struct AuthConfig {
   pub jwt_key_hex: String,
   pub jwt_access_duration_secs: u64,
   pub jwt_refresh_duration_secs: u64,
+  pub max_verify_code_attempts: i8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,7 +40,8 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     auth: AuthConfig {
       jwt_key_hex: env("JWT_KEY").expect("JWT_KEY must be set"),
       jwt_access_duration_secs: env("JWT_ACCESS_DURATION_SECS").unwrap_or(900),
-      jwt_refresh_duration_secs: env("JWT_REFRESH_DURATION_SECS").unwrap_or(2592000),
+      jwt_refresh_duration_secs: env("JWT_REFRESH_DURATION_SECS").unwrap_or(604800),
+      max_verify_code_attempts: env("MAX_VERIFY_CODE_ATTEMPTS").unwrap_or(3),
     },
     email: EmailConfig {
       resend_api_key: env("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),

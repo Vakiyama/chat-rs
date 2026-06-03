@@ -21,7 +21,10 @@ use std::{
   sync::{Arc, Mutex},
   time::Duration,
 };
+use subtle::ConstantTimeEq;
+use tokio_rate_limit::RateLimiter;
 use tonic::body::Body;
+use tonic::transport::server::TcpConnectInfo;
 use tonic_middleware::RequestInterceptor;
 
 use crate::entities;
@@ -33,8 +36,8 @@ use jwt_simple::{
 use uuid::Uuid;
 
 #[derive(Clone)]
-enum VerifyType {
-  Login { email: String },
+pub enum VerifyType {
+  Login { email: String, user_id: Uuid },
   Register { email: String, username: String },
 }
 
@@ -42,6 +45,7 @@ enum VerifyType {
 pub struct EmailCodePair {
   pub code: String,
   pub info: VerifyType,
+  pub verify_attempts: i8,
 }
 
 #[derive(Clone)]
@@ -67,19 +71,34 @@ impl JWTKey {
   }
 }
 
+type JWTId = Uuid;
+
 // ------------------------- Stores -------------------------
 
 #[derive(Default, Clone)]
 pub struct InMemoryCodeStore {
-  pending: Arc<Mutex<HashMap<Uuid, EmailCodePair>>>,
+  pending: Arc<Mutex<HashMap<JWTId, EmailCodePair>>>,
 }
 
 impl CodeStore for InMemoryCodeStore {
   async fn get_email_code_pair(&self, uuid: &Uuid) -> Option<EmailCodePair> {
-    self.pending.lock().unwrap().get(uuid).cloned()
+    let mut pending = self.pending.lock().unwrap();
+
+    let code_pair = pending.get_mut(uuid);
+
+    if let Some(pending_code) = code_pair {
+      pending_code.verify_attempts += 1;
+
+      if pending_code.verify_attempts >= CONFIG.auth.max_verify_code_attempts {
+        pending.remove(uuid);
+        return None;
+      }
+    }
+
+    pending.get(uuid).cloned()
   }
 
-  async fn insert(&mut self, uuid: Uuid, email_code: EmailCodePair) -> Option<EmailCodePair> {
+  async fn insert(&mut self, uuid: JWTId, email_code: EmailCodePair) -> Option<EmailCodePair> {
     let store = self.pending.clone();
 
     tokio::spawn(async move {
@@ -304,6 +323,44 @@ impl RequestInterceptor for JWTAuthorizedInterceptor {
   }
 }
 
+// auth per client rate limiter
+#[derive(Clone)]
+pub struct ClientRateLimitInterceptor {
+  pub limiter: Arc<RateLimiter>,
+}
+
+#[tonic::async_trait]
+impl RequestInterceptor for ClientRateLimitInterceptor {
+  async fn intercept(
+    &self,
+    request: http::Request<Body>,
+  ) -> Result<http::Request<Body>, tonic::Status> {
+    let tcp_info =
+      request
+        .extensions()
+        .get::<TcpConnectInfo>()
+        .ok_or(tonic::Status::unavailable(
+          "Could not resolve TCP connection info.",
+        ))?;
+
+    let address = tcp_info.remote_addr().ok_or(tonic::Status::unavailable(
+      "Could not resolve remote address.",
+    ))?;
+
+    if self
+      .limiter
+      .check(&address.ip().to_string())
+      .await
+      .unwrap()
+      .permitted
+    {
+      Ok(request)
+    } else {
+      Err(tonic::Status::resource_exhausted("Too many requests."))
+    }
+  }
+}
+
 fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
   let token = req.headers().get("authorization")?.to_str().ok()?;
 
@@ -323,9 +380,39 @@ fn get_uuid_from_token(
   let claims = key
     .verify_token::<NoCustomClaims>(token, Some(options))
     .ok()?;
-  let subject = claims.subject?;
 
-  Uuid::parse_str(&subject).ok()
+  let subject = claims.subject?;
+  let audiences = claims.audiences?;
+
+  if audiences.into_string().ok()? == "access" {
+    return Uuid::parse_str(&subject).ok();
+  };
+
+  None
+}
+
+fn is_valid_verify_token(
+  key: &HS256Key,
+  token: &str,
+  time_tolerance: jwt_simple::prelude::Duration,
+) -> Option<Uuid> {
+  let options = jwt_simple::prelude::VerificationOptions {
+    time_tolerance: Some(time_tolerance),
+    ..Default::default()
+  };
+
+  let claims = key
+    .verify_token::<NoCustomClaims>(token, Some(options))
+    .ok()?;
+
+  let subject = claims.subject?;
+  let audiences = claims.audiences?;
+
+  if audiences.into_string().ok()? == "verify" {
+    return Uuid::parse_str(&subject).ok();
+  };
+
+  None
 }
 
 // ------------------------ Config ------------------------
@@ -362,60 +449,10 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
     &self,
     request: tonic::Request<RegisterRequest>,
   ) -> Result<tonic::Response<RegisterResponse>, tonic::Status> {
-    let identifier = Uuid::new_v4();
+    let jwt_id = Uuid::new_v4();
     let inner_request = request.into_inner();
 
     let db = database::get().await;
-
-    let user = entities::user::Entity::find()
-      .filter(entities::user::Column::Email.contains(&inner_request.email))
-      .one(db)
-      .await
-      .map_err(|e| {
-        eprintln!("Error fetching from db:{e}");
-        tonic::Status::internal("Unknown error occurred")
-      })?;
-
-    let None = user else {
-      return Err(tonic::Status::already_exists("Email already exists"));
-    };
-
-    // entities::user::Entity::insert()
-
-    let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
-
-    self
-      .state
-      .code_store
-      .lock()
-      .await
-      .insert(
-        identifier,
-        EmailCodePair {
-          code,
-          info: VerifyType::Register {
-            email: inner_request.email,
-            username: inner_request.username,
-          },
-        },
-      )
-      .await;
-
-    Ok(tonic::Response::new(
-      RegisterReturn { identifier }.into_proto(),
-    ))
-  }
-
-  async fn login(
-    &self,
-    request: tonic::Request<LoginRequest>,
-  ) -> Result<tonic::Response<LoginResponse>, tonic::Status> {
-    // let identifier = Uuid::new_v4();
-    let inner_request = request.into_inner();
-
-    let db = database::get().await;
-
-    println!("{inner_request:?}");
 
     let user = entities::user::Entity::find()
       .filter(entities::user::Column::Email.eq(&inner_request.email))
@@ -426,33 +463,75 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
         tonic::Status::internal("Unknown error occurred")
       })?;
 
-    let Some(user) = user else {
-      return Err(tonic::Status::not_found("User not found."));
+    if user.is_none() {
+      let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
+
+      self
+        .state
+        .code_store
+        .lock()
+        .await
+        .insert(
+          jwt_id,
+          EmailCodePair {
+            code,
+            info: VerifyType::Register {
+              email: inner_request.email,
+              username: inner_request.username,
+            },
+            verify_attempts: 0,
+          },
+        )
+        .await;
     };
 
-    let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
+    Ok(tonic::Response::new(
+      RegisterReturn { identifier: jwt_id }.into_proto(),
+    ))
+  }
 
-    self
-      .state
-      .code_store
-      .lock()
+  async fn login(
+    &self,
+    request: tonic::Request<LoginRequest>,
+  ) -> Result<tonic::Response<LoginResponse>, tonic::Status> {
+    let jwt_id: JWTId = Uuid::new_v4();
+    let inner_request = request.into_inner();
+
+    let db = database::get().await;
+
+    let user = entities::user::Entity::find()
+      .filter(entities::user::Column::Email.eq(&inner_request.email))
+      .one(db)
       .await
-      .insert(
-        user.id,
-        EmailCodePair {
-          code,
-          info: VerifyType::Login {
-            email: inner_request.email,
+      .map_err(|e| {
+        eprintln!("Error fetching from db:{e}");
+        tonic::Status::internal("Unknown error occurred")
+      })?;
+
+    if let Some(user) = user {
+      let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
+
+      self
+        .state
+        .code_store
+        .lock()
+        .await
+        .insert(
+          jwt_id,
+          EmailCodePair {
+            code,
+            info: VerifyType::Login {
+              email: inner_request.email,
+              user_id: user.id,
+            },
+            verify_attempts: 0,
           },
-        },
-      )
-      .await;
+        )
+        .await;
+    };
 
     Ok(tonic::Response::new(
-      LoginReturn {
-        identifier: user.id,
-      }
-      .into_proto(),
+      LoginReturn { identifier: jwt_id }.into_proto(),
     ))
   }
 
@@ -468,7 +547,11 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       code: code_attempt,
     } = inner_request.try_into_domain()?;
 
-    let EmailCodePair { code, info } = self
+    let EmailCodePair {
+      code,
+      info,
+      verify_attempts,
+    } = self
       .state
       .code_store
       .lock()
@@ -479,26 +562,26 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       .unwrap_or(Err(VerifyError::UnknownIdentifier))
       .map_err(|e| e.into_status())?;
 
+    let (email, user_id) = match info {
+      VerifyType::Login { ref email, user_id } => (email.clone(), user_id),
+      VerifyType::Register { ref email, .. } => (email.clone(), uuid::Uuid::new_v4()),
+    };
+
     let TokenPair {
       access_token,
       refresh_token,
       duration,
-    } = generate_tokens(identifier, self.state.jwt_key.get())
+    } = generate_tokens(user_id, self.state.jwt_key.get())
       .await
       .map_err(|_| VerifyError::Internal)
       .map_err(|e| e.into_status())?;
-
-    let email = match info {
-      VerifyType::Login { ref email } => email.clone(),
-      VerifyType::Register { ref email, .. } => email.clone(),
-    };
 
     if code_attempt == code && email == incoming_email {
       if let VerifyType::Register { username, email } = info {
         let db = database::get().await;
 
         let new_user = entities::user::Model {
-          id: identifier,
+          id: user_id,
           username,
           email,
           status: entities::user::Status::Online,
@@ -513,6 +596,15 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
             tonic::Status::internal("Error while creating user.")
           })?;
       };
+
+      self
+        .state
+        .refresh_store
+        .insert(refresh_token.clone())
+        .await
+        .map_err(|_| VerifyError::InvalidCode.into_status())?;
+
+      self.state.code_store.lock().await.delete(&identifier).await;
 
       Ok(tonic::Response::new(
         VerifyReturn {
@@ -536,6 +628,16 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
     let RefreshCommand {
       refresh_token: incoming_refresh_token,
     } = request_inner.try_into_domain()?;
+
+    if is_valid_verify_token(
+      self.state.jwt_key.get(),
+      &incoming_refresh_token,
+      self.state.refresh_store.time_tolerance,
+    )
+    .is_none()
+    {
+      return Err(RefreshError::Unauthorized.into_status());
+    };
 
     let user_id = self
       .state
@@ -577,12 +679,19 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   let access_duration = jwt_access_duration();
   let refresh_duration = jwt_refresh_duration();
 
-  let claims = Claims::create(access_duration.into()).with_subject(identifier.to_string());
+  let claims = Claims::create(access_duration.into())
+    .with_subject(identifier.to_string())
+    .with_audience("access")
+    .with_jwt_id(Uuid::new_v4());
   let access_token = key
     .authenticate(claims)
     .map_err(|_| anyhow::anyhow!("Internal"))?;
 
-  let claims = Claims::create(refresh_duration.into()).with_subject(identifier.to_string());
+  let claims = Claims::create(refresh_duration.into())
+    .with_subject(identifier.to_string())
+    .with_jwt_id(Uuid::new_v4())
+    .with_audience("refresh");
+
   let refresh_token = key
     .authenticate(claims)
     .map_err(|_| anyhow::anyhow!("Internal"))?;

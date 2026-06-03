@@ -1,6 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
+  rc::Rc,
   sync::{Arc, Mutex},
 };
 
@@ -79,7 +80,9 @@ impl StreamService for StreamServer {
     &self,
     request: tonic::Request<tonic::Streaming<ClientMessage>>,
   ) -> Result<tonic::Response<Self::ConnectStreamStream>, tonic::Status> {
+    let request_user_id = request.extensions().get::<Uuid>().copied();
     let mut inner_stream = request.into_inner();
+
     let (tx, rx) = mpsc::channel(128);
 
     let socket_id = Uuid::new_v4();
@@ -94,9 +97,13 @@ impl StreamService for StreamServer {
             if let Ok(Client::ChatMessage { from, text }) = msg.try_into_domain() {
               let targets = manager.lock().unwrap().targets(&socket_id);
 
-              let server_msg = Server::ChatMessage { from, text };
+              if let Some(user_id) = request_user_id
+                && from.id == user_id
+              {
+                let server_msg = Server::ChatMessage { from, text };
 
-              Manager::emit(targets, server_msg.into_proto()).await;
+                Manager::emit(targets, server_msg.into_proto()).await;
+              };
             }
           }
           Err(err) => {

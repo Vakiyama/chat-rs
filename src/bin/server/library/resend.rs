@@ -20,7 +20,7 @@ pub enum Error {
 impl From<Error> for tonic::Status {
   fn from(error: Error) -> tonic::Status {
     match error {
-      Error::Api(message) => Status::internal(message),
+      Error::Api(message) => Status::internal("An unknown error ocurred."),
       Error::EmailValidation(_error) => Status::invalid_argument("Invalid email."),
     }
   }
@@ -35,7 +35,7 @@ pub async fn send_auth_email(to: &String, resend: Arc<Resend>) -> Result<String,
   let chars = {
     let mut rng = rand::rng();
 
-    let chars: String = (0..5)
+    let chars: String = (0..6)
       .map(|_| { rng.sample(Alphanumeric) as char }.to_ascii_uppercase())
       .collect();
     chars
