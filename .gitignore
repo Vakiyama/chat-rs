@@ -4,5 +4,5 @@ target/*
 
 .env
 
-spec-derive/target/*
-spec-derive-core/target/*
+.pgdata/
+.pgsocket

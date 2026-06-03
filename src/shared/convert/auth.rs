@@ -21,6 +21,22 @@ use crate::shared::domain::auth::*;
 //   }
 // }
 
+impl IntoProto<RegisterResponse> for RegisterReturn {
+  fn into_proto(self) -> RegisterResponse {
+    RegisterResponse {
+      identifier: self.identifier.to_string(),
+    }
+  }
+}
+
+impl IntoProto<RegisterRequest> for RegisterCommand {
+  fn into_proto(self) -> RegisterRequest {
+    RegisterRequest {
+      email: self.email,
+      username: self.username,
+    }
+  }
+}
 impl IntoProto<LoginResponse> for LoginReturn {
   fn into_proto(self) -> LoginResponse {
     LoginResponse {

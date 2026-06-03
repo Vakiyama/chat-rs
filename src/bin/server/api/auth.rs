@@ -1,4 +1,6 @@
 use chat_rs::config::CONFIG;
+use chat_rs::shared::convert::auth::proto::{RegisterRequest, RegisterResponse};
+use chat_rs::shared::domain::auth::RegisterReturn;
 use chat_rs::shared::{
   convert::{
     IntoProto, IntoStatus, TryIntoDomain,
@@ -6,7 +8,6 @@ use chat_rs::shared::{
       LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, VerifyRequest, VerifyResponse,
       auth_service_server::AuthService,
     },
-    stream::proto::ClientMessage,
   },
   domain::auth::{
     LoginReturn, RefreshCommand, RefreshError, RefreshReturn, Token, TokenPair, UserId,
@@ -14,27 +15,33 @@ use chat_rs::shared::{
   },
 };
 use http::Request;
+use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
 use std::{
   collections::{HashMap, HashSet},
-  pin::Pin,
   sync::{Arc, Mutex},
   time::Duration,
 };
-use tonic::{Status, body::Body};
+use tonic::body::Body;
 use tonic_middleware::RequestInterceptor;
-use tower::Service;
 
-use crate::{api::stream::ResponseStream, library::resend};
+use crate::entities;
+use crate::library::{database, resend};
 use jwt_simple::{
   claims::{Claims, DEFAULT_TIME_TOLERANCE_SECS, NoCustomClaims},
   prelude::{HS256Key, MACLike},
 };
 use uuid::Uuid;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
+enum VerifyType {
+  Login { email: String },
+  Register { email: String, username: String },
+}
+
+#[derive(Clone)]
 pub struct EmailCodePair {
   pub code: String,
-  pub email: String,
+  pub info: VerifyType,
 }
 
 #[derive(Clone)]
@@ -351,12 +358,29 @@ pub struct AuthServer<
 
 #[tonic::async_trait]
 impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
-  async fn login(
+  async fn register(
     &self,
-    request: tonic::Request<LoginRequest>,
-  ) -> Result<tonic::Response<LoginResponse>, tonic::Status> {
+    request: tonic::Request<RegisterRequest>,
+  ) -> Result<tonic::Response<RegisterResponse>, tonic::Status> {
     let identifier = Uuid::new_v4();
     let inner_request = request.into_inner();
+
+    let db = database::get().await;
+
+    let user = entities::user::Entity::find()
+      .filter(entities::user::Column::Email.contains(&inner_request.email))
+      .one(db)
+      .await
+      .map_err(|e| {
+        eprintln!("Error fetching from db:{e}");
+        tonic::Status::internal("Unknown error occurred")
+      })?;
+
+    let None = user else {
+      return Err(tonic::Status::already_exists("Email already exists"));
+    };
+
+    // entities::user::Entity::insert()
 
     let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
 
@@ -369,14 +393,62 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
         identifier,
         EmailCodePair {
           code,
-          email: inner_request.email,
+          info: VerifyType::Register {
+            email: inner_request.email,
+            username: inner_request.username,
+          },
+        },
+      )
+      .await;
+
+    Ok(tonic::Response::new(
+      RegisterReturn { identifier }.into_proto(),
+    ))
+  }
+
+  async fn login(
+    &self,
+    request: tonic::Request<LoginRequest>,
+  ) -> Result<tonic::Response<LoginResponse>, tonic::Status> {
+    // let identifier = Uuid::new_v4();
+    let inner_request = request.into_inner();
+
+    let db = database::get().await;
+
+    let user = entities::user::Entity::find()
+      .filter(entities::user::Column::Username.contains(&inner_request.email))
+      .one(db)
+      .await
+      .map_err(|e| {
+        eprintln!("Error fetching from db:{e}");
+        tonic::Status::internal("Unknown error occurred")
+      })?;
+
+    let Some(user) = user else {
+      return Err(tonic::Status::not_found("User not found."));
+    };
+
+    let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
+
+    self
+      .state
+      .code_store
+      .lock()
+      .await
+      .insert(
+        user.id,
+        EmailCodePair {
+          code,
+          info: VerifyType::Login {
+            email: inner_request.email,
+          },
         },
       )
       .await;
 
     Ok(tonic::Response::new(
       LoginReturn {
-        identifier: identifier.into(),
+        identifier: user.id,
       }
       .into_proto(),
     ))
@@ -394,7 +466,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       code: code_attempt,
     } = inner_request.try_into_domain()?;
 
-    let EmailCodePair { code, email } = self
+    let EmailCodePair { code, info } = self
       .state
       .code_store
       .lock()
@@ -414,7 +486,32 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       .map_err(|_| VerifyError::Internal)
       .map_err(|e| e.into_status())?;
 
+    let email = match info {
+      VerifyType::Login { ref email } => email.clone(),
+      VerifyType::Register { ref email, .. } => email.clone(),
+    };
+
     if code_attempt == code && email == incoming_email {
+      if let VerifyType::Register { username, email } = info {
+        let db = database::get().await;
+
+        let new_user = entities::user::Model {
+          id: identifier,
+          username,
+          email,
+          status: entities::user::Status::Online,
+        }
+        .into_active_model();
+
+        entities::user::Entity::insert(new_user)
+          .exec(db)
+          .await
+          .map_err(|e| {
+            eprintln!("Error creating user: {e}");
+            tonic::Status::internal("Error while creating user.")
+          })?;
+      };
+
       Ok(tonic::Response::new(
         VerifyReturn {
           access_token,

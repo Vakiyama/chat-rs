@@ -20,6 +20,7 @@ pub struct Model {
   #[sea_orm(primary_key, auto_increment = false)]
   pub id: Uuid,
   pub username: String,
+  pub email: String,
   pub status: Status,
   #[sea_orm(has_many, via = "user_server")]
   pub servers: HasMany<super::server::Entity>,

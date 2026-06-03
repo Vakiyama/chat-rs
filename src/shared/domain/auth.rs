@@ -10,6 +10,16 @@ pub struct TokenPair {
   pub duration: Duration,
 }
 
+pub struct RegisterCommand {
+  pub email: String,
+  pub username: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisterReturn {
+  pub identifier: Uuid,
+}
+
 pub struct LoginCommand {
   pub email: String,
 }

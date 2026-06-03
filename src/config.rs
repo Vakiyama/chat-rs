@@ -12,6 +12,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
   pub grpc_address: String,
+  pub db_connection: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +33,8 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
   Config {
     server: ServerConfig {
       grpc_address: env("SERVER_GRPC_ADDRESS").unwrap_or_else(|| "127.0.0.1:3000".into()),
+      db_connection: env("DB_CONNECTION")
+        .unwrap_or_else(|| "postgres://postgres@localhost:5432/local".into()),
     },
     auth: AuthConfig {
       jwt_key_hex: env("JWT_KEY").expect("JWT_KEY must be set"),

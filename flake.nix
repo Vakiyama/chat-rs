@@ -60,10 +60,21 @@
               pkgs.openssl
               pkgs.tokei
               pkgs.grpc-tools
+              pkgs.postgresql
             ]
             ++ guiLibs;
 
+            devshell.startup.postgres.text = ''            
+              mkdir -p $PGHOST
+              if [ ! -d "$PGDATA" ]; then
+                initdb --auth=trust --no-locale --encoding=UTF8
+              fi
+            '';
+
+
             env = [
+              { name = "PGDATA"; eval = "$PWD/.pgdata"; }
+              { name = "PGHOST"; eval = "$PWD/.pgsocket"; }
               {
                 name = "RUSTFLAGS";
                 value = "-C link-arg=-fuse-ld=mold";
