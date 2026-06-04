@@ -148,11 +148,21 @@ pub trait RefreshTokenStore {
 
 /// This struct has no guarantees about token validity across server restarts
 /// the intention is to re-implement the refresh token store trait for either a redis or db based solution.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct InMemoryTokenStore {
   lookups: Arc<Mutex<TokenUserIdReverseLookup>>,
   key: JWTKey,
   time_tolerance: jwt_simple::prelude::Duration,
+}
+
+impl Default for InMemoryTokenStore {
+  fn default() -> Self {
+    Self {
+      lookups: Default::default(),
+      key: Default::default(),
+      time_tolerance: jwt_simple::prelude::Duration::from_mins(1),
+    }
+  }
 }
 
 #[derive(Default, Clone)]
@@ -378,6 +388,7 @@ fn get_uuid_from_access_token(
   time_tolerance: jwt_simple::prelude::Duration,
 ) -> Option<Uuid> {
   let options = jwt_simple::prelude::VerificationOptions {
+    time_tolerance: Some(time_tolerance),
     ..Default::default()
   };
 
@@ -403,6 +414,7 @@ fn get_uuid_from_verify_token(
   time_tolerance: jwt_simple::prelude::Duration,
 ) -> Option<Uuid> {
   let options = jwt_simple::prelude::VerificationOptions {
+    time_tolerance: Some(time_tolerance),
     ..Default::default()
   };
 
