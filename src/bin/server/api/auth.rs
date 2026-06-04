@@ -378,7 +378,6 @@ fn get_uuid_from_access_token(
   time_tolerance: jwt_simple::prelude::Duration,
 ) -> Option<Uuid> {
   let options = jwt_simple::prelude::VerificationOptions {
-    time_tolerance: Some(time_tolerance),
     ..Default::default()
   };
 
@@ -404,7 +403,6 @@ fn get_uuid_from_verify_token(
   time_tolerance: jwt_simple::prelude::Duration,
 ) -> Option<Uuid> {
   let options = jwt_simple::prelude::VerificationOptions {
-    time_tolerance: Some(time_tolerance),
     ..Default::default()
   };
 

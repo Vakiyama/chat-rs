@@ -69,9 +69,10 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
         let mut req = builder.body(body).unwrap();
         // Attach current token
         if let Some(token) = &tokens.lock().unwrap().access_token {
-          req
-            .headers_mut()
-            .insert(http::header::AUTHORIZATION, token.parse().unwrap());
+          req.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+          );
         }
         req
       };
