@@ -171,7 +171,7 @@ impl RefreshTokenStore for InMemoryTokenStore {
   }
 
   async fn has(&self, token: &Token) -> Result<UserId, RefreshTokenStoreError> {
-    let token_uuid = get_uuid_from_token(self.key.get(), token, self.time_tolerance);
+    let token_uuid = get_uuid_from_verify_token(self.key.get(), token, self.time_tolerance);
 
     let has_token = {
       let lookup = self.lookups.lock().unwrap();
@@ -204,7 +204,7 @@ impl RefreshTokenStore for InMemoryTokenStore {
   }
 
   async fn insert(&self, token: Token) -> Result<UserId, RefreshTokenStoreError> {
-    let uuid = get_uuid_from_token(self.key.get(), &token, self.time_tolerance)
+    let uuid = get_uuid_from_verify_token(self.key.get(), &token, self.time_tolerance)
       .map(Ok)
       .unwrap_or(Err(RefreshTokenStoreError::InvalidToken))?;
 
@@ -229,7 +229,7 @@ impl RefreshTokenStore for InMemoryTokenStore {
   async fn remove(&self, token: &Token) -> Result<Option<()>, RefreshTokenStoreError> {
     let mut lookup = self.lookups.lock().unwrap();
 
-    let uuid = get_uuid_from_token(self.key.get(), token, self.time_tolerance)
+    let uuid = get_uuid_from_verify_token(self.key.get(), token, self.time_tolerance)
       .map(Ok)
       .unwrap_or_else(|| {
         // token is invalid, but we may be able to remove it as it may just be expired
@@ -369,10 +369,10 @@ fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
     .ok()?
     .strip_prefix("Bearer ")?;
 
-  get_uuid_from_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
+  get_uuid_from_access_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
 }
 
-fn get_uuid_from_token(
+fn get_uuid_from_access_token(
   key: &HS256Key,
   token: &str,
   time_tolerance: jwt_simple::prelude::Duration,
@@ -398,7 +398,7 @@ fn get_uuid_from_token(
   None
 }
 
-fn is_valid_verify_token(
+fn get_uuid_from_verify_token(
   key: &HS256Key,
   token: &str,
   time_tolerance: jwt_simple::prelude::Duration,
@@ -642,7 +642,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       refresh_token: incoming_refresh_token,
     } = request_inner.try_into_domain()?;
 
-    if is_valid_verify_token(
+    if get_uuid_from_verify_token(
       self.state.jwt_key.get(),
       &incoming_refresh_token,
       self.state.refresh_store.time_tolerance,
@@ -746,7 +746,12 @@ mod tests {
   }
 
   fn make_expired_token(key: &HS256Key, user_id: UserId) -> Token {
-    let claims = Claims::create(Duration::from_secs(1).into()).with_subject(user_id.to_string());
+    let claims = Claims::create(Duration::from_secs(1).into())
+      .with_subject(user_id.to_string())
+      .with_audience(JWT_REFRESH_TOKEN_AUD.to_string())
+      .with_issuer(CONFIG.environment.to_string())
+      .with_jwt_id(Uuid::new_v4());
+
     key.authenticate(claims).unwrap()
   }
 

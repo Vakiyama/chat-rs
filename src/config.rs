@@ -28,10 +28,10 @@ impl std::str::FromStr for Environment {
       return Ok(Environment::Dev);
     }
     if s.to_uppercase() == "STAGING" {
-      return Ok(Environment::Dev);
+      return Ok(Environment::Staging);
     }
     if s.to_uppercase() == "PROD" {
-      return Ok(Environment::Dev);
+      return Ok(Environment::Prod);
     }
 
     let err_msg =
