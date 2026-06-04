@@ -3,10 +3,52 @@ use std::sync::LazyLock;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+pub enum Environment {
+  Dev,
+  Staging,
+  Prod,
+}
+
+impl std::fmt::Display for Environment {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let s = match self {
+      Environment::Dev => "DEV",
+      Environment::Staging => "STAGING",
+      Environment::Prod => "PROD",
+    };
+    f.write_str(s)
+  }
+}
+
+impl std::str::FromStr for Environment {
+  type Err = String;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    if s.to_uppercase() == "DEV" {
+      return Ok(Environment::Dev);
+    }
+    if s.to_uppercase() == "STAGING" {
+      return Ok(Environment::Dev);
+    }
+    if s.to_uppercase() == "PROD" {
+      return Ok(Environment::Dev);
+    }
+
+    let err_msg =
+      format!("Unknown environment {s}. Valid envs: DEV, STAGING, PROD (capital insensitive)");
+
+    eprintln!("{err_msg}");
+
+    Err(err_msg)
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
   pub server: ServerConfig,
   pub auth: AuthConfig,
   pub email: EmailConfig,
+  pub environment: Environment,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +88,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     email: EmailConfig {
       resend_api_key: env("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),
     },
+    environment: env("ENVIRONMENT").expect("ENVIRONMENT must be set."),
   }
 });
 

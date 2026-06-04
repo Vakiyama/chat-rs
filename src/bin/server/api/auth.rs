@@ -388,8 +388,10 @@ fn get_uuid_from_token(
 
   let subject = claims.subject?;
   let audiences = claims.audiences?;
+  let issuer = claims.issuer?;
 
-  if audiences.into_string().ok()? == JWT_AUTH_TOKEN_AUD {
+  if audiences.into_string().ok()? == JWT_AUTH_TOKEN_AUD && issuer == CONFIG.environment.to_string()
+  {
     return Uuid::parse_str(&subject).ok();
   };
 
@@ -412,8 +414,11 @@ fn is_valid_verify_token(
 
   let subject = claims.subject?;
   let audiences = claims.audiences?;
+  let issuer = claims.issuer?;
 
-  if audiences.into_string().ok()? == JWT_REFRESH_TOKEN_AUD {
+  if audiences.into_string().ok()? == JWT_REFRESH_TOKEN_AUD
+    && issuer == CONFIG.environment.to_string()
+  {
     return Uuid::parse_str(&subject).ok();
   };
 
@@ -690,6 +695,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   let claims = Claims::create(access_duration.into())
     .with_subject(identifier.to_string())
     .with_audience(JWT_AUTH_TOKEN_AUD.to_string())
+    .with_issuer(CONFIG.environment.to_string())
     .with_jwt_id(Uuid::new_v4());
   let access_token = key
     .authenticate(claims)
@@ -698,6 +704,7 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
   let claims = Claims::create(refresh_duration.into())
     .with_subject(identifier.to_string())
     .with_jwt_id(Uuid::new_v4())
+    .with_issuer(CONFIG.environment.to_string())
     .with_audience(JWT_REFRESH_TOKEN_AUD.to_string());
 
   let refresh_token = key
@@ -731,6 +738,8 @@ mod tests {
     let refresh_duration = super::jwt_refresh_duration();
     let claims = Claims::create(refresh_duration.into())
       .with_subject(user_id.to_string())
+      .with_issuer(CONFIG.environment.to_string())
+      .with_audience(JWT_REFRESH_TOKEN_AUD.to_string())
       .with_jwt_id(Uuid::new_v4().to_string());
 
     key.authenticate(claims).unwrap()
