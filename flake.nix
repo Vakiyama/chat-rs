@@ -69,6 +69,8 @@
               # native build deps
               pkgs.pkg-config
               pkgs.openssl
+
+              # database
               pkgs.postgresql
 
               # formatters
