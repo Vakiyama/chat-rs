@@ -43,7 +43,13 @@
 
           pgStart = ''
             if ! pg_ctl status -D "$PGDATA" >/dev/null 2>&1; then
-              pg_ctl start -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-k $PGHOST"
+              (
+                for fd in /proc/$$/fd/*; do
+                  n=''${fd##*/}
+                  [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"
+                done
+                pg_ctl start -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-k $PGHOST"
+              )
             fi
 
             until pg_isready -h "$PGHOST" -q; do sleep 0.1; done
