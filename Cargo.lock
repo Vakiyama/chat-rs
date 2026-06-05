@@ -1203,6 +1203,7 @@ dependencies = [
  "keyring",
  "serde",
  "tokio",
+ "tokio-retry",
  "tokio-stream",
  "tonic",
  "tower",
@@ -7598,6 +7599,17 @@ dependencies = [
  "flurry",
  "parking_lot",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-retry"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40f644c762e9d396831ae2f8935c954b0d758c4532e924bead0f666d0c1c8640"
+dependencies = [
+ "pin-project-lite",
+ "rand 0.10.1",
  "tokio",
 ]
 
