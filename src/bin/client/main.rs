@@ -1,7 +1,8 @@
+use chat_rs::shared::domain::stream::User;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
 
-mod websocket;
+mod stream;
 
 use crate::model::{Auth, Screen};
 use crate::screens::{auth, chat};
@@ -24,7 +25,7 @@ fn new() -> model::Model {
 }
 
 fn subscription(_model: &model::Model) -> Subscription<Message> {
-  Subscription::run(websocket::connect)
+  Subscription::run(stream::connect)
     .map(|event| event.into())
     .map(Message::Chat)
 }
@@ -37,7 +38,6 @@ enum Message {
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
-  // println!("{message:#?}");
   match message {
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
@@ -55,14 +55,21 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         match msg {
           auth::Message::ApiVerifiedCode(Ok(response)) => {
             model.screen = Screen::Chat(Default::default());
+            model.user = Auth::LoggedIn(User {
+              id: response.user_id,
+              name: response.username.clone(),
+            });
 
             Task::future(async {
-              client::get().await.insert_tokens(response);
+              client::get().await.insert_tokens(response).await;
               Message::None
             })
           }
           msg => auth::update(auth_model, msg).map(Message::Auth),
         }
+      } else if let Auth::LoggedIn(_) = model.user {
+        model.screen = Screen::Chat(Default::default());
+        iced::Task::none()
       } else {
         iced::Task::none()
       }
@@ -74,8 +81,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
-    model::Screen::Register => todo!(),
-    model::Screen::ConfirmCode => todo!(),
     model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
   };
 

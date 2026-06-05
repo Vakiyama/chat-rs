@@ -260,7 +260,7 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
       Task::none()
     }
     Message::ApiVerifiedCode(Ok(body)) => Task::future(async {
-      client::get().await.insert_tokens(body);
+      client::get().await.insert_tokens(body).await;
       Message::UserNavigatedLogin
     }),
     Message::ApiVerifiedCode(Err(status)) => {

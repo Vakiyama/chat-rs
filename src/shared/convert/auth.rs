@@ -87,6 +87,8 @@ impl IntoProto<VerifyResponse> for VerifyReturn {
         seconds: self.token_duration.as_secs().try_into().unwrap(),
         nanos: 0,
       }),
+      user_id: self.user_id.to_string(),
+      username: self.username,
     }
   }
 }
@@ -183,6 +185,11 @@ impl TryFromProto<VerifyResponse> for VerifyReturn {
       access_token: res.access_token,
       refresh_token: res.refresh_token,
       token_duration: Duration::new(seconds, nanos),
+      username: res.username,
+      user_id: res
+        .user_id
+        .try_into()
+        .map_err(|_| Status::invalid_argument("user_id is not a valid UUID."))?,
     })
   }
 }

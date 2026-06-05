@@ -6,11 +6,8 @@ use chat_rs::shared::domain::auth::Token;
 use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use std::{
-  pin::Pin,
-  sync::{Arc, Mutex},
-};
-use tokio::sync::OnceCell;
+use std::{pin::Pin, sync::Arc};
+use tokio::sync::{Mutex, OnceCell};
 use tonic::transport::Channel;
 use tower::Service;
 
@@ -24,11 +21,20 @@ pub struct TokenStore {
 pub struct AuthService {
   inner: tonic::transport::Channel,
   tokens: Arc<Mutex<TokenStore>>,
+  with_buffer_replay: bool,
 }
 
 impl AuthService {
-  pub fn new(inner: tonic::transport::Channel, tokens: Arc<Mutex<TokenStore>>) -> Self {
-    Self { inner, tokens }
+  pub fn new(
+    inner: tonic::transport::Channel,
+    tokens: Arc<Mutex<TokenStore>>,
+    with_buffer_replay: bool,
+  ) -> Self {
+    Self {
+      inner,
+      tokens,
+      with_buffer_replay,
+    }
   }
 }
 
@@ -44,65 +50,85 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
     self.inner.poll_ready(cx).map_err(Into::into)
   }
 
-  fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+  fn call(&mut self, mut req: http::Request<tonic::body::Body>) -> Self::Future {
     let clone = self.inner.clone();
     let mut inner = std::mem::replace(&mut self.inner, clone);
     let tokens = self.tokens.clone();
+    let with_replay = self.with_buffer_replay;
 
     // Capture parts we need to replay before consuming req
-    let (parts, body) = req.into_parts();
 
     Box::pin(async move {
       // Buffer the body bytes so we can replay
-      let body_bytes = body.collect().await?.to_bytes();
 
-      let make_req = |tokens: &Arc<Mutex<TokenStore>>| {
-        let mut builder = http::Request::builder()
-          .method(parts.method.clone())
-          .uri(parts.uri.clone())
-          .version(parts.version);
-        // Clone headers
-        *builder.headers_mut().unwrap() = parts.headers.clone();
+      if with_replay {
+        let (parts, body) = req.into_parts();
+        let body_bytes = body.collect().await?.to_bytes();
+        let make_req = async |tokens: &Arc<Mutex<TokenStore>>| {
+          let mut builder = http::Request::builder()
+            .method(parts.method.clone())
+            .uri(parts.uri.clone())
+            .version(parts.version);
+          // Clone headers
+          *builder.headers_mut().unwrap() = parts.headers.clone();
 
-        let body = tonic::body::Body::new(Full::new(body_bytes.clone()).map_err(|e| match e {}));
+          let body = tonic::body::Body::new(Full::new(body_bytes.clone()).map_err(|e| match e {}));
 
-        let mut req = builder.body(body).unwrap();
-        // Attach current token
-        if let Some(token) = &tokens.lock().unwrap().access_token {
-          req.headers_mut().insert(
-            http::header::AUTHORIZATION,
-            format!("Bearer {}", token).parse().unwrap(),
-          );
+          let mut req = builder.body(body).unwrap();
+          // Attach current token
+          if let Some(token) = &tokens.lock().await.access_token {
+            req.headers_mut().insert(
+              http::header::AUTHORIZATION,
+              format!("Bearer {}", token).parse().unwrap(),
+            );
+          }
+          req
+        };
+
+        let res = inner.call(make_req(&tokens).await).await?;
+
+        if res.status() != http::StatusCode::UNAUTHORIZED {
+          return Ok(res);
         }
-        req
-      };
 
-      let res = inner.call(make_req(&tokens)).await?;
+        let refresh_token = tokens.lock().await.refresh_token.clone();
+        let Some(refresh_token) = refresh_token else {
+          return Ok(res);
+        };
 
-      if res.status() != http::StatusCode::UNAUTHORIZED {
-        return Ok(res);
+        let token_res = get()
+          .await
+          .auth
+          .refresh(RefreshCommand { refresh_token }.into_proto())
+          .await?
+          .into_inner();
+
+        {
+          let mut store = tokens.lock().await;
+          store.access_token = Some(token_res.access_token);
+          store.refresh_token = Some(token_res.refresh_token);
+        }
+
+        // Retry with fresh token
+        inner
+          .call(make_req(&tokens).await)
+          .await
+          .map_err(Into::into)
+      } else if let Some(token) = &tokens.lock().await.access_token {
+        req.headers_mut().insert(
+          http::header::AUTHORIZATION,
+          format!("Bearer {}", token).parse().unwrap(),
+        );
+
+        let res = inner.call(req).await?;
+
+        Ok(res)
+      } else {
+        let res = inner.call(req).await?;
+        eprintln!("Warning: request being made with no tokens in private channel.");
+
+        Ok(res)
       }
-
-      let refresh_token = tokens.lock().unwrap().refresh_token.clone();
-      let Some(refresh_token) = refresh_token else {
-        return Ok(res);
-      };
-
-      let token_res = get()
-        .await
-        .auth
-        .refresh(RefreshCommand { refresh_token }.into_proto())
-        .await?
-        .into_inner();
-
-      {
-        let mut store = tokens.lock().unwrap();
-        store.access_token = Some(token_res.access_token);
-        store.refresh_token = Some(token_res.refresh_token);
-      }
-
-      // Retry with fresh token
-      inner.call(make_req(&tokens)).await.map_err(Into::into)
     })
   }
 }
@@ -116,8 +142,8 @@ pub struct GrpcClient {
 }
 
 impl GrpcClient {
-  pub fn insert_tokens(&self, response: VerifyReturn) {
-    let mut tokens = self.tokens.lock().unwrap();
+  pub async fn insert_tokens(&self, response: VerifyReturn) {
+    let mut tokens = self.tokens.lock().await;
     tokens.access_token = Some(response.access_token);
     tokens.refresh_token = Some(response.refresh_token);
   }
@@ -157,8 +183,8 @@ pub async fn get() -> GrpcClient {
 
       let tokens: Arc<Mutex<TokenStore>> = Default::default();
 
-      let auth_channel = AuthService::new(channel.clone(), tokens.clone());
-      let stream = StreamServiceClient::new(auth_channel);
+      let auth_channel_no_replay = AuthService::new(channel.clone(), tokens.clone(), false);
+      let stream = StreamServiceClient::new(auth_channel_no_replay);
 
       GrpcClient {
         auth: AuthServiceClient::new(channel.clone()),

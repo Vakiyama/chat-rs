@@ -3,10 +3,10 @@ use chat_rs::shared::domain::stream::User;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 
-use crate::websocket;
+use crate::stream;
 
-pub enum WebSocket {
-  Connected(websocket::Connection),
+pub enum Stream {
+  Connected(stream::Connection),
   Disconnected,
 }
 pub enum Auth {
@@ -21,8 +21,6 @@ pub struct Model {
 
 pub enum Screen {
   Auth(AuthModel),
-  Register,
-  ConfirmCode,
   Chat(ChatModel),
 }
 

@@ -1073,7 +1073,6 @@ dependencies = [
  "resend-rs",
  "sea-orm",
  "serde",
- "subtle",
  "tokio",
  "tokio-rate-limit",
  "tokio-stream",
@@ -1084,6 +1083,7 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tower-http",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]

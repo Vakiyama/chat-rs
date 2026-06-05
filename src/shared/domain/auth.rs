@@ -40,6 +40,8 @@ pub struct VerifyReturn {
   pub access_token: String,
   pub refresh_token: String,
   pub token_duration: Duration,
+  pub user_id: Uuid,
+  pub username: String,
 }
 
 pub struct RefreshCommand {

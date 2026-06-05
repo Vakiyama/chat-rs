@@ -7,6 +7,7 @@ use tokio_rate_limit::{RateLimiter, RateLimiterConfig};
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 use tower::limit::RateLimitLayer;
+use tower_http::trace::TraceLayer;
 
 use crate::api::auth::{
   AuthServer, ClientRateLimitInterceptor, InMemoryCodeStore, InMemoryTokenStore,
@@ -45,6 +46,14 @@ async fn main() {
     .service(StreamServiceServer::new(StreamServer::default()));
 
   let grpc = Server::builder()
+    .layer(
+      TraceLayer::new_for_grpc().make_span_with(|request: &http::Request<_>| {
+        tracing::info_span!(
+            "grpc_request",
+            method = %request.uri().path(),
+        )
+      }),
+    )
     .add_service(private_stream_service)
     .add_service(auth_service)
     .serve(CONFIG.server.grpc_address.parse().unwrap());

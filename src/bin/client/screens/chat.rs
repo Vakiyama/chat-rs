@@ -1,19 +1,19 @@
 use crate::Element;
-use crate::{SPACE_GRID, model::WebSocket};
+use crate::{SPACE_GRID, model::Stream};
 
+use crate::stream::Connection;
 use crate::types::async_data::AsyncData;
-use crate::websocket::Connection;
 use chat_rs::shared::domain::stream::{Client, Server, User};
-use iced::widget::container;
-use iced::widget::{Column, column, row, text, text_input};
+use iced::widget::{Column, column, space, text, text_input};
+use iced::widget::{container, row};
 use iced::{Pixels, Task};
 
 // --------------------------------- MODEL ---------------------------------
 
 pub struct Model {
-  posts: AsyncData<Vec<()>, ()>,
+  posts: AsyncData<Vec<Server>, tonic::Status>,
   input: String,
-  websocket: WebSocket,
+  stream: Stream,
 }
 
 impl Default for Model {
@@ -21,42 +21,42 @@ impl Default for Model {
     Self {
       posts: AsyncData::Done(Ok(vec![])),
       input: String::new(),
-      websocket: WebSocket::Disconnected,
+      stream: Stream::Disconnected,
     }
   }
 }
 
 impl Model {
   pub fn send(&mut self, user: &User) -> Result<(), Error> {
-    match &mut self.websocket {
-      WebSocket::Connected(connection) => {
-        todo!()
-        //  let name = user.name.clone();
-        //  let input = self.input.clone();
+    match &mut self.stream {
+      Stream::Connected(connection) => {
+        let input = self.input.clone();
 
-        //  self
-        //    .posts
-        //    .as_mut()
-        //    .map(|posts| posts.push(Post::new(&input, &name)));
+        self.posts.as_mut().map(|posts| {
+          posts.push(Server::ChatMessage {
+            from: user.clone(),
+            text: input.clone(),
+          })
+        });
 
-        //  self.input = "".to_string();
+        self.input = "".to_string();
 
-        //  connection.send(Client::ChatMessage {
-        //    from: user.clone(),
-        //    text: input,
-        //  });
+        connection.send(Client::ChatMessage {
+          from: user.clone(),
+          text: input,
+        });
 
-        //  Ok(())
+        Ok(())
       }
-      WebSocket::Disconnected => Err(Error::NoConnection),
+      Stream::Disconnected => Err(Error::NoConnection),
     }
   }
 
-  pub fn receive(&mut self, message: &str, username: &str) {
-    self.posts.as_mut().map(|posts| {
-      todo!()
-      // posts.push(Post::new(message, username))
-    });
+  pub fn receive(&mut self, text: String, from: User) {
+    self
+      .posts
+      .as_mut()
+      .map(|posts| posts.push(Server::ChatMessage { from, text }));
   }
 }
 
@@ -66,7 +66,7 @@ pub enum Message {
   UserSubmittedChatInput,
   Disconnected,
   Connected(Connection),
-  Websocket(Server),
+  Stream(Server),
 }
 
 pub enum Error {
@@ -79,16 +79,24 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
   let posts = model
     .posts
     .as_ref()
-    .get_or(&vec![]) // temp: replace get_or with showing a proper loading view...
+    .get_or(&Vec::new()) // temp: replace get_or with showing a proper loading view...
     .iter()
     .map(|post| {
       let element: Element<Message> = {
-        todo!()
-        //   row![text(post.author_name.clone()), text(post.content.clone())]
-        //     .spacing(Pixels(SPACE_GRID.into()))
-        //     .into();
-        // element
+        if let Server::ChatMessage {
+          from,
+          text: incoming_text,
+        } = post
+        {
+          row![text(from.name.clone()), text(incoming_text.clone())]
+            .spacing(Pixels(SPACE_GRID.into()))
+            .into()
+        } else {
+          space().into()
+        }
       };
+
+      element
     })
     .collect::<Vec<_>>();
 
@@ -110,6 +118,7 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
 // --------------------------------- UPDATE ---------------------------------
 
 pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message> {
+  println!("{message:#?}");
   match message {
     Message::UserChangedChatInput(new) => {
       model.input = new;
@@ -122,14 +131,14 @@ pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message>
       Task::none()
     }
     Message::Disconnected => {
-      model.websocket = WebSocket::Disconnected;
+      model.stream = Stream::Disconnected;
       Task::none()
     }
     Message::Connected(connection) => {
-      model.websocket = WebSocket::Connected(connection);
+      model.stream = Stream::Connected(connection);
       Task::none()
     }
-    Message::Websocket(server_message) => match server_message {
+    Message::Stream(server_message) => match server_message {
       Server::JoinedRoom { from } => {
         println!("User joined room: {from:?}");
         Task::none()
@@ -140,7 +149,7 @@ pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message>
         Task::none()
       }
       Server::ChatMessage { from, text } => {
-        model.receive(&text, &from.name);
+        model.receive(text, from);
 
         Task::none()
       }

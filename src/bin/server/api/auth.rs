@@ -21,7 +21,6 @@ use std::{
   sync::{Arc, Mutex},
   time::Duration,
 };
-use subtle::ConstantTimeEq;
 use tokio_rate_limit::RateLimiter;
 use tonic::body::Body;
 use tonic::transport::server::TcpConnectInfo;
@@ -37,8 +36,15 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub enum VerifyType {
-  Login { email: String, user_id: Uuid },
-  Register { email: String, username: String },
+  Login {
+    email: String,
+    user_id: Uuid,
+    username: String,
+  },
+  Register {
+    email: String,
+    username: String,
+  },
 }
 
 #[derive(Clone)]
@@ -372,8 +378,9 @@ impl RequestInterceptor for ClientRateLimitInterceptor {
 }
 
 fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
-  let token = req
-    .headers()
+  let headers = req.headers();
+
+  let token = headers
     .get(http::header::AUTHORIZATION)?
     .to_str()
     .ok()?
@@ -546,6 +553,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
             info: VerifyType::Login {
               email: inner_request.email,
               user_id: user.id,
+              username: user.username,
             },
             verify_attempts: 0,
           },
@@ -570,11 +578,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       code: code_attempt,
     } = inner_request.try_into_domain()?;
 
-    let EmailCodePair {
-      code,
-      info,
-      verify_attempts,
-    } = self
+    let EmailCodePair { code, info, .. } = self
       .state
       .code_store
       .lock()
@@ -585,9 +589,16 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       .unwrap_or(Err(VerifyError::UnknownIdentifier))
       .map_err(|e| e.into_status())?;
 
-    let (email, user_id) = match info {
-      VerifyType::Login { ref email, user_id } => (email.clone(), user_id),
-      VerifyType::Register { ref email, .. } => (email.clone(), uuid::Uuid::new_v4()),
+    let (email, user_id, username) = match info {
+      VerifyType::Login {
+        ref email,
+        user_id,
+        ref username,
+      } => (email.clone(), user_id, username.clone()),
+      VerifyType::Register {
+        ref email,
+        ref username,
+      } => (email.clone(), uuid::Uuid::new_v4(), username.clone()),
     };
 
     let TokenPair {
@@ -612,6 +623,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
         .into_active_model();
 
         entities::user::Entity::insert(new_user)
+          .on_conflict_do_nothing()
           .exec(db)
           .await
           .map_err(|e| {
@@ -634,6 +646,8 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
           access_token,
           refresh_token,
           token_duration: duration,
+          user_id,
+          username,
         }
         .into_proto(),
       ))

@@ -39,6 +39,8 @@ message VerifyResponse {
   string access_token  = 1;
   string refresh_token = 2;
   google.protobuf.Duration token_duration = 3; 
+  string user_id = 4;
+  string username = 5;
 }
 
 // -- Refresh --

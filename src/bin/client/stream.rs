@@ -33,7 +33,7 @@ impl From<Event> for chat::Message {
     match val {
       Event::Connected(connection) => chat::Message::Connected(connection),
       Event::Disconnected => chat::Message::Disconnected,
-      Event::MessageReceived(server_message) => chat::Message::Websocket(server_message),
+      Event::MessageReceived(server_message) => chat::Message::Stream(server_message),
     }
   }
 }
@@ -49,7 +49,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
           response.into_inner().fuse()
         }
-        Err(_) => {
+        Err(e) => {
           tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
           continue;
         }
