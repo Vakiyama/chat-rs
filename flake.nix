@@ -2,13 +2,12 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    devshell.url = "github:numtide/devshell";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
+    devshell = {
+      url = "github:numtide/devshell";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    bacon-ls = {
-      url = "github:crisidev/bacon-ls";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -41,40 +40,62 @@
             freetype
             expat
           ];
+
+          pgStart = ''
+            if ! pg_ctl status -D "$PGDATA" >/dev/null 2>&1; then
+              pg_ctl start -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-k $PGHOST"
+            fi
+
+            until pg_isready -h "$PGHOST" -q; do sleep 0.1; done
+
+            ensure() { 
+                psql -h "$PGHOST" -d postgres -tAc "$1" | grep -q 1 || psql -h "$PGHOST" -d postgres -c "$2"; 
+            }
+            ensure "SELECT 1 FROM pg_roles WHERE rolname='postgres'" "CREATE ROLE postgres WITH SUPERUSER LOGIN"
+            ensure "SELECT 1 FROM pg_database WHERE datname='local'" "CREATE DATABASE local OWNER postgres"
+          '';
         in
         {
           devshells.default = {
             packages = [
+              # rust toolchain
               (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default
               pkgs.rust-analyzer
-              pkgs.bacon
-              pkgs.taplo
-              inputs.bacon-ls.defaultPackage.${system}
+
+              # c toolchain + linker
+              pkgs.stdenv.cc
               pkgs.mold
+
+              # native build deps
               pkgs.pkg-config
-              pkgs.lazygit
-              pkgs.websocat
-              pkgs.diesel-cli
               pkgs.openssl
-              pkgs.watchexec
-              pkgs.openssl
-              pkgs.tokei
-              pkgs.grpc-tools
+
+              # database
               pkgs.postgresql
+
+              # formatters
+              pkgs.taplo
+              pkgs.yamlfmt
             ]
             ++ guiLibs;
 
-            devshell.startup.postgres.text = ''            
-              mkdir -p $PGHOST
+            devshell.startup.postgres.text = ''
+              mkdir -p "$PGHOST"
               if [ ! -d "$PGDATA" ]; then
                 initdb --auth=trust --no-locale --encoding=UTF8
               fi
+              ${pgStart}
             '';
 
-
             env = [
-              { name = "PGDATA"; eval = "$PWD/.pgdata"; }
-              { name = "PGHOST"; eval = "$PWD/.pgsocket"; }
+              {
+                name = "PGDATA";
+                eval = "$PWD/.pgdata";
+              }
+              {
+                name = "PGHOST";
+                eval = "$PWD/.pgsocket";
+              }
               {
                 name = "RUSTFLAGS";
                 value = "-C link-arg=-fuse-ld=mold";
@@ -93,7 +114,30 @@
               }
               {
                 name = "RUST_LOG";
-                value = "debug cargo run";
+                value = "debug";
+              }
+              {
+                name = "JWT_KEY";
+                value = "c2ce2a9e1b3f3c0c02dc11c49c868e154efbede9e46faa47c0bbef01af5a5e00";
+              }
+            ];
+
+            commands = [
+              { package = pkgs.tokei; }
+              { package = pkgs.lazygit; }
+              { package = pkgs.postgresql; }
+              { package = pkgs.secretspec; }
+              {
+                name = "pg-start";
+                command = pgStart;
+              }
+              {
+                name = "pg-stop";
+                command = ''pg_ctl stop -D "$PGDATA"'';
+              }
+              {
+                name = "pg-status";
+                command = ''pg_ctl status -D "$PGDATA"'';
               }
             ];
           };
