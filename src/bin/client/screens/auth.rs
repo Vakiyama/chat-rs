@@ -53,7 +53,6 @@ impl Default for Mode {
 pub struct Model {
   mode: Mode,
   email_input: String,
-  remember_me_checked: bool,
 }
 
 impl Model {
@@ -61,7 +60,6 @@ impl Model {
     Model {
       mode: Default::default(),
       email_input: Default::default(),
-      remember_me_checked: Default::default(),
     }
   }
 
@@ -83,7 +81,6 @@ pub enum Message {
   UserSubmittedForm,
   UserNavigatedRegister,
   UserNavigatedLogin,
-  UserToggledRememberMe,
   ApiSentLogin(Result<LoginReturn, Arc<tonic::Status>>),
   ApiSentRegister(Result<RegisterReturn, Arc<tonic::Status>>),
   ApiVerifiedCode(Result<VerifyReturn, Arc<tonic::Status>>),
@@ -216,10 +213,6 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
         )
       }
     },
-    Message::UserToggledRememberMe => {
-      model.remember_me_checked = !model.remember_me_checked;
-      Task::none()
-    }
     Message::UserNavigatedRegister => {
       model.mode = Mode::Register {
         error_message: None,
@@ -260,7 +253,10 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
       Task::none()
     }
     Message::ApiVerifiedCode(Ok(body)) => Task::future(async {
-      client::get().await.insert_tokens(body).await;
+      client::get()
+        .await
+        .insert_tokens(body.refresh_token, body.access_token)
+        .await;
       Message::UserNavigatedLogin
     }),
     Message::ApiVerifiedCode(Err(status)) => {

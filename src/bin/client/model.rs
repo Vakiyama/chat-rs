@@ -9,6 +9,7 @@ pub enum Stream {
   Connected(stream::Connection),
   Disconnected,
 }
+
 pub enum Auth {
   LoggedIn(User),
   NotLoggedIn,

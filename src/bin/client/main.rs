@@ -1,4 +1,7 @@
+use chat_rs::shared::convert::TryIntoDomain;
+use chat_rs::shared::convert::user::proto::MeResponse;
 use chat_rs::shared::domain::stream::User;
+use chat_rs::shared::domain::user::MeReturn;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
 
@@ -20,8 +23,24 @@ fn main() -> iced::Result {
     .run()
 }
 
-fn new() -> model::Model {
-  model::Model::default()
+fn new() -> (model::Model, Task<Message>) {
+  (
+    model::Model::default(),
+    Task::perform(
+      async {
+        client::get()
+          .await
+          .user
+          .me(())
+          .await
+          .unwrap()
+          .into_inner()
+          .try_into_domain()
+          .ok()
+      },
+      Message::Loaded,
+    ),
+  )
 }
 
 fn subscription(_model: &model::Model) -> Subscription<Message> {
@@ -34,6 +53,7 @@ fn subscription(_model: &model::Model) -> Subscription<Message> {
 enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
+  Loaded(Option<MeReturn>),
   None,
 }
 
@@ -61,7 +81,11 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             });
 
             Task::future(async {
-              client::get().await.insert_tokens(response).await;
+              client::get()
+                .await
+                .insert_tokens(response.refresh_token, response.access_token)
+                .await;
+              // entry.delete_credential()?;
               Message::None
             })
           }
@@ -75,6 +99,18 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
     }
     Message::None => iced::Task::none(),
+    Message::Loaded(me_return) => match me_return {
+      Some(response) => {
+        model.screen = Screen::Chat(Default::default());
+        model.user = Auth::LoggedIn(User {
+          id: response.user_id,
+          name: response.username.clone(),
+        });
+
+        Task::none()
+      }
+      None => Task::none(),
+    },
   }
 }
 

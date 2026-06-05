@@ -1,15 +1,49 @@
 use chat_rs::config::CONFIG;
 use chat_rs::shared::convert::IntoProto;
+use chat_rs::shared::convert::TryIntoDomain;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
 use chat_rs::shared::convert::stream::proto::stream_service_client::StreamServiceClient;
+use chat_rs::shared::convert::user::proto::user_service_client::UserServiceClient;
+use chat_rs::shared::domain::auth::RefreshCommand;
+use chat_rs::shared::domain::auth::RefreshReturn;
 use chat_rs::shared::domain::auth::Token;
-use chat_rs::shared::domain::auth::{RefreshCommand, VerifyReturn};
 use http_body_util::BodyExt;
 use http_body_util::Full;
+use keyring::Entry;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::{Mutex, OnceCell};
 use tonic::transport::Channel;
 use tower::Service;
+
+pub async fn store_refresh_token(refresh_token: String) -> keyring::Result<()> {
+  let service = CONFIG.auth.keyring_service_name.clone();
+  let user = CONFIG.auth.keyring_user.clone();
+  on_keyring_thread(move || Entry::new(&service, &user)?.set_password(&refresh_token)).await
+}
+
+pub async fn load_refresh_token() -> keyring::Result<String> {
+  let service = CONFIG.auth.keyring_service_name.clone();
+  let user = CONFIG.auth.keyring_user.clone();
+  on_keyring_thread(move || Entry::new(&service, &user)?.get_password()).await
+}
+
+pub async fn clear_refresh_token() -> keyring::Result<()> {
+  let service = CONFIG.auth.keyring_service_name.clone();
+  let user = CONFIG.auth.keyring_user.clone();
+  on_keyring_thread(move || Entry::new(&service, &user)?.delete_credential()).await
+}
+
+async fn on_keyring_thread<F, T>(f: F) -> T
+where
+  F: FnOnce() -> T + Send + 'static,
+  T: Send + 'static,
+{
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  std::thread::spawn(move || {
+    let _ = tx.send(f());
+  });
+  rx.await.expect("keyring thread panicked")
+}
 
 #[derive(Default)]
 pub struct TokenStore {
@@ -138,14 +172,59 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
 pub struct GrpcClient {
   pub auth: AuthServiceClient<Channel>,
   pub stream: StreamServiceClient<AuthService>,
+  pub user: UserServiceClient<AuthService>,
   tokens: Arc<Mutex<TokenStore>>,
 }
 
 impl GrpcClient {
-  pub async fn insert_tokens(&self, response: VerifyReturn) {
+  pub async fn has_tokens(&self) -> bool {
+    self.tokens.lock().await.refresh_token.is_some()
+  }
+
+  async fn load_from_credential_store(&self) -> Result<(), ()> {
+    let refresh_token = match load_refresh_token().await {
+      Ok(t) => t,
+      Err(_) => {
+        println!("No creds to load");
+        return Err(());
+      }
+    };
+
+    let mut auth = self.auth.clone();
+    let resp = match auth
+      .refresh(RefreshCommand { refresh_token }.into_proto())
+      .await
+    {
+      Ok(r) => r.into_inner(),
+      Err(_) => {
+        let _ = clear_refresh_token().await;
+        println!("Stored refresh token rejected; cleared");
+        return Err(());
+      }
+    };
+
+    if let Err(e) = store_refresh_token(resp.refresh_token.clone()).await {
+      eprintln!("Failed to persist rotated refresh token: {e}");
+    }
+    let mut store = self.tokens.lock().await;
+    store.access_token = Some(resp.access_token);
+    store.refresh_token = Some(resp.refresh_token);
+    println!("loaded creds!");
+
+    Ok(())
+  }
+
+  pub async fn insert_tokens(&self, refresh_token: String, access_token: String) {
     let mut tokens = self.tokens.lock().await;
-    tokens.access_token = Some(response.access_token);
-    tokens.refresh_token = Some(response.refresh_token);
+
+    let result = store_refresh_token(refresh_token.clone()).await;
+    match result {
+      Ok(_) => println!("Success storing refresh token"),
+      Err(e) => println!("Failed to store token: {:?}", e),
+    }
+
+    tokens.access_token = Some(access_token);
+    tokens.refresh_token = Some(refresh_token);
   }
 }
 
@@ -184,13 +263,21 @@ pub async fn get() -> GrpcClient {
       let tokens: Arc<Mutex<TokenStore>> = Default::default();
 
       let auth_channel_no_replay = AuthService::new(channel.clone(), tokens.clone(), false);
-      let stream = StreamServiceClient::new(auth_channel_no_replay);
+      let auth_channel = AuthService::new(channel.clone(), tokens.clone(), true);
 
-      GrpcClient {
+      let stream = StreamServiceClient::new(auth_channel_no_replay);
+      let user = UserServiceClient::new(auth_channel);
+
+      let client = GrpcClient {
         auth: AuthServiceClient::new(channel.clone()),
         stream,
         tokens,
-      }
+        user,
+      };
+
+      client.load_from_credential_store().await;
+
+      client
     })
     .await
     .clone()
