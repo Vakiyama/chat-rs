@@ -92,7 +92,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     email: EmailConfig {
       resend_api_key: env("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),
     },
-    environment: env("ENVIRONMENT").expect("ENVIRONMENT must be set."),
+    environment: env("ENV").expect("ENV must be set."),
   }
 });
 
