@@ -197,7 +197,8 @@ impl RefreshTokenStore for DbTokenStore {
 
   async fn has(&self, token: &Token) -> Result<UserId, RefreshTokenStoreError> {
     let token_uuid = get_uuid_from_verify_token(self.key.get(), token, self.time_tolerance);
-    let jti = get_jti_for_token(self.key.get(), token, self.time_tolerance)
+
+    let jti = get_jti_for_token(self.key.get(), token)
       .ok_or_else(|| RefreshTokenStoreError::InvalidToken)?;
 
     let db = database::get().await;
@@ -240,7 +241,7 @@ impl RefreshTokenStore for DbTokenStore {
       .map(Ok)
       .unwrap_or(Err(RefreshTokenStoreError::InvalidToken))?;
 
-    let jti = get_jti_for_token(self.key.get(), &token, self.time_tolerance).ok_or_else(|| {
+    let jti = get_jti_for_token(self.key.get(), &token).ok_or_else(|| {
       eprintln!("Invalid or missing JTI from token...");
       RefreshTokenStoreError::InvalidToken
     })?;
@@ -263,7 +264,7 @@ impl RefreshTokenStore for DbTokenStore {
 
   async fn remove(&self, token: &Token) -> Result<Option<()>, RefreshTokenStoreError> {
     let db = database::get().await;
-    let jti = get_jti_for_token(self.key.get(), token, self.time_tolerance)
+    let jti = get_jti_for_token(self.key.get(), token)
       .ok_or_else(|| RefreshTokenStoreError::InvalidToken)?;
 
     let token_in_db = entities::refresh_token::Entity::find()
@@ -385,13 +386,12 @@ fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
   get_uuid_from_access_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
 }
 
-fn get_jti_for_token(
-  key: &HS256Key,
-  token: &str,
-  time_tolerance: jwt_simple::prelude::Duration,
-) -> Option<Uuid> {
+fn get_jti_for_token(key: &HS256Key, token: &str) -> Option<Uuid> {
   let options = jwt_simple::prelude::VerificationOptions {
-    time_tolerance: Some(time_tolerance),
+    time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(
+      60 * 60 * 24 * 365 * 10, // 10y, comfortably > max refresh lifetime
+    )),
+
     ..Default::default()
   };
 
@@ -912,6 +912,7 @@ mod tests {
       tokio::time::sleep(Duration::from_secs(1)).await;
 
       let result = store.has(&token).await;
+      eprintln!("{result:?}");
       assert!(matches!(result, Err(RefreshTokenStoreError::TokenExpired)));
 
       let result = store.has(&token).await;
@@ -952,15 +953,12 @@ mod tests {
     ));
   }
 
-  async fn test_remove_garbage_token_returns_no_user_with_token(
+  async fn test_remove_garbage_token_returns_invalid_token(
     store: &impl RefreshTokenStore,
     _key: &HS256Key,
   ) {
     let result = store.remove(&"not-a-token".to_string()).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::NoUserWithSuchToken)
-    ));
+    assert!(matches!(result, Err(RefreshTokenStoreError::InvalidToken)));
   }
 
   async fn test_remove_all_for_user_cleans_up_everything(
@@ -1015,7 +1013,7 @@ mod tests {
     test_has_expired_token_removes_and_returns_expired(store, key).await;
     test_remove_cleans_up(store, key).await;
     test_remove_nonexistent_returns_none(store, key).await;
-    test_remove_garbage_token_returns_no_user_with_token(store, key).await;
+    test_remove_garbage_token_returns_invalid_token(store, key).await;
     test_remove_all_for_user_cleans_up_everything(store, key).await;
     test_remove_all_for_unknown_user(store, key).await;
   }
