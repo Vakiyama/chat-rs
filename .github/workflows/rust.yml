@@ -21,3 +21,4 @@ jobs:
         env:
           DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
