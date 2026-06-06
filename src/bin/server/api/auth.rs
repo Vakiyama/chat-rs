@@ -241,10 +241,8 @@ impl RefreshTokenStore for DbTokenStore {
       .map(Ok)
       .unwrap_or(Err(RefreshTokenStoreError::InvalidToken))?;
 
-    let jti = get_jti_for_token(self.key.get(), &token).ok_or_else(|| {
-      eprintln!("Invalid or missing JTI from token...");
-      RefreshTokenStoreError::InvalidToken
-    })?;
+    let jti = get_jti_for_token(self.key.get(), &token)
+      .ok_or_else(|| RefreshTokenStoreError::InvalidToken)?;
 
     let db = database::get().await;
 
@@ -629,10 +627,6 @@ impl AuthService for AuthServer<InMemoryCodeStore, DbTokenStore> {
       .map_err(|_| VerifyError::Internal)
       .map_err(|e| e.into_status())?;
 
-    println!(
-      "code_attempt: {code_attempt}, code: {code}, email: {email}, incoming_email: {incoming_email}"
-    );
-
     if code_attempt == code && email == incoming_email {
       if let VerifyType::Register { username, email } = info {
         let db = database::get().await;
@@ -912,7 +906,6 @@ mod tests {
       tokio::time::sleep(Duration::from_secs(1)).await;
 
       let result = store.has(&token).await;
-      eprintln!("{result:?}");
       assert!(matches!(result, Err(RefreshTokenStoreError::TokenExpired)));
 
       let result = store.has(&token).await;
