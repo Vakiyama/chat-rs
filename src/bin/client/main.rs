@@ -1,11 +1,15 @@
+use chat_rs::shared::convert::TryIntoDomain;
+use chat_rs::shared::convert::user::proto::MeResponse;
 use chat_rs::shared::domain::stream::User;
+use chat_rs::shared::domain::user::MeReturn;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
 
 mod stream;
 
-use crate::model::{Auth, Screen};
+use crate::model::{Auth, Screen, Stream};
 use crate::screens::{auth, chat};
+use crate::stream::Connection;
 
 mod client;
 mod model;
@@ -20,20 +24,42 @@ fn main() -> iced::Result {
     .run()
 }
 
-fn new() -> model::Model {
-  model::Model::default()
+fn new() -> (model::Model, Task<Message>) {
+  (
+    model::Model::default(),
+    Task::perform(
+      async {
+        let mut client = client::get().await;
+
+        if client.has_tokens().await {
+          client
+            .user
+            .me(())
+            .await
+            .unwrap()
+            .into_inner()
+            .try_into_domain()
+            .ok()
+        } else {
+          None
+        }
+      },
+      Message::Loaded,
+    ),
+  )
 }
 
 fn subscription(_model: &model::Model) -> Subscription<Message> {
-  Subscription::run(stream::connect)
-    .map(|event| event.into())
-    .map(Message::Chat)
+  Subscription::run(stream::connect).map(|event| event.into())
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
+  Loaded(Option<MeReturn>),
+  StreamConnected(Connection),
+  StreamDisconnected,
   None,
 }
 
@@ -43,7 +69,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
-        chat::update(chat_model, msg, user).map(Message::Chat)
+        chat::update(chat_model, msg, user, model.stream.clone()).map(Message::Chat)
       } else {
         iced::Task::none()
       }
@@ -61,7 +87,11 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             });
 
             Task::future(async {
-              client::get().await.insert_tokens(response).await;
+              client::get()
+                .await
+                .insert_tokens(response.refresh_token, response.access_token)
+                .await;
+              // entry.delete_credential()?;
               Message::None
             })
           }
@@ -75,6 +105,26 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
     }
     Message::None => iced::Task::none(),
+    Message::Loaded(me_return) => match me_return {
+      Some(response) => {
+        model.screen = Screen::Chat(Default::default());
+        model.user = Auth::LoggedIn(User {
+          id: response.user_id,
+          name: response.username.clone(),
+        });
+
+        Task::none()
+      }
+      None => Task::none(),
+    },
+    Message::StreamDisconnected => {
+      model.stream = Stream::Disconnected;
+      Task::none()
+    }
+    Message::StreamConnected(connection) => {
+      model.stream = Stream::Connected(connection);
+      Task::none()
+    }
   }
 }
 

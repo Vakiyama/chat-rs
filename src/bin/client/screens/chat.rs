@@ -13,7 +13,6 @@ use iced::{Pixels, Task};
 pub struct Model {
   posts: AsyncData<Vec<Server>, tonic::Status>,
   input: String,
-  stream: Stream,
 }
 
 impl Default for Model {
@@ -21,14 +20,13 @@ impl Default for Model {
     Self {
       posts: AsyncData::Done(Ok(vec![])),
       input: String::new(),
-      stream: Stream::Disconnected,
     }
   }
 }
 
 impl Model {
-  pub fn send(&mut self, user: &User) -> Result<(), Error> {
-    match &mut self.stream {
+  pub fn send(&mut self, user: &User, mut stream: Stream) -> Result<(), Error> {
+    match &mut stream {
       Stream::Connected(connection) => {
         let input = self.input.clone();
 
@@ -64,8 +62,6 @@ impl Model {
 pub enum Message {
   UserChangedChatInput(String),
   UserSubmittedChatInput,
-  Disconnected,
-  Connected(Connection),
   Stream(Server),
 }
 
@@ -117,7 +113,7 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
 }
 // --------------------------------- UPDATE ---------------------------------
 
-pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message> {
+pub fn update(model: &mut Model, message: Message, user: &User, stream: Stream) -> Task<Message> {
   println!("{message:#?}");
   match message {
     Message::UserChangedChatInput(new) => {
@@ -125,17 +121,9 @@ pub fn update(model: &mut Model, message: Message, user: &User) -> Task<Message>
       Task::none()
     }
     Message::UserSubmittedChatInput => {
-      if let Err(Error::NoConnection) = model.send(user) {
+      if let Err(Error::NoConnection) = model.send(user, stream) {
         println!("Not connected...")
       }
-      Task::none()
-    }
-    Message::Disconnected => {
-      model.stream = Stream::Disconnected;
-      Task::none()
-    }
-    Message::Connected(connection) => {
-      model.stream = Stream::Connected(connection);
       Task::none()
     }
     Message::Stream(server_message) => match server_message {

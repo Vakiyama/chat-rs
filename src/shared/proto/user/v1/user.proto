@@ -1,0 +1,13 @@
+syntax = "proto3";
+package user.v1;
+
+import "google/protobuf/empty.proto";
+
+service UserService {
+  rpc Me   (google.protobuf.Empty)   returns (MeResponse);
+}
+
+message MeResponse {
+  string identifier = 1; 
+  string username = 2;
+}

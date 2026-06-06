@@ -1,20 +1,18 @@
-use std::time::Duration;
-
 use chat_rs::config::CONFIG;
 use chat_rs::shared::convert::auth::proto::auth_service_server::AuthServiceServer;
 use chat_rs::shared::convert::stream::proto::stream_service_server::StreamServiceServer;
+use chat_rs::shared::convert::user::proto::user_service_server::UserServiceServer;
 use tokio_rate_limit::{RateLimiter, RateLimiterConfig};
 use tonic::transport::Server;
 use tower::ServiceBuilder;
-use tower::limit::RateLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::auth::{
-  AuthServer, ClientRateLimitInterceptor, InMemoryCodeStore, InMemoryTokenStore,
-  JWTAuthorizedInterceptor,
+  AuthServer, ClientRateLimitInterceptor, DbTokenStore, InMemoryCodeStore, JWTAuthorizedInterceptor,
 };
 
 use crate::api::stream::StreamServer;
+use crate::api::user::UserServer;
 
 mod api;
 mod entities;
@@ -22,7 +20,7 @@ mod library;
 
 #[tokio::main]
 async fn main() {
-  let auth_service: AuthServer<InMemoryCodeStore, InMemoryTokenStore> = AuthServer::default();
+  let auth_service: AuthServer<InMemoryCodeStore, DbTokenStore> = AuthServer::default();
 
   let jwt_interceptor = JWTAuthorizedInterceptor::default();
   let per_client_rate_limit_interceptor = ClientRateLimitInterceptor {
@@ -41,9 +39,15 @@ async fn main() {
 
   let private_stream_service = ServiceBuilder::new()
     .layer(tonic_middleware::RequestInterceptorLayer::new(
-      jwt_interceptor,
+      jwt_interceptor.clone(),
     ))
     .service(StreamServiceServer::new(StreamServer::default()));
+
+  let private_user_service = ServiceBuilder::new()
+    .layer(tonic_middleware::RequestInterceptorLayer::new(
+      jwt_interceptor,
+    ))
+    .service(UserServiceServer::new(UserServer));
 
   let grpc = Server::builder()
     .layer(
@@ -55,6 +59,7 @@ async fn main() {
       }),
     )
     .add_service(private_stream_service)
+    .add_service(private_user_service)
     .add_service(auth_service)
     .serve(CONFIG.server.grpc_address.parse().unwrap());
 

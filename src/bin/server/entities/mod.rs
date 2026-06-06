@@ -1,11 +1,12 @@
-mod channel;
+pub mod channel;
 pub mod post;
+pub mod refresh_token;
 pub mod server;
-mod text_channel;
+pub mod text_channel;
 pub mod user;
-mod user_server;
-mod user_user;
-mod voice_channel;
+pub mod user_server;
+pub mod user_user;
+pub mod voice_channel;
 
 /*
  * main entities are:

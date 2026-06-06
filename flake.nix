@@ -112,7 +112,7 @@
               }
               {
                 name = "PKG_CONFIG_PATH";
-                value = "${pkgs.openssl.dev}/lib/pkgconfig";
+                value = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" ([ pkgs.openssl ] ++ guiLibs);
               }
               {
                 name = "RUST_BACKTRACE";

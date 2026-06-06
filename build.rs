@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       &[
         "./src/shared/proto/auth/v1/auth.proto",
         "./src/shared/proto/stream/v1/stream.proto",
+        "./src/shared/proto/user/v1/user.proto",
       ],
       &["./src/shared/proto/"],
     )?;
