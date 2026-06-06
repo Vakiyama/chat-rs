@@ -5,6 +5,7 @@ use crate::screens::chat::Model as ChatModel;
 
 use crate::stream;
 
+#[derive(Clone)]
 pub enum Stream {
   Connected(stream::Connection),
   Disconnected,
@@ -18,6 +19,7 @@ pub enum Auth {
 pub struct Model {
   pub screen: Screen,
   pub user: Auth,
+  pub stream: Stream,
 }
 
 pub enum Screen {
@@ -30,6 +32,7 @@ impl Default for Model {
     Model {
       screen: Screen::Auth(AuthModel::new()),
       user: Auth::NotLoggedIn,
+      stream: Stream::Disconnected,
     }
   }
 }

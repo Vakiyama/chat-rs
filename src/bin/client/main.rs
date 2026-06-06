@@ -7,8 +7,9 @@ use iced::{Element, Subscription, Task};
 
 mod stream;
 
-use crate::model::{Auth, Screen};
+use crate::model::{Auth, Screen, Stream};
 use crate::screens::{auth, chat};
+use crate::stream::Connection;
 
 mod client;
 mod model;
@@ -28,15 +29,20 @@ fn new() -> (model::Model, Task<Message>) {
     model::Model::default(),
     Task::perform(
       async {
-        client::get()
-          .await
-          .user
-          .me(())
-          .await
-          .unwrap()
-          .into_inner()
-          .try_into_domain()
-          .ok()
+        let mut client = client::get().await;
+
+        if client.has_tokens().await {
+          client
+            .user
+            .me(())
+            .await
+            .unwrap()
+            .into_inner()
+            .try_into_domain()
+            .ok()
+        } else {
+          None
+        }
       },
       Message::Loaded,
     ),
@@ -44,16 +50,16 @@ fn new() -> (model::Model, Task<Message>) {
 }
 
 fn subscription(_model: &model::Model) -> Subscription<Message> {
-  Subscription::run(stream::connect)
-    .map(|event| event.into())
-    .map(Message::Chat)
+  Subscription::run(stream::connect).map(|event| event.into())
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
   Loaded(Option<MeReturn>),
+  StreamConnected(Connection),
+  StreamDisconnected,
   None,
 }
 
@@ -63,7 +69,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
-        chat::update(chat_model, msg, user).map(Message::Chat)
+        chat::update(chat_model, msg, user, model.stream.clone()).map(Message::Chat)
       } else {
         iced::Task::none()
       }
@@ -111,6 +117,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
       None => Task::none(),
     },
+    Message::StreamDisconnected => {
+      model.stream = Stream::Disconnected;
+      Task::none()
+    }
+    Message::StreamConnected(connection) => {
+      model.stream = Stream::Connected(connection);
+      Task::none()
+    }
   }
 }
 

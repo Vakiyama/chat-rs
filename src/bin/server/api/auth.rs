@@ -15,9 +15,9 @@ use chat_rs::shared::{
   },
 };
 use http::Request;
-use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, ModelTrait, QueryFilter};
 use std::{
-  collections::{HashMap, HashSet},
+  collections::HashMap,
   sync::{Arc, Mutex},
   time::Duration,
 };
@@ -129,12 +129,32 @@ pub trait CodeStore {
   async fn delete(&mut self, uuid: &Uuid);
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RefreshTokenStoreError {
+  #[error("invalid token")]
   InvalidToken,
-  TokenRotatedOut, // leads to a signout on all tokens due to potential malicious actor
+  #[error("token rotated out")]
+  TokenRotatedOut,
+  #[error("token expired")]
   TokenExpired,
+  #[error("no user with such token")]
   NoUserWithSuchToken,
+  #[error(transparent)]
+  Internal(#[from] sea_orm::DbErr),
+}
+
+impl From<RefreshTokenStoreError> for tonic::Status {
+  fn from(val: RefreshTokenStoreError) -> Self {
+    match val {
+      RefreshTokenStoreError::InvalidToken
+      | RefreshTokenStoreError::TokenRotatedOut
+      | RefreshTokenStoreError::TokenExpired => tonic::Status::unauthenticated("Invalid token."),
+      RefreshTokenStoreError::NoUserWithSuchToken => tonic::Status::not_found("User not found."),
+      RefreshTokenStoreError::Internal(_db_err) => {
+        tonic::Status::internal("Unknown error occurred.")
+      }
+    }
+  }
 }
 
 pub trait RefreshTokenStore {
@@ -152,46 +172,42 @@ pub trait RefreshTokenStore {
   async fn remove_all_for_user(&self, user_id: &UserId) -> Result<(), RefreshTokenStoreError>;
 }
 
-/// This struct has no guarantees about token validity across server restarts
-/// the intention is to re-implement the refresh token store trait for either a redis or db based solution.
 #[derive(Clone)]
-pub struct InMemoryTokenStore {
-  lookups: Arc<Mutex<TokenUserIdReverseLookup>>,
+pub struct DbTokenStore {
   key: JWTKey,
   time_tolerance: jwt_simple::prelude::Duration,
 }
 
-impl Default for InMemoryTokenStore {
+impl Default for DbTokenStore {
   fn default() -> Self {
     Self {
-      lookups: Default::default(),
       key: Default::default(),
       time_tolerance: jwt_simple::prelude::Duration::from_mins(1),
     }
   }
 }
 
-#[derive(Default, Clone)]
-struct TokenUserIdReverseLookup {
-  tokens: HashMap<Token, UserId>,
-  user_ids: HashMap<UserId, HashSet<Token>>,
-}
-
-impl RefreshTokenStore for InMemoryTokenStore {
+impl RefreshTokenStore for DbTokenStore {
   fn new(time_tolerance: jwt_simple::prelude::Duration) -> Self {
     Self {
       time_tolerance,
-      lookups: Default::default(),
       key: Default::default(),
     }
   }
 
   async fn has(&self, token: &Token) -> Result<UserId, RefreshTokenStoreError> {
     let token_uuid = get_uuid_from_verify_token(self.key.get(), token, self.time_tolerance);
+    let jti = get_jti_for_token(self.key.get(), token, self.time_tolerance)
+      .ok_or_else(|| RefreshTokenStoreError::InvalidToken)?;
+
+    let db = database::get().await;
 
     let has_token = {
-      let lookup = self.lookups.lock().unwrap();
-      lookup.tokens.contains_key(token)
+      entities::refresh_token::Entity::find()
+        .filter(entities::refresh_token::COLUMN.refresh_token_jti.eq(jti))
+        .one(db)
+        .await?
+        .is_some()
     };
 
     match has_token {
@@ -220,80 +236,59 @@ impl RefreshTokenStore for InMemoryTokenStore {
   }
 
   async fn insert(&self, token: Token) -> Result<UserId, RefreshTokenStoreError> {
-    let uuid = get_uuid_from_verify_token(self.key.get(), &token, self.time_tolerance)
+    let user_id = get_uuid_from_verify_token(self.key.get(), &token, self.time_tolerance)
       .map(Ok)
       .unwrap_or(Err(RefreshTokenStoreError::InvalidToken))?;
 
-    let mut lookup = self.lookups.lock().unwrap();
+    let jti = get_jti_for_token(self.key.get(), &token, self.time_tolerance).ok_or_else(|| {
+      eprintln!("Invalid or missing JTI from token...");
+      RefreshTokenStoreError::InvalidToken
+    })?;
 
-    lookup.tokens.insert(token.clone(), uuid);
+    let db = database::get().await;
 
-    match lookup.user_ids.get_mut(&uuid) {
-      Some(set) => {
-        set.insert(token);
+    entities::refresh_token::Entity::insert(
+      entities::refresh_token::Model {
+        id: uuid::Uuid::new_v4(),
+        refresh_token_jti: jti,
+        user_id,
       }
-      None => {
-        let mut set = HashSet::new();
-        set.insert(token);
-        let _ = lookup.user_ids.insert(uuid, set);
-      }
-    }
+      .into_active_model(),
+    )
+    .exec(db)
+    .await?;
 
-    Ok(uuid)
+    Ok(user_id)
   }
 
   async fn remove(&self, token: &Token) -> Result<Option<()>, RefreshTokenStoreError> {
-    let mut lookup = self.lookups.lock().unwrap();
+    let db = database::get().await;
+    let jti = get_jti_for_token(self.key.get(), token, self.time_tolerance)
+      .ok_or_else(|| RefreshTokenStoreError::InvalidToken)?;
 
-    let uuid = get_uuid_from_verify_token(self.key.get(), token, self.time_tolerance)
-      .map(Ok)
-      .unwrap_or_else(|| {
-        // token is invalid, but we may be able to remove it as it may just be expired
+    let token_in_db = entities::refresh_token::Entity::find()
+      .filter(
+        entities::refresh_token::Entity::COLUMN
+          .refresh_token_jti
+          .eq(jti),
+      )
+      .one(db)
+      .await?;
 
-        if let Some(identifier) = lookup.tokens.get(token) {
-          Ok(*identifier)
-        } else {
-          Err(RefreshTokenStoreError::InvalidToken)
-        }
-      })?;
-
-    let tokens = lookup
-      .user_ids
-      .get_mut(&uuid)
-      .map(Ok)
-      .unwrap_or(Err(RefreshTokenStoreError::NoUserWithSuchToken))?;
-
-    if tokens.len() == 1 {
-      let _ = lookup.user_ids.remove(&uuid);
-      let _ = lookup.tokens.remove(token);
-
-      Ok(Some(()))
+    if let Some(token_in_db) = token_in_db {
+      token_in_db.delete(db).await.map(|_| Ok(Some(())))?
     } else {
-      match tokens.remove(token) {
-        true => {
-          lookup.tokens.remove(token);
-          Ok(Some(()))
-        }
-        false => Ok(None),
-      }
+      Err(RefreshTokenStoreError::NoUserWithSuchToken)
     }
   }
 
   async fn remove_all_for_user(&self, user_id: &UserId) -> Result<(), RefreshTokenStoreError> {
-    let tokens = {
-      let mut lookup = self.lookups.lock().unwrap();
+    let db = database::get().await;
 
-      lookup
-        .user_ids
-        .get_mut(user_id)
-        .map(|tokens| tokens.clone())
-    }
-    .map(Ok)
-    .unwrap_or(Err(RefreshTokenStoreError::NoUserWithSuchToken))?;
-
-    for token in &tokens {
-      self.remove(token).await?;
-    }
+    entities::refresh_token::Entity::delete_many()
+      .filter(entities::refresh_token::COLUMN.user_id.eq(*user_id))
+      .exec(db)
+      .await?;
 
     Ok(())
   }
@@ -307,6 +302,7 @@ impl From<RefreshTokenStoreError> for RefreshError {
         RefreshError::Expired
       }
       RefreshTokenStoreError::NoUserWithSuchToken => RefreshError::UnknownIdentifier,
+      RefreshTokenStoreError::Internal(_) => RefreshError::Internal,
     }
   }
 }
@@ -389,6 +385,29 @@ fn check_auth<B>(req: &Request<B>, key: Arc<JWTKey>) -> Option<Uuid> {
   get_uuid_from_access_token(key.get(), token, DEFAULT_TIME_TOLERANCE_SECS.into())
 }
 
+fn get_jti_for_token(
+  key: &HS256Key,
+  token: &str,
+  time_tolerance: jwt_simple::prelude::Duration,
+) -> Option<Uuid> {
+  let options = jwt_simple::prelude::VerificationOptions {
+    time_tolerance: Some(time_tolerance),
+    ..Default::default()
+  };
+
+  let claims = key
+    .verify_token::<NoCustomClaims>(token, Some(options))
+    .ok()?;
+
+  let jwt_id = claims.jwt_id?;
+  let issuer = claims.issuer?;
+
+  if issuer == CONFIG.environment.to_string() {
+    return Uuid::parse_str(&jwt_id).ok();
+  };
+
+  None
+}
 fn get_uuid_from_access_token(
   key: &HS256Key,
   token: &str,
@@ -474,7 +493,7 @@ pub struct AuthServer<
 }
 
 #[tonic::async_trait]
-impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
+impl AuthService for AuthServer<InMemoryCodeStore, DbTokenStore> {
   async fn register(
     &self,
     request: tonic::Request<RegisterRequest>,
@@ -610,6 +629,10 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
       .map_err(|_| VerifyError::Internal)
       .map_err(|e| e.into_status())?;
 
+    println!(
+      "code_attempt: {code_attempt}, code: {code}, email: {email}, incoming_email: {incoming_email}"
+    );
+
     if code_attempt == code && email == incoming_email {
       if let VerifyType::Register { username, email } = info {
         let db = database::get().await;
@@ -636,8 +659,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, InMemoryTokenStore> {
         .state
         .refresh_store
         .insert(refresh_token.clone())
-        .await
-        .map_err(|_| VerifyError::InvalidCode.into_status())?;
+        .await?;
 
       self.state.code_store.lock().await.delete(&identifier).await;
 
@@ -747,9 +769,10 @@ async fn generate_tokens(identifier: UserId, key: &HS256Key) -> Result<TokenPair
 #[cfg(test)]
 mod tests {
   use bytes::Bytes;
+  use futures_util::FutureExt;
 
   use super::*;
-  use std::time::Duration;
+  use std::{panic::AssertUnwindSafe, time::Duration};
 
   fn test_key() -> HS256Key {
     let key_bytes: Bytes = hex::decode(&CONFIG.auth.jwt_key_hex)
@@ -779,15 +802,68 @@ mod tests {
     key.authenticate(claims).unwrap()
   }
 
-  async fn test_insert_and_has(store: &impl RefreshTokenStore, key: &HS256Key) {
+  /// Inserts a user row so the refresh-token FK is satisfied.
+  async fn insert_test_user(user_id: UserId) {
+    let db = database::get().await;
+
+    entities::user::Entity::insert(
+      entities::user::Model {
+        id: user_id,
+        username: format!("test_user_{}", user_id.simple()),
+        email: format!("{}@test.local", user_id.simple()),
+        status: entities::user::Status::Online,
+      }
+      .into_active_model(),
+    )
+    .exec(db)
+    .await
+    .expect("failed to insert test user");
+  }
+
+  /// Removes the user and any refresh tokens still pointing at it.
+  async fn delete_test_user(user_id: UserId) {
+    let db = database::get().await;
+
+    // Delete tokens first in case there's no ON DELETE CASCADE on the FK.
+    let _ = entities::refresh_token::Entity::delete_many()
+      .filter(entities::refresh_token::COLUMN.user_id.eq(user_id))
+      .exec(db)
+      .await;
+
+    let _ = entities::user::Entity::delete_by_id(user_id).exec(db).await;
+  }
+
+  /// Creates a fresh user, runs the body with its id, then cleans up.
+  async fn with_test_user<F, Fut>(f: F)
+  where
+    F: FnOnce(UserId) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+  {
     let user_id = Uuid::new_v4();
-    let token = make_valid_token(key, user_id);
+    insert_test_user(user_id).await;
 
-    let inserted_id = store.insert(token.clone()).await.unwrap();
-    assert_eq!(inserted_id, user_id);
+    // AssertUnwindSafe because the future may hold non-UnwindSafe state;
+    // safe here since we re-raise the panic and don't observe broken state.
+    let result = AssertUnwindSafe(f(user_id)).catch_unwind().await;
 
-    let has_id = store.has(&token).await.unwrap();
-    assert_eq!(has_id, user_id);
+    delete_test_user(user_id).await; // always runs
+
+    if let Err(panic) = result {
+      std::panic::resume_unwind(panic);
+    }
+  }
+
+  async fn test_insert_and_has(store: &impl RefreshTokenStore, key: &HS256Key) {
+    with_test_user(|user_id| async move {
+      let token = make_valid_token(key, user_id);
+
+      let inserted_id = store.insert(token.clone()).await.unwrap();
+      assert_eq!(inserted_id, user_id);
+
+      let has_id = store.has(&token).await.unwrap();
+      assert_eq!(has_id, user_id);
+    })
+    .await;
   }
 
   async fn test_has_garbage_token_returns_invalid(store: &impl RefreshTokenStore, _key: &HS256Key) {
@@ -799,74 +875,76 @@ mod tests {
     store: &impl RefreshTokenStore,
     key: &HS256Key,
   ) {
-    let user_id = Uuid::new_v4();
-    // valid token that was never inserted — simulates a rotated-out token
-    let token1 = make_valid_token(key, user_id);
-    let token2 = make_valid_token(key, user_id);
+    with_test_user(|user_id| async move {
+      let token1 = make_valid_token(key, user_id);
+      let token2 = make_valid_token(key, user_id);
 
-    store.insert(token1.clone()).await.unwrap();
+      store.insert(token1.clone()).await.unwrap();
 
-    store
-      .rotate(&token1, token2)
-      .await
-      .expect("Rotation succeeds");
+      store
+        .rotate(&token1, token2)
+        .await
+        .expect("Rotation succeeds");
 
-    let result = store.has(&token1).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::TokenRotatedOut)
-    ));
+      let result = store.has(&token1).await;
+      assert!(matches!(
+        result,
+        Err(RefreshTokenStoreError::TokenRotatedOut)
+      ));
+    })
+    .await;
   }
 
   async fn test_has_expired_token_removes_and_returns_expired(
     store: &impl RefreshTokenStore,
     key: &HS256Key,
   ) {
-    let user_id = Uuid::new_v4();
-    let token = make_expired_token(key, user_id);
+    with_test_user(|user_id| async move {
+      let token = make_expired_token(key, user_id);
 
-    store.insert(token.clone()).await.unwrap();
+      store.insert(token.clone()).await.unwrap();
 
-    store
-      .has(&token)
-      .await
-      .expect("Token should be valid at this point");
+      store
+        .has(&token)
+        .await
+        .expect("Token should be valid at this point");
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+      tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let result = store.has(&token).await;
-    assert!(matches!(result, Err(RefreshTokenStoreError::TokenExpired)));
+      let result = store.has(&token).await;
+      assert!(matches!(result, Err(RefreshTokenStoreError::TokenExpired)));
 
-    // should also be removed from the store after expiry is detected
-    let result = store.has(&token).await;
-    assert!(matches!(result, Err(RefreshTokenStoreError::InvalidToken)));
+      let result = store.has(&token).await;
+      assert!(matches!(result, Err(RefreshTokenStoreError::InvalidToken)));
+    })
+    .await;
   }
 
   async fn test_remove_cleans_up(store: &impl RefreshTokenStore, key: &HS256Key) {
-    let user_id = Uuid::new_v4();
-    let token = make_valid_token(key, user_id);
+    with_test_user(|user_id| async move {
+      let token = make_valid_token(key, user_id);
 
-    store.insert(token.clone()).await.unwrap();
-    let result = store.remove(&token).await.unwrap();
-    assert!(result.is_some());
+      store.insert(token.clone()).await.unwrap();
+      let result = store.remove(&token).await.unwrap();
+      assert!(result.is_some());
 
-    let token2 = make_valid_token(key, user_id);
-    store.insert(token2).await.unwrap();
+      let token2 = make_valid_token(key, user_id);
+      store.insert(token2).await.unwrap();
 
-    // token should now be gone — valid JWT not in store means rotation detected
-    let result = store.has(&token).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::TokenRotatedOut)
-    ));
+      let result = store.has(&token).await;
+      assert!(matches!(
+        result,
+        Err(RefreshTokenStoreError::TokenRotatedOut)
+      ));
+    })
+    .await;
   }
 
   async fn test_remove_nonexistent_returns_none(store: &impl RefreshTokenStore, key: &HS256Key) {
+    // valid JWT, never inserted, no user — remove filters by token string only.
     let user_id = Uuid::new_v4();
     let token = make_valid_token(key, user_id);
 
-    // never inserted, valid JWT — hits rotation path in has, but remove
-    // should return NoUserWithSuchToken since there's no user entry
     let result = store.remove(&token).await;
     assert!(matches!(
       result,
@@ -874,59 +952,60 @@ mod tests {
     ));
   }
 
-  async fn test_remove_garbage_token_returns_invalid(
+  async fn test_remove_garbage_token_returns_no_user_with_token(
     store: &impl RefreshTokenStore,
     _key: &HS256Key,
   ) {
     let result = store.remove(&"not-a-token".to_string()).await;
-    assert!(matches!(result, Err(RefreshTokenStoreError::InvalidToken)));
+    assert!(matches!(
+      result,
+      Err(RefreshTokenStoreError::NoUserWithSuchToken)
+    ));
   }
 
   async fn test_remove_all_for_user_cleans_up_everything(
     store: &impl RefreshTokenStore,
     key: &HS256Key,
   ) {
-    let user_id = Uuid::new_v4();
-    let token_a = make_valid_token(key, user_id);
-    let token_b = make_valid_token(key, user_id);
-    let token_c = make_valid_token(key, user_id);
+    with_test_user(|user_id| async move {
+      let token_a = make_valid_token(key, user_id);
+      let token_b = make_valid_token(key, user_id);
+      let token_c = make_valid_token(key, user_id);
 
-    store.insert(token_a.clone()).await.unwrap();
-    store.insert(token_b.clone()).await.unwrap();
+      store.insert(token_a.clone()).await.unwrap();
+      store.insert(token_b.clone()).await.unwrap();
 
-    store.remove_all_for_user(&user_id).await.unwrap();
+      store.remove_all_for_user(&user_id).await.unwrap();
 
-    store.insert(token_c.clone()).await.unwrap();
+      store.insert(token_c.clone()).await.unwrap();
 
-    // both tokens should now look like rotated-out tokens
-    let result = store.has(&token_a).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::TokenRotatedOut)
-    ));
+      let result = store.has(&token_a).await;
+      assert!(matches!(
+        result,
+        Err(RefreshTokenStoreError::TokenRotatedOut)
+      ));
 
-    // should now not find this token for this user, as we've detected a rotated-out token being
-    // used
-    let result = store.has(&token_b).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::NoUserWithSuchToken)
-    ));
+      let result = store.has(&token_b).await;
 
-    let result = store.has(&token_c).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::NoUserWithSuchToken)
-    ));
+      assert!(matches!(
+        result,
+        Err(RefreshTokenStoreError::TokenRotatedOut)
+      ));
+
+      let result = store.has(&token_c).await;
+
+      assert!(matches!(
+        result,
+        Err(RefreshTokenStoreError::TokenRotatedOut)
+      ));
+    })
+    .await;
   }
 
   async fn test_remove_all_for_unknown_user(store: &impl RefreshTokenStore, _key: &HS256Key) {
     let unknown = Uuid::new_v4();
     let result = store.remove_all_for_user(&unknown).await;
-    assert!(matches!(
-      result,
-      Err(RefreshTokenStoreError::NoUserWithSuchToken)
-    ));
+    assert!(matches!(result, Ok(())));
   }
 
   async fn run_all(store: &impl RefreshTokenStore, key: &HS256Key) {
@@ -936,7 +1015,7 @@ mod tests {
     test_has_expired_token_removes_and_returns_expired(store, key).await;
     test_remove_cleans_up(store, key).await;
     test_remove_nonexistent_returns_none(store, key).await;
-    test_remove_garbage_token_returns_invalid(store, key).await;
+    test_remove_garbage_token_returns_no_user_with_token(store, key).await;
     test_remove_all_for_user_cleans_up_everything(store, key).await;
     test_remove_all_for_unknown_user(store, key).await;
   }
@@ -944,7 +1023,7 @@ mod tests {
   #[tokio::test]
   async fn in_memory_token_store() {
     let key = test_key();
-    let store = InMemoryTokenStore::new(jwt_simple::prelude::Duration::from_secs(0));
+    let store = DbTokenStore::new(jwt_simple::prelude::Duration::from_secs(0));
     run_all(&store, &key).await;
   }
 }

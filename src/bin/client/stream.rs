@@ -28,12 +28,14 @@ pub enum Event {
   MessageReceived(Server),
 }
 
-impl From<Event> for chat::Message {
+impl From<Event> for crate::Message {
   fn from(val: Event) -> Self {
     match val {
-      Event::Connected(connection) => chat::Message::Connected(connection),
-      Event::Disconnected => chat::Message::Disconnected,
-      Event::MessageReceived(server_message) => chat::Message::Stream(server_message),
+      Event::Connected(connection) => crate::Message::StreamConnected(connection),
+      Event::Disconnected => crate::Message::StreamDisconnected,
+      Event::MessageReceived(server_message) => {
+        crate::Message::Chat(chat::Message::Stream(server_message))
+      }
     }
   }
 }
@@ -45,6 +47,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
       let (tx, rx) = mpsc::channel::<ClientMessage>(100);
       let mut receiver = match client::get().await.stream.connect_stream(rx).await {
         Ok(response) => {
+          println!("Firing connect event.");
           output.send(Event::Connected(Connection(tx))).await;
 
           response.into_inner().fuse()

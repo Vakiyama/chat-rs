@@ -1,11 +1,9 @@
 use chat_rs::config::CONFIG;
 use chat_rs::shared::convert::IntoProto;
-use chat_rs::shared::convert::TryIntoDomain;
 use chat_rs::shared::convert::auth::proto::auth_service_client::AuthServiceClient;
 use chat_rs::shared::convert::stream::proto::stream_service_client::StreamServiceClient;
 use chat_rs::shared::convert::user::proto::user_service_client::UserServiceClient;
 use chat_rs::shared::domain::auth::RefreshCommand;
-use chat_rs::shared::domain::auth::RefreshReturn;
 use chat_rs::shared::domain::auth::Token;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -134,20 +132,37 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
           .await
           .auth
           .refresh(RefreshCommand { refresh_token }.into_proto())
-          .await?
-          .into_inner();
-
-        {
-          let mut store = tokens.lock().await;
-          store.access_token = Some(token_res.access_token);
-          store.refresh_token = Some(token_res.refresh_token);
-        }
-
-        // Retry with fresh token
-        inner
-          .call(make_req(&tokens).await)
           .await
-          .map_err(Into::into)
+          .map(|req| req.into_inner());
+
+        match token_res {
+          Ok(token_res) => {
+            {
+              let mut store = tokens.lock().await;
+              store.access_token = Some(token_res.access_token);
+              store.refresh_token = Some(token_res.refresh_token);
+            }
+
+            inner
+              .call(make_req(&tokens).await)
+              .await
+              .map_err(Into::into)
+          }
+          Err(e) => {
+            {
+              let mut store = tokens.lock().await;
+              store.access_token = None;
+              store.refresh_token = None;
+
+              let _ = clear_refresh_token()
+                .await
+                .map_err(|e| eprintln!("Failed to clear tokens from credential store: {e}"));
+            }
+
+            Err(e)?
+          }
+        }
+        // Retry with fresh token
       } else if let Some(token) = &tokens.lock().await.access_token {
         req.headers_mut().insert(
           http::header::AUTHORIZATION,
@@ -177,10 +192,6 @@ pub struct GrpcClient {
 }
 
 impl GrpcClient {
-  pub async fn has_tokens(&self) -> bool {
-    self.tokens.lock().await.refresh_token.is_some()
-  }
-
   async fn load_from_credential_store(&self) -> Result<(), ()> {
     let refresh_token = match load_refresh_token().await {
       Ok(t) => t,
@@ -209,7 +220,7 @@ impl GrpcClient {
     let mut store = self.tokens.lock().await;
     store.access_token = Some(resp.access_token);
     store.refresh_token = Some(resp.refresh_token);
-    println!("loaded creds!");
+    println!("Loaded refresh token from system credential store.");
 
     Ok(())
   }
@@ -225,6 +236,12 @@ impl GrpcClient {
 
     tokens.access_token = Some(access_token);
     tokens.refresh_token = Some(refresh_token);
+  }
+
+  pub async fn has_tokens(&self) -> bool {
+    let tokens = self.tokens.lock().await;
+
+    tokens.access_token.is_some() && tokens.refresh_token.is_some()
   }
 }
 
@@ -275,7 +292,7 @@ pub async fn get() -> GrpcClient {
         user,
       };
 
-      client.load_from_credential_store().await;
+      let _ = client.load_from_credential_store().await;
 
       client
     })

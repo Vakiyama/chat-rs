@@ -1103,6 +1103,7 @@ dependencies = [
  "resend-rs",
  "sea-orm",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rate-limit",
  "tokio-stream",

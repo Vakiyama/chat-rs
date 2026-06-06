@@ -8,8 +8,7 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use crate::api::auth::{
-  AuthServer, ClientRateLimitInterceptor, InMemoryCodeStore, InMemoryTokenStore,
-  JWTAuthorizedInterceptor,
+  AuthServer, ClientRateLimitInterceptor, DbTokenStore, InMemoryCodeStore, JWTAuthorizedInterceptor,
 };
 
 use crate::api::stream::StreamServer;
@@ -21,7 +20,7 @@ mod library;
 
 #[tokio::main]
 async fn main() {
-  let auth_service: AuthServer<InMemoryCodeStore, InMemoryTokenStore> = AuthServer::default();
+  let auth_service: AuthServer<InMemoryCodeStore, DbTokenStore> = AuthServer::default();
 
   let jwt_interceptor = JWTAuthorizedInterceptor::default();
   let per_client_rate_limit_interceptor = ClientRateLimitInterceptor {
