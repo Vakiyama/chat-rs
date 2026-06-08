@@ -2,8 +2,29 @@ syntax = "proto3";
 package stream.v1;
 
 service StreamService {
-  rpc ConnectStream (stream ClientMessage) returns (stream ServerMessage);
+  rpc ConnectTextStream (stream ClientTextMessage) returns (stream ServerTextMessage);
+  rpc ConnectVoiceStream (stream ClientVoiceMessage) returns (stream ServerVoiceMessage);
 }
+
+// Voice Streams:
+
+message Stub {
+  string stub = 1;
+}
+
+message ServerVoiceMessage {
+  oneof payload {
+    Stub stub = 1;
+  }
+}
+
+message ClientVoiceMessage {
+  oneof payload {
+    Stub stub = 1;
+  }
+}
+
+// Text streams:
 
 message DisplayUser {
   string id = 1;
@@ -23,7 +44,7 @@ message LeftRoom {
   DisplayUser from = 1;
 }
 
-message ServerMessage {
+message ServerTextMessage {
   oneof payload {
     JoinedRoom  joined_room = 1;
     LeftRoom    left_room   = 2;
@@ -31,7 +52,7 @@ message ServerMessage {
   }
 }
 
-message ClientMessage {
+message ClientTextMessage {
   oneof payload {
     ChatMessage chat = 1;
   }

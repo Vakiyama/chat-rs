@@ -6,12 +6,12 @@ pub struct User {
   pub name: String,
 }
 
-pub enum Client {
+pub enum ClientText {
   ChatMessage { from: User, text: String },
 }
 
 #[derive(Clone, Debug)]
-pub enum Server {
+pub enum ServerText {
   JoinedRoom { from: User },
   LeftRoom { from: User },
   ChatMessage { from: User, text: String },

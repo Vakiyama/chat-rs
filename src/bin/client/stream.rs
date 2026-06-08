@@ -1,7 +1,7 @@
 use crate::screens::chat;
-use chat_rs::shared::convert::stream::proto::ClientMessage;
+use chat_rs::shared::convert::stream::proto::ClientTextMessage;
 use chat_rs::shared::convert::{IntoProto, TryIntoDomain};
-use chat_rs::shared::domain::stream::{Client, Server};
+use chat_rs::shared::domain::stream::{ClientText, ServerText};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::futures;
@@ -10,10 +10,10 @@ use iced::task::{Never, Sipper, sipper};
 use crate::client;
 
 #[derive(Debug, Clone)]
-pub struct Connection(mpsc::Sender<ClientMessage>);
+pub struct Connection(mpsc::Sender<ClientTextMessage>);
 
 impl Connection {
-  pub fn send(&mut self, message: Client) {
+  pub fn send(&mut self, message: ClientText) {
     self
       .0
       .try_send(message.into_proto())
@@ -25,7 +25,7 @@ impl Connection {
 pub enum Event {
   Connected(Connection),
   Disconnected,
-  MessageReceived(Server),
+  MessageReceived(ServerText),
 }
 
 impl From<Event> for crate::Message {
@@ -44,8 +44,8 @@ pub fn connect() -> impl Sipper<Never, Event> {
   sipper(async |mut output| {
     // reconnect loop; awaits 1 second on disconnect/error and retries
     loop {
-      let (tx, rx) = mpsc::channel::<ClientMessage>(100);
-      let mut receiver = match client::get().await.stream.connect_stream(rx).await {
+      let (tx, rx) = mpsc::channel::<ClientTextMessage>(100);
+      let mut receiver = match client::get().await.stream.connect_text_stream(rx).await {
         Ok(response) => {
           println!("Firing connect event.");
           output.send(Event::Connected(Connection(tx))).await;

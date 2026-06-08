@@ -3,7 +3,7 @@ use crate::{SPACE_GRID, model::Stream};
 
 use crate::stream::Connection;
 use crate::types::async_data::AsyncData;
-use chat_rs::shared::domain::stream::{Client, Server, User};
+use chat_rs::shared::domain::stream::{ClientText, ServerText, User};
 use iced::widget::{Column, column, space, text, text_input};
 use iced::widget::{container, row};
 use iced::{Pixels, Task};
@@ -11,7 +11,7 @@ use iced::{Pixels, Task};
 // --------------------------------- MODEL ---------------------------------
 
 pub struct Model {
-  posts: AsyncData<Vec<Server>, tonic::Status>,
+  posts: AsyncData<Vec<ServerText>, tonic::Status>,
   input: String,
 }
 
@@ -31,7 +31,7 @@ impl Model {
         let input = self.input.clone();
 
         self.posts.as_mut().map(|posts| {
-          posts.push(Server::ChatMessage {
+          posts.push(ServerText::ChatMessage {
             from: user.clone(),
             text: input.clone(),
           })
@@ -39,7 +39,7 @@ impl Model {
 
         self.input = "".to_string();
 
-        connection.send(Client::ChatMessage {
+        connection.send(ClientText::ChatMessage {
           from: user.clone(),
           text: input,
         });
@@ -54,7 +54,7 @@ impl Model {
     self
       .posts
       .as_mut()
-      .map(|posts| posts.push(Server::ChatMessage { from, text }));
+      .map(|posts| posts.push(ServerText::ChatMessage { from, text }));
   }
 }
 
@@ -62,7 +62,7 @@ impl Model {
 pub enum Message {
   UserChangedChatInput(String),
   UserSubmittedChatInput,
-  Stream(Server),
+  Stream(ServerText),
 }
 
 pub enum Error {
@@ -79,7 +79,7 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
     .iter()
     .map(|post| {
       let element: Element<Message> = {
-        if let Server::ChatMessage {
+        if let ServerText::ChatMessage {
           from,
           text: incoming_text,
         } = post
@@ -127,16 +127,16 @@ pub fn update(model: &mut Model, message: Message, user: &User, stream: Stream) 
       Task::none()
     }
     Message::Stream(server_message) => match server_message {
-      Server::JoinedRoom { from } => {
+      ServerText::JoinedRoom { from } => {
         println!("User joined room: {from:?}");
         Task::none()
       }
-      Server::LeftRoom { from } => {
+      ServerText::LeftRoom { from } => {
         println!("User left room: {from:?}");
 
         Task::none()
       }
-      Server::ChatMessage { from, text } => {
+      ServerText::ChatMessage { from, text } => {
         model.receive(text, from);
 
         Task::none()
