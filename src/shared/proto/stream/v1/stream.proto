@@ -8,19 +8,19 @@ service StreamService {
 
 // Voice Streams:
 
-message Stub {
-  string stub = 1;
+message Offer {
+  string RTCSessionDescription = 1;
 }
 
 message ServerVoiceMessage {
   oneof payload {
-    Stub stub = 1;
+    Offer offer = 1;
   }
 }
 
 message ClientVoiceMessage {
   oneof payload {
-    Stub stub = 1;
+    Offer offer = 1;
   }
 }
 

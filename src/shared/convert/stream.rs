@@ -1,3 +1,6 @@
+use jwt_simple::reexports::serde_json;
+use serde::Serialize;
+
 pub mod proto {
   include!(concat!(env!("OUT_DIR"), "/stream.v1.rs"));
 }
@@ -11,6 +14,18 @@ use tonic::Status;
 use uuid::Uuid;
 
 // into proto
+
+impl IntoProto<ServerVoiceMessage> for ServerVoice {
+  fn into_proto(self) -> ServerVoiceMessage {
+    match self {
+      ServerVoice::Offer(rtcsession_description) => ServerVoiceMessage {
+        payload: Some(server_voice_message::Payload::Offer(Offer {
+          rtc_session_description: serde_json::to_string(&rtcsession_description).unwrap(),
+        })),
+      },
+    }
+  }
+}
 
 impl IntoProto<DisplayUser> for User {
   fn into_proto(self) -> DisplayUser {
