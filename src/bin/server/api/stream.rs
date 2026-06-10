@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, OnceLock},
 };
 
 use chat_rs::shared::{
@@ -12,12 +12,14 @@ use chat_rs::shared::{
       stream_service_server::StreamService,
     },
   },
-  domain::stream::{ClientText, ServerText},
+  domain::stream::{ClientText, ClientVoice, ServerText, ServerVoice},
 };
 use tokio::sync::mpsc::{self, error::SendError};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
 use uuid::Uuid;
+
+use crate::library::webrtc::{Room, handle_answer, handle_offer};
 
 #[derive(Default)]
 struct Manager {
@@ -74,6 +76,10 @@ impl Manager {
   }
 }
 
+// temporary room singleton
+
+static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
+
 #[tonic::async_trait]
 impl StreamService for StreamServer {
   type ConnectTextStreamStream = ResponseStream<ServerTextMessage>;
@@ -83,7 +89,62 @@ impl StreamService for StreamServer {
     &self,
     request: tonic::Request<tonic::Streaming<ClientVoiceMessage>>,
   ) -> Result<tonic::Response<Self::ConnectVoiceStreamStream>, tonic::Status> {
-    todo!()
+    let request_user_id = request.extensions().get::<Uuid>().copied();
+
+    let Some(request_user_id) = request_user_id else {
+      return Err(tonic::Status::unauthenticated("Unauthenitcated"));
+    };
+
+    // eventually setup rooms, for now, one global room
+    let room = GLOBAL_ROOM.get_or_init(|| {
+      Room {
+        peers: HashMap::new().into(),
+      }
+      .into()
+    });
+
+    let mut inner_stream = request.into_inner();
+
+    let (tx, rx) = mpsc::channel::<Result<ServerVoiceMessage, tonic::Status>>(128);
+
+    tokio::spawn(async move {
+      while let Some(msg) = inner_stream.next().await {
+        let msg: Result<ClientVoice, _> = msg.and_then(|msg| msg.try_into_domain());
+
+        match msg {
+          Ok(ClientVoice::Offer(desc)) => {
+            if !room.peers.read().await.contains_key(&request_user_id) {
+              match handle_offer(desc, room.clone(), request_user_id, tx.clone()).await {
+                Ok(answer) => {
+                  let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
+                }
+                Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
+              }
+            } else {
+              eprintln!("User offer rejected; already in room.");
+            }
+          }
+          Ok(ClientVoice::Answer(answer)) => {
+            let _ = handle_answer(room.clone(), request_user_id, answer).await;
+          }
+          Err(err) => {
+            eprint!("Error in incoming client message: {err:?}")
+            // break;
+          }
+        }
+      }
+
+      // remove peer from room, close pc
+      if let Some(peer) = room.peers.write().await.remove(&request_user_id) {
+        let _ = peer.pc.close().await;
+      }
+    });
+
+    let output_stream = ReceiverStream::new(rx);
+
+    Ok(Response::new(
+      Box::pin(output_stream) as Self::ConnectVoiceStreamStream
+    ))
   }
 
   async fn connect_text_stream(
@@ -91,6 +152,7 @@ impl StreamService for StreamServer {
     request: tonic::Request<tonic::Streaming<ClientTextMessage>>,
   ) -> Result<tonic::Response<Self::ConnectTextStreamStream>, tonic::Status> {
     let request_user_id = request.extensions().get::<Uuid>().copied();
+
     let mut inner_stream = request.into_inner();
 
     let (tx, rx) = mpsc::channel(128);

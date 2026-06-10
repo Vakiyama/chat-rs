@@ -20,8 +20,10 @@ pub enum ServerText {
 
 pub enum ClientVoice {
   Offer(RTCSessionDescription),
+  Answer(RTCSessionDescription),
 }
 
 pub enum ServerVoice {
   Offer(RTCSessionDescription),
+  Answer(RTCSessionDescription),
 }
