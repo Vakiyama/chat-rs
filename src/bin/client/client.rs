@@ -292,7 +292,7 @@ pub async fn get() -> GrpcClient {
         user,
       };
 
-      let _ = client.load_from_credential_store().await;
+      //let _ = client.load_from_credential_store().await;
 
       client
     })

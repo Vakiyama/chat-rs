@@ -87,6 +87,7 @@ pub async fn handle_offer(
   let track_room = room.clone();
 
   peer_connection.on_track(Box::new(move |track, _, _| {
+    println!("started audio track on peer connection");
     let room = track_room.clone();
     Box::pin(async move {
       // 1. this publisher's relay track (Opus capability from the incoming track)

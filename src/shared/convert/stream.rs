@@ -24,7 +24,7 @@ impl IntoProto<ServerVoiceMessage> for ServerVoice {
         })
       }
       ServerVoice::Answer(rtcsession_description) => {
-        server_voice_message::Payload::Offer(SessionDescription {
+        server_voice_message::Payload::Answer(SessionDescription {
           rtc_session_description: serde_json::to_string(&rtcsession_description).unwrap(),
         })
       }
@@ -45,7 +45,7 @@ impl IntoProto<ClientVoiceMessage> for ClientVoice {
         })
       }
       ClientVoice::Answer(rtcsession_description) => {
-        client_voice_message::Payload::Offer(SessionDescription {
+        client_voice_message::Payload::Answer(SessionDescription {
           rtc_session_description: serde_json::to_string(&rtcsession_description).unwrap(),
         })
       }

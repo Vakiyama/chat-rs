@@ -511,7 +511,12 @@ impl AuthService for AuthServer<InMemoryCodeStore, DbTokenStore> {
       })?;
 
     if user.is_none() {
-      let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone()).await?;
+      let code = resend::send_auth_email(&inner_request.email, self.state.resend.clone())
+        .await
+        .map_err(|resend_err| {
+          eprintln!("err sending email: {resend_err:?}");
+          resend_err
+        })?;
 
       self
         .state

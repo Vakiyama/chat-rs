@@ -3,19 +3,25 @@ use std::sync::Arc;
 use chat_rs::shared::convert::stream::proto::ClientVoiceMessage;
 use chat_rs::shared::convert::{IntoProto, TryIntoDomain};
 use chat_rs::shared::domain::stream::{ClientVoice, ServerVoice};
+use cpal::StreamConfig;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::task::{Never, Sipper, sipper};
 use iced::{Task, futures};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
 use webrtc::interceptor::registry::Registry;
+use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 use crate::client;
+use crate::mixer::Mixer;
 use crate::model::{Model, Stream};
 
 #[derive(Debug, Clone)]
@@ -54,10 +60,8 @@ pub fn connect() -> impl Sipper<Never, Event> {
       let (tx, rx) = mpsc::channel::<ClientVoiceMessage>(100);
       let mut receiver = match client::get().await.stream.connect_voice_stream(rx).await {
         Ok(response) => {
-          println!("Firing connect event.");
-          output
-            .send(Event::Connected(WebRTCConnection(tx).into()))
-            .await;
+          println!("Firing webrtc connect event.");
+          output.send(Event::Connected(WebRTCConnection(tx))).await;
 
           response.into_inner().fuse()
         }
@@ -141,13 +145,121 @@ pub fn start() -> Task<crate::Message> {
       .map_err(|e| eprintln!("Error setting up initial client! {e:?}"));
 
     match client {
-      Ok((client, offer)) => crate::Message::WebRTCClientCreated(client.into(), offer),
+      Ok((client, offer, mic_stream, output_stream)) => crate::Message::WebRTCClientCreated(
+        client.into(),
+        offer.into(),
+        mic_stream.into(),
+        output_stream.into(),
+      ),
       Err(_) => crate::Message::None,
     }
   })
 }
 
-pub async fn setup_client() -> anyhow::Result<(RTCPeerConnection, RTCSessionDescription)> {
+async fn spawn_mic(track: Arc<TrackLocalStaticSample>) -> anyhow::Result<cpal::Stream> {
+  let host = cpal::default_host();
+  let device = host
+    .default_input_device()
+    .ok_or_else(|| anyhow::anyhow!("no input device"))?;
+  let config = device.default_input_config()?;
+  let sample_rate: u32 = config.sample_rate();
+  let sample_format = config.sample_format();
+
+  assert!(sample_rate == 48000);
+  assert!(sample_format == cpal::SampleFormat::F32);
+  let channels = config.channels();
+
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let stream_config: StreamConfig = config.into();
+
+  let stream = device.build_input_stream(
+    stream_config,
+    move |data: &[f32], _| {
+      let mono: Vec<f32> = data
+        .chunks(channels.into())
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect();
+
+      let _ = tx.send(mono);
+    },
+    |err| eprintln!("cpal input error: {err}"),
+    None,
+  )?;
+
+  stream.play()?;
+
+  // encoder task accumulates 20ms frames, encodes and writes
+  tokio::spawn(async move {
+    // assuming 48K sample rate
+    let frame_size = sample_rate as usize / 50;
+    let encoder = audiopus::coder::Encoder::new(
+      audiopus::SampleRate::Hz48000,
+      audiopus::Channels::Mono,
+      audiopus::Application::Voip,
+    )
+    .expect("opus encoder");
+
+    let mut pcm: Vec<f32> = Vec::with_capacity(frame_size * 2);
+    let mut out = vec![0u8; 1500];
+    while let Some(chunk) = rx.recv().await {
+      pcm.extend_from_slice(&chunk);
+      while pcm.len() >= frame_size {
+        let frame: Vec<f32> = pcm.drain(..frame_size).collect();
+        match encoder.encode_float(&frame, &mut out) {
+          Ok(n) => {
+            let _ = track
+              .write_sample(&Sample {
+                data: bytes::Bytes::copy_from_slice(&out[..n]),
+                duration: std::time::Duration::from_millis(20),
+                ..Default::default()
+              })
+              .await;
+          }
+          Err(e) => eprintln!("opus encode error {e}"),
+        }
+      }
+    }
+  });
+
+  Ok(stream) // when this stream drops, the mic stops.
+}
+
+fn spawn_speaker(mixer: Mixer) -> anyhow::Result<cpal::Stream> {
+  let host = cpal::default_host();
+  let device = host
+    .default_output_device()
+    .ok_or_else(|| anyhow::anyhow!("no output device"))?;
+  let config = device.default_output_config()?;
+  let sample_rate: u32 = config.sample_rate();
+  let sample_format = config.sample_format();
+
+  assert!(sample_rate == 48000);
+  assert!(sample_format == cpal::SampleFormat::F32);
+
+  // let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let stream_config: StreamConfig = config.into();
+  let channels = stream_config.channels as usize;
+
+  let stream = device.build_output_stream(
+    stream_config,
+    move |data: &mut [f32], _| {
+      mixer.mix_into(data, channels);
+    },
+    |err| eprintln!("cpal input error: {err}"),
+    None,
+  )?;
+
+  stream.play()?;
+
+  Ok(stream) // when this stream drops, the output stops.
+}
+
+pub async fn setup_client() -> anyhow::Result<(
+  RTCPeerConnection,
+  RTCSessionDescription,
+  cpal::Stream,
+  cpal::Stream,
+)> {
   let mut media_engine = MediaEngine::default();
 
   media_engine.register_default_codecs()?;
@@ -157,12 +269,55 @@ pub async fn setup_client() -> anyhow::Result<(RTCPeerConnection, RTCSessionDesc
     .with_interceptor_registry(registry)
     .build();
 
-  // no ice servers keeps tests to localhost only
+  // todo: introduce ice server configuration
 
   let client = api
     .new_peer_connection(RTCConfiguration::default())
     .await
     .map_err(|e| anyhow::anyhow!("Error setting up new peer conn {e:?}"))?;
+
+  let mic_track = Arc::new(TrackLocalStaticSample::new(
+    RTCRtpCodecCapability {
+      mime_type: MIME_TYPE_OPUS.to_owned(),
+      ..Default::default()
+    },
+    "audio".into(),
+    "mic".into(),
+  ));
+  let sender = client.add_track(mic_track.clone()).await?;
+  tokio::spawn(async move {
+    let mut buf = vec![0u8; 1500];
+    while sender.read(&mut buf).await.is_ok() {}
+  });
+
+  let mixer = Mixer::default();
+
+  let cpal_stream_input = spawn_mic(mic_track).await?;
+  let cpal_stream_output = spawn_speaker(mixer.clone())?;
+
+  let mixer_for_tracks = mixer.clone();
+  client.on_track(Box::new(move |track, _, _| {
+    let mixer = mixer_for_tracks.clone();
+    Box::pin(async move {
+      println!("on track for client fired");
+      let src = track.ssrc();
+      let mut decoder =
+        audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
+          .expect("opus decoder");
+      let mut pcm = vec![0f32; 960]; // one 20ms frame at 48k
+      while let Ok((pkt, _)) = track.read_rtp().await {
+        if pkt.payload.is_empty() {
+          continue;
+        } // e.g. padding
+        match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
+          Ok(n) => mixer.push(src, &pcm[..n]),
+          Err(e) => eprintln!("opus decode error: {e}"),
+        }
+      }
+      mixer.remove(src); // track ended (peer left)
+    })
+  }));
+
   let offer = client.create_offer(None).await?;
   let mut gather = client.gathering_complete_promise().await;
   client.set_local_description(offer).await?;
@@ -171,5 +326,5 @@ pub async fn setup_client() -> anyhow::Result<(RTCPeerConnection, RTCSessionDesc
 
   // connection.send(ClientVoice::Offer(offer));
 
-  Ok((client, offer))
+  Ok((client, offer, cpal_stream_input, cpal_stream_output))
 }

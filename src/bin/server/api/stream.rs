@@ -125,6 +125,7 @@ impl StreamService for StreamServer {
             }
           }
           Ok(ClientVoice::Answer(answer)) => {
+            println!("received answer from peer {request_user_id}");
             let _ = handle_answer(room.clone(), request_user_id, answer).await;
           }
           Err(err) => {

@@ -47,7 +47,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
       let (tx, rx) = mpsc::channel::<ClientTextMessage>(100);
       let mut receiver = match client::get().await.stream.connect_text_stream(rx).await {
         Ok(response) => {
-          println!("Firing connect event.");
+          println!("Firing chat stream connect event.");
           output.send(Event::Connected(ChatConnection(tx))).await;
 
           response.into_inner().fuse()

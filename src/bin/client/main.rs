@@ -9,6 +9,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 mod chat_stream;
+pub mod mixer;
 pub mod webrtc_stream;
 
 use crate::chat_stream::ChatConnection;
@@ -61,7 +62,7 @@ fn subscription(_model: &model::Model) -> Subscription<Message> {
   ])
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
@@ -72,7 +73,12 @@ pub enum Message {
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
   InitWebRTCVoiceCall,
-  WebRTCClientCreated(Arc<RTCPeerConnection>, RTCSessionDescription),
+  WebRTCClientCreated(
+    Arc<RTCPeerConnection>,
+    Box<RTCSessionDescription>,
+    Arc<cpal::Stream>,
+    Arc<cpal::Stream>,
+  ),
   None,
 }
 
@@ -150,12 +156,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       Task::none()
     }
     Message::InitWebRTCVoiceCall => webrtc_stream::start(),
-    Message::WebRTCClientCreated(client, offer) => {
+    Message::WebRTCClientCreated(client, offer, mic_stream, output_stream) => {
       model.webrtc_client = Some(client);
+      model.mic_stream = Some(mic_stream);
+      model.output_stream = Some(output_stream);
       let stream = model.webrtc_stream.clone();
       Task::future(async move {
         if let Stream::Connected(mut conn) = stream {
-          conn.send(ClientVoice::Offer(offer))
+          conn.send(ClientVoice::Offer(*offer))
         }
         crate::Message::None
       })

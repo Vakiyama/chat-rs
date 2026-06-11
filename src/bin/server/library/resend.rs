@@ -8,7 +8,7 @@ use resend_rs::{Resend, Result};
 use serde::Deserialize;
 use tonic::Status;
 
-const FROM: &str = "ChatRS <chatrs@resend.dev>";
+const FROM: &str = "login@vitorakiyama.com";
 const SUBJECT: &str = "Login Code";
 
 #[derive(Debug, Deserialize, Clone)]

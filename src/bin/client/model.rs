@@ -25,6 +25,8 @@ pub struct Model {
   pub chat_stream: Stream<chat_stream::ChatConnection>,
   pub webrtc_stream: Stream<webrtc_stream::WebRTCConnection>,
   pub webrtc_client: Option<Arc<RTCPeerConnection>>,
+  pub mic_stream: Option<Arc<cpal::Stream>>,
+  pub output_stream: Option<Arc<cpal::Stream>>,
 }
 
 pub enum Screen {
@@ -40,6 +42,8 @@ impl Default for Model {
       chat_stream: Stream::Disconnected,
       webrtc_stream: Stream::Disconnected,
       webrtc_client: None,
+      mic_stream: None,
+      output_stream: None,
     }
   }
 }
