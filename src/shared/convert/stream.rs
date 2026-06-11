@@ -36,6 +36,27 @@ impl IntoProto<ServerVoiceMessage> for ServerVoice {
   }
 }
 
+impl IntoProto<ClientVoiceMessage> for ClientVoice {
+  fn into_proto(self) -> ClientVoiceMessage {
+    let payload = match self {
+      ClientVoice::Offer(rtcsession_description) => {
+        client_voice_message::Payload::Offer(SessionDescription {
+          rtc_session_description: serde_json::to_string(&rtcsession_description).unwrap(),
+        })
+      }
+      ClientVoice::Answer(rtcsession_description) => {
+        client_voice_message::Payload::Offer(SessionDescription {
+          rtc_session_description: serde_json::to_string(&rtcsession_description).unwrap(),
+        })
+      }
+    };
+
+    ClientVoiceMessage {
+      payload: Some(payload),
+    }
+  }
+}
+
 impl IntoProto<DisplayUser> for User {
   fn into_proto(self) -> DisplayUser {
     DisplayUser {

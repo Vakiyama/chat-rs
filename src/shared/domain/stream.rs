@@ -23,6 +23,7 @@ pub enum ClientVoice {
   Answer(RTCSessionDescription),
 }
 
+#[derive(Clone, Debug)]
 pub enum ServerVoice {
   Offer(RTCSessionDescription),
   Answer(RTCSessionDescription),

@@ -10,9 +10,9 @@ use iced::task::{Never, Sipper, sipper};
 use crate::client;
 
 #[derive(Debug, Clone)]
-pub struct Connection(mpsc::Sender<ClientTextMessage>);
+pub struct ChatConnection(mpsc::Sender<ClientTextMessage>);
 
-impl Connection {
+impl ChatConnection {
   pub fn send(&mut self, message: ClientText) {
     self
       .0
@@ -23,7 +23,7 @@ impl Connection {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-  Connected(Connection),
+  Connected(ChatConnection),
   Disconnected,
   MessageReceived(ServerText),
 }
@@ -31,8 +31,8 @@ pub enum Event {
 impl From<Event> for crate::Message {
   fn from(val: Event) -> Self {
     match val {
-      Event::Connected(connection) => crate::Message::StreamConnected(connection),
-      Event::Disconnected => crate::Message::StreamDisconnected,
+      Event::Connected(connection) => crate::Message::ChatStreamConnected(connection),
+      Event::Disconnected => crate::Message::ChatStreamDisconnected,
       Event::MessageReceived(server_message) => {
         crate::Message::Chat(chat::Message::Stream(server_message))
       }
@@ -48,7 +48,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
       let mut receiver = match client::get().await.stream.connect_text_stream(rx).await {
         Ok(response) => {
           println!("Firing connect event.");
-          output.send(Event::Connected(Connection(tx))).await;
+          output.send(Event::Connected(ChatConnection(tx))).await;
 
           response.into_inner().fuse()
         }

@@ -1,7 +1,6 @@
-use crate::Element;
+use crate::{Element, chat_stream};
 use crate::{SPACE_GRID, model::Stream};
 
-use crate::stream::Connection;
 use crate::types::async_data::AsyncData;
 use chat_rs::shared::domain::stream::{ClientText, ServerText, User};
 use iced::widget::{Column, column, space, text, text_input};
@@ -25,7 +24,11 @@ impl Default for Model {
 }
 
 impl Model {
-  pub fn send(&mut self, user: &User, mut stream: Stream) -> Result<(), Error> {
+  pub fn send(
+    &mut self,
+    user: &User,
+    mut stream: Stream<chat_stream::ChatConnection>,
+  ) -> Result<(), Error> {
     match &mut stream {
       Stream::Connected(connection) => {
         let input = self.input.clone();
@@ -113,7 +116,12 @@ pub fn view<'a>(model: &'_ Model, chat_title: &'a str) -> Element<'a, Message> {
 }
 // --------------------------------- UPDATE ---------------------------------
 
-pub fn update(model: &mut Model, message: Message, user: &User, stream: Stream) -> Task<Message> {
+pub fn update(
+  model: &mut Model,
+  message: Message,
+  user: &User,
+  stream: Stream<chat_stream::ChatConnection>,
+) -> Task<Message> {
   println!("{message:#?}");
   match message {
     Message::UserChangedChatInput(new) => {
