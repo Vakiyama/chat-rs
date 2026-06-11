@@ -12,6 +12,7 @@ use iced::{Task, futures};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -269,10 +270,16 @@ pub async fn setup_client() -> anyhow::Result<(
     .with_interceptor_registry(registry)
     .build();
 
-  // todo: introduce ice server configuration
+  let config = RTCConfiguration {
+    ice_servers: vec![RTCIceServer {
+      urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+      ..Default::default()
+    }],
+    ..Default::default()
+  };
 
   let client = api
-    .new_peer_connection(RTCConfiguration::default())
+    .new_peer_connection(config)
     .await
     .map_err(|e| anyhow::anyhow!("Error setting up new peer conn {e:?}"))?;
 
