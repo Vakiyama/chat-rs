@@ -5,9 +5,9 @@
 - [ ] **Multiple rooms** — Currently only one global room. Room struct exists; follow the same approach as text message signaling to handle multiple rooms.
 - [ ] **Glare protection** — Server initiated renegotiations can collide with each other or an initial join on the same PC. The designed fix is per-Participant negotiating/needs_renegotiation atomics, with negotiating initialized true until the initial answer is sent (this also closes the answer-vs-offer channel-ordering hazard and the insert→collect double-wire window)
 - [ ] **m-line accumulation over churn** — Relays use add_transceiver_from_track(Sendonly) because add_track slot-reuse after remove_track fails with ErrRTPSenderNewTrackHasIncorrectEnvelope (upstream webrtc-rs bug; link the issue if you file it). Consequence: long-lived connections grow one dead m-line per departed peer. Future fix: replace_track-based slot pool, blocked on the upstream bug.
-- [ ]   **NAT 1:1 + UDPMux are mutually incompatible in webrtc 0.17** —  (mux conn closes during gathering, suspected IPv6 no-mapping error path). Current deploys don't need NAT 1:1 (Hetzner has the public IP on-interface); document do not combine for future NATed hosts (AWS etc.), plus consider set_network_types(Udp4) as standard mux config.
-- [ ]   **TURN fallback** —  clients on UDP-blocking networks can't connect at all; needs a coturn deployment and client-side TURN credentials when it bites.
-- [ ]   **Half-joined peers on error** —   if handle_offer fails after the answer is sent (add_track/reneg), the client believes it joined but is silently broken; tie cleanup of this state into handle_leave.
+- [ ] **NAT 1:1 + UDPMux are mutually incompatible in webrtc 0.17** —  (mux conn closes during gathering, suspected IPv6 no-mapping error path). Current deploys don't need NAT 1:1 (Hetzner has the public IP on-interface); document do not combine for future NATed hosts (AWS etc.), plus consider set_network_types(Udp4) as standard mux config.
+- [ ] **TURN fallback** —  clients on UDP-blocking networks can't connect at all; needs a coturn deployment and client-side TURN credentials when it bites.
+- [ ] **Half-joined peers on error** —   if handle_offer fails after the answer is sent (add_track/reneg), the client believes it joined but is silently broken; tie cleanup of this state into handle_leave.
 
 ## Client
 
@@ -22,4 +22,4 @@
 ## App
 
 - [ ] **Domain level signals for room leaving/joining** - Add explicit signaling to allow clients to render/sync their room state with the server.
-- [ ]   **No E2E encryption (by design, for now)** - SRTP is hop-by-hop; the SFU can technically access audio.
+- [ ] **No E2E encryption (by design, for now)** - SRTP is hop-by-hop; the SFU can technically access audio.
