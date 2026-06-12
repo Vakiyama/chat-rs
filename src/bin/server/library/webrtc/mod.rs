@@ -1,6 +1,9 @@
-use chat_rs::shared::{
-  convert::{IntoProto, stream::proto::ServerVoiceMessage},
-  domain::stream::ServerVoice,
+use chat_rs::{
+  config::CONFIG,
+  shared::{
+    convert::{IntoProto, stream::proto::ServerVoiceMessage},
+    domain::stream::ServerVoice,
+  },
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -8,8 +11,13 @@ use uuid::Uuid;
 use webrtc::{
   api::{
     APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+    setting_engine::SettingEngine,
   },
-  ice_transport::ice_server::RTCIceServer,
+  ice::{
+    udp_mux::{UDPMux, UDPMuxDefault, UDPMuxParams},
+    udp_network::UDPNetwork,
+  },
+  ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer},
   interceptor::registry::Registry,
   peer_connection::{
     RTCPeerConnection, configuration::RTCConfiguration,
@@ -59,10 +67,26 @@ pub async fn handle_offer(
 
   registry = register_default_interceptors(registry, &mut media_engine)?;
 
-  let api = APIBuilder::new()
+  let mut api = APIBuilder::new()
     .with_media_engine(media_engine)
-    .with_interceptor_registry(registry)
-    .build();
+    .with_interceptor_registry(registry);
+
+  if let Some(public_ip) = CONFIG.server.public_ip.clone()
+    && let Some(udp_port) = CONFIG.server.udp_port.clone()
+  {
+    let mut settings_engine = SettingEngine::default();
+
+    settings_engine.set_nat_1to1_ips(vec![public_ip], RTCIceCandidateType::Host);
+    settings_engine.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(
+      tokio::net::UdpSocket::bind(format!("0.0.0.0:{udp_port}"))
+        .await
+        .unwrap(),
+    ))));
+
+    api = api.with_setting_engine(settings_engine);
+  }
+
+  let api = api.build();
 
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {

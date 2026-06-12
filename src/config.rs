@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub enum Environment {
   Dev,
   Staging,
@@ -55,6 +55,8 @@ pub struct Config {
 pub struct ServerConfig {
   pub grpc_address: String,
   pub db_connection: String,
+  pub public_ip: Option<String>,
+  pub udp_port: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,12 +76,27 @@ pub struct EmailConfig {
 
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
   dotenvy::dotenv().ok();
+  let env_var: Environment = env("ENV").expect("ENV must be set.");
 
   Config {
     server: ServerConfig {
       grpc_address: env("SERVER_GRPC_ADDRESS").unwrap_or_else(|| "127.0.0.1:3000".into()),
       db_connection: env("DB_CONNECTION")
         .unwrap_or_else(|| "postgres://postgres@localhost:5432/local".into()),
+      public_ip: if env_var == Environment::Dev {
+        None
+      } else {
+        let public_ip = env("PUBLIC_IP").expect("PUBLIC_IP must be set in non DEV envs.");
+
+        Some(public_ip)
+      },
+      udp_port: if env_var == Environment::Dev {
+        None
+      } else {
+        let upd_port = env("UDP_PORT").expect("UDP_PORT must be set in non DEV envs.");
+
+        Some(upd_port)
+      },
     },
     auth: AuthConfig {
       jwt_key_hex: env("JWT_KEY").expect("JWT_KEY must be set"),
@@ -92,7 +109,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     email: EmailConfig {
       resend_api_key: env("RESEND_API_KEY").expect("RESEND_API_KEY must be set"),
     },
-    environment: env("ENV").expect("ENV must be set."),
+    environment: env_var,
   }
 });
 
