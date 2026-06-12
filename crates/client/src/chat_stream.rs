@@ -6,6 +6,8 @@ use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::futures;
 use iced::task::{Never, Sipper, sipper};
+use std::time::Duration;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::client;
 
@@ -40,20 +42,31 @@ impl From<Event> for crate::Message {
   }
 }
 
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+fn backoff() -> impl Iterator<Item = Duration> {
+  ExponentialBackoff::from_millis(2)
+    .factor(500)
+    .max_delay(MAX_BACKOFF)
+    .map(jitter)
+}
+
 pub fn connect() -> impl Sipper<Never, Event> {
   sipper(async |mut output| {
-    // reconnect loop; awaits 1 second on disconnect/error and retries
+    let mut delays = backoff();
+
     loop {
       let (tx, rx) = mpsc::channel::<ClientTextMessage>(100);
       let mut receiver = match client::get().await.stream.connect_text_stream(rx).await {
         Ok(response) => {
+          delays = backoff();
           println!("Firing chat stream connect event.");
           output.send(Event::Connected(ChatConnection(tx))).await;
 
           response.into_inner().fuse()
         }
-        Err(e) => {
-          tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        Err(_) => {
+          tokio::time::sleep(delays.next().unwrap_or(MAX_BACKOFF)).await;
           continue;
         }
       };
@@ -70,6 +83,8 @@ pub fn connect() -> impl Sipper<Never, Event> {
           }
         }
       }
+
+      tokio::time::sleep(delays.next().unwrap_or(MAX_BACKOFF)).await;
     }
   })
 }

@@ -56,11 +56,14 @@ fn new() -> (model::Model, Task<Message>) {
   )
 }
 
-fn subscription(_model: &model::Model) -> Subscription<Message> {
-  Subscription::batch([
-    Subscription::run(chat_stream::connect).map(|event| event.into()),
-    Subscription::run(webrtc_stream::connect).map(|event| event.into()),
-  ])
+fn subscription(model: &model::Model) -> Subscription<Message> {
+  match model.user {
+    Auth::LoggedIn(_) => Subscription::batch([
+      Subscription::run(chat_stream::connect).map(|event| event.into()),
+      Subscription::run(webrtc_stream::connect).map(|event| event.into()),
+    ]),
+    Auth::NotLoggedIn => Subscription::none(),
+  }
 }
 
 #[derive(Clone)]
@@ -81,6 +84,7 @@ pub enum Message {
     Arc<cpal::Stream>,
   ),
   None,
+  LoggedIn(User),
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
@@ -94,25 +98,28 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         iced::Task::none()
       }
     }
+    Message::LoggedIn(user) => {
+      model.screen = Screen::Chat(Default::default());
+      model.user = Auth::LoggedIn(user);
+      iced::Task::none()
+    }
     Message::Auth(msg) => {
       if let Auth::NotLoggedIn = &model.user
         && let Screen::Auth(auth_model) = &mut model.screen
       {
         match msg {
           auth::Message::ApiVerifiedCode(Ok(response)) => {
-            model.screen = Screen::Chat(Default::default());
-            model.user = Auth::LoggedIn(User {
+            let user = User {
               id: response.user_id,
               name: response.username.clone(),
-            });
+            };
 
-            Task::future(async {
+            Task::future(async move {
               client::get()
                 .await
                 .insert_tokens(response.refresh_token, response.access_token)
                 .await;
-              // entry.delete_credential()?;
-              Message::None
+              Message::LoggedIn(user)
             })
           }
           msg => auth::update(auth_model, msg).map(Message::Auth),
