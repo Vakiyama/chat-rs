@@ -22,7 +22,10 @@ use webrtc::{
     RTCPeerConnection, configuration::RTCConfiguration,
     sdp::session_description::RTCSessionDescription,
   },
-  rtp_transceiver::rtp_codec::RTPCodecType,
+  rtp_transceiver::{
+    RTCRtpTransceiverInit, rtp_codec::RTPCodecType,
+    rtp_transceiver_direction::RTCRtpTransceiverDirection,
+  },
   track::track_local::{TrackLocalWriter, track_local_static_rtp::TrackLocalStaticRTP},
 };
 
@@ -53,7 +56,7 @@ pub async fn handle_offer(
   me: PeerId,
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
   api: &API,
-) -> anyhow::Result<RTCSessionDescription> {
+) -> anyhow::Result<()> {
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
       urls: vec!["stun:stun.l.google.com:19302".to_owned()],
@@ -61,21 +64,27 @@ pub async fn handle_offer(
     }],
     ..Default::default()
   };
-
   let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
+  // initial m-line is client→server mic only; server→client audio always
+  // arrives via server-offered m-lines in renegotiation
   peer_connection
-    .add_transceiver_from_kind(RTPCodecType::Audio, None)
+    .add_transceiver_from_kind(
+      RTPCodecType::Audio,
+      Some(RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Recvonly,
+        send_encodings: vec![],
+      }),
+    )
     .await?;
 
-  let participant = Participant {
+  let participant = Arc::new(Participant {
     pc: peer_connection.clone(),
     relay: RwLock::new(None),
-    signal_tx,
-  };
+    signal_tx: signal_tx.clone(),
+  });
 
   let track_room = room.clone();
-
   peer_connection.on_track(Box::new(move |track, _, _| {
     println!("started audio track on peer connection");
     let room = track_room.clone();
@@ -134,40 +143,50 @@ pub async fn handle_offer(
     })
   }));
 
-  let existing: Vec<Arc<Participant>> = {
+  // ── initial negotiation ──
+  peer_connection.set_remote_description(offer).await?;
+  let answer = peer_connection.create_answer(None).await?;
+  let mut gather = peer_connection.gathering_complete_promise().await;
+  peer_connection.set_local_description(answer).await?;
+  let _ = gather.recv().await;
+  let answer = peer_connection
+    .local_description()
+    .await
+    .ok_or_else(|| anyhow::anyhow!("no local description"))?;
+
+  // negotiation done: join the room, then answer the client
+  room.peers.write().await.insert(me, participant.clone());
+  signal_tx
+    .send(Ok(ServerVoice::Answer(answer).into_proto()))
+    .await?;
+
+  // ── deliver existing publishers via one server-initiated renegotiation ──
+  let existing_relays: Vec<Arc<TrackLocalStaticRTP>> = {
     let peers = room.peers.read().await;
-    peers
-      .iter()
-      .filter(|(id, _)| **id != me)
-      .map(|(_, p)| Arc::clone(p))
-      .collect()
+    let mut relays = Vec::new();
+    for (id, p) in peers.iter() {
+      if *id == me {
+        continue;
+      }
+      if let Some(relay) = p.relay.read().await.clone() {
+        relays.push(relay);
+      }
+    }
+    relays
   };
 
-  // negotiate, return the answer
-  peer_connection.set_remote_description(offer).await?;
-
-  for peer in existing {
-    if let Some(relay) = peer.relay.read().await.clone() {
+  if !existing_relays.is_empty() {
+    for relay in existing_relays {
       let sender = peer_connection.add_track(relay).await?;
       tokio::spawn(async move {
         let mut buf = vec![0u8; 1500];
         while sender.read(&mut buf).await.is_ok() {}
       });
     }
+    renegotiate(&participant).await?;
   }
 
-  let answer = peer_connection.create_answer(None).await?;
-  let mut gather = peer_connection.gathering_complete_promise().await;
-  peer_connection.set_local_description(answer).await?;
-  let _ = gather.recv().await;
-
-  // negotations done, safe to insert into room struct
-  room.peers.write().await.insert(me, participant.into());
-
-  peer_connection
-    .local_description()
-    .await
-    .ok_or_else(|| anyhow::anyhow!("no local description"))
+  Ok(())
 }
 
 async fn renegotiate(peer: &Participant) -> anyhow::Result<()> {
@@ -205,13 +224,14 @@ pub async fn handle_answer(
 
 #[cfg(test)]
 mod tests {
-  use std::sync::Arc;
+  use std::{sync::Arc, time::Duration};
 
+  use chat_shared::convert::stream::proto::ServerVoiceMessage;
   use chat_shared::{convert::TryIntoDomain, domain::stream::ServerVoice};
   use uuid::Uuid;
   use webrtc::{
     api::{
-      APIBuilder,
+      API, APIBuilder,
       interceptor_registry::register_default_interceptors,
       media_engine::{MIME_TYPE_OPUS, MediaEngine},
     },
@@ -220,6 +240,7 @@ mod tests {
     peer_connection::{
       RTCPeerConnection, configuration::RTCConfiguration,
       peer_connection_state::RTCPeerConnectionState,
+      sdp::session_description::RTCSessionDescription,
     },
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
@@ -227,7 +248,94 @@ mod tests {
 
   use crate::library::webrtc::{PeerId, Room, handle_answer, handle_offer};
 
-  // helper waits for relay in room for peer id
+  type SignalRx = tokio::sync::mpsc::Receiver<Result<ServerVoiceMessage, tonic::Status>>;
+
+  fn make_server_api() -> anyhow::Result<API> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+    Ok(
+      APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(registry)
+        .build(),
+    )
+  }
+
+  // next server->client signal, or error after 10s
+  async fn recv_signal(rx: &mut SignalRx) -> anyhow::Result<ServerVoice> {
+    let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("signal stream closed"))??;
+    Ok(msg.try_into_domain()?)
+  }
+
+  async fn expect_answer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
+    match recv_signal(rx).await? {
+      ServerVoice::Answer(desc) => Ok(desc),
+      other => anyhow::bail!("expected Answer, got {other:?}"),
+    }
+  }
+
+  async fn expect_offer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
+    match recv_signal(rx).await? {
+      ServerVoice::Offer(desc) => Ok(desc),
+      other => anyhow::bail!("expected Offer, got {other:?}"),
+    }
+  }
+
+  // client-side initial join: gather non-trickle, hand offer to server, apply answer from rx
+  async fn join(
+    client: &Arc<RTCPeerConnection>,
+    room: &Arc<Room>,
+    id: PeerId,
+    tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+    rx: &mut SignalRx,
+    api: &API,
+  ) -> anyhow::Result<()> {
+    let offer = client.create_offer(None).await?;
+    let mut gather = client.gathering_complete_promise().await;
+    client.set_local_description(offer).await?;
+    let _ = gather.recv().await;
+    handle_offer(
+      client.local_description().await.unwrap(),
+      room.clone(),
+      id,
+      tx,
+      api,
+    )
+    .await?;
+    let answer = expect_answer(rx).await?;
+    client.set_remote_description(answer).await?;
+    Ok(())
+  }
+
+  // client answers a server-initiated renegotiation; test plays the gRPC loop's role
+  async fn answer_reneg(
+    client: &Arc<RTCPeerConnection>,
+    room: &Arc<Room>,
+    id: PeerId,
+    offer: RTCSessionDescription,
+  ) -> anyhow::Result<()> {
+    client.set_remote_description(offer).await?;
+    let answer = client.create_answer(None).await?;
+    client.set_local_description(answer).await?;
+    handle_answer(room.clone(), id, client.local_description().await.unwrap()).await
+  }
+
+  // one-shot on_track latch
+  fn on_track_latch(client: &Arc<RTCPeerConnection>) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut tx = Some(tx);
+    client.on_track(Box::new(move |_, _, _| {
+      if let Some(tx) = tx.take() {
+        let _ = tx.send(());
+      }
+      Box::pin(async {})
+    }));
+    rx
+  }
+
   async fn wait_for_relay(room: &Arc<Room>, id: PeerId) -> anyhow::Result<()> {
     for _ in 0..100 {
       if let Some(p) = room.peers.read().await.get(&id)
@@ -235,24 +343,20 @@ mod tests {
       {
         return Ok(());
       }
-      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("relay for {id} never appeared")
   }
 
-  // creates a_client localhost only client peer connection
   async fn make_client_pc() -> anyhow::Result<Arc<RTCPeerConnection>> {
     let mut media_engine = MediaEngine::default();
-
     media_engine.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
     let api = APIBuilder::new()
       .with_media_engine(media_engine)
       .with_interceptor_registry(registry)
       .build();
-
     // no ice servers keeps tests to localhost only
-
     Ok(
       api
         .new_peer_connection(RTCConfiguration::default())
@@ -304,9 +408,9 @@ mod tests {
   #[tokio::test]
   async fn offer_handshake_reaches_connected() -> anyhow::Result<()> {
     let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
 
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let client = make_client_pc().await?;
     client
       .add_transceiver_from_kind(
@@ -317,197 +421,78 @@ mod tests {
 
     let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
     let mut connected_tx = Some(connected_tx);
-
     client.on_peer_connection_state_change(Box::new(move |new_state| {
       if new_state == RTCPeerConnectionState::Connected
         && let Some(tx) = connected_tx.take()
       {
-        // sends signal to connected_rx that we've reached desired state for test to finish
         let _ = tx.send(());
       }
-
       Box::pin(async {})
     }));
 
-    let offer = client.create_offer(None).await?;
-    let mut gather = client.gathering_complete_promise().await;
-    client.set_local_description(offer).await?;
-    let _ = gather.recv().await;
-    let offer = client.local_description().await.unwrap();
+    join(&client, &room, Uuid::new_v4(), tx, &mut rx, &api).await?;
 
-    let mut media_engine = MediaEngine::default();
-
-    media_engine.register_default_codecs().unwrap();
-
-    let mut registry = Registry::new();
-
-    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
-
-    let mut api = APIBuilder::new()
-      .with_media_engine(media_engine)
-      .with_interceptor_registry(registry);
-
-    let api = api.build();
-
-    // server side handling of clientside offer
-    let answer = handle_offer(offer, room.clone(), Uuid::new_v4(), tx, &api).await?;
-    client.set_remote_description(answer).await?;
-
-    // connected_rx will fire when Connected state is reached in on_.._state_change
-    tokio::time::timeout(std::time::Duration::from_secs(10), connected_rx).await??;
+    tokio::time::timeout(Duration::from_secs(10), connected_rx).await??;
     Ok(())
   }
 
+  // B joins a room where A is already publishing:
+  //   - B hears A via the post-join renegotiation (Answer then Offer on B's rx)
+  //   - A hears B via the reneg triggered by B's media arriving
   #[tokio::test]
-  async fn second_join_renegotiates_first_peer() -> anyhow::Result<()> {
+  async fn both_directions_with_sequential_joins() -> anyhow::Result<()> {
     let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
 
-    // A joins
+    // A joins, publishing immediately
     let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
     let a_id = Uuid::new_v4();
     let a_client = make_client_pc().await?;
-    // triggers on_track in handle_offer listener, adding peer to track
     start_fake_mic(make_fake_mic(&a_client).await?);
+    let a_heard = on_track_latch(&a_client);
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api).await?;
 
-    let (a_recv_tx, a_recv_rx) = tokio::sync::oneshot::channel();
-    let mut a_recv_tx = Some(a_recv_tx);
-    a_client.on_track(Box::new(move |_, _, _| {
-      if let Some(tx) = a_recv_tx.take() {
-        let _ = tx.send(());
-      }
-
-      Box::pin(async {})
-    }));
-
-    // a negotiates
-    let offer = a_client.create_offer(None).await?;
-    let mut gather = a_client.gathering_complete_promise().await;
-    a_client.set_local_description(offer).await?;
-    let _ = gather.recv().await;
-
-    let mut media_engine = MediaEngine::default();
-
-    media_engine.register_default_codecs().unwrap();
-
-    let mut registry = Registry::new();
-
-    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
-
-    let mut api = APIBuilder::new()
-      .with_media_engine(media_engine)
-      .with_interceptor_registry(registry);
-
-    let api = api.build();
-    // server handles a offer, sends answer, a sets new description
-    let answer = handle_offer(
-      a_client.local_description().await.unwrap(),
-      room.clone(),
-      a_id,
-      a_tx,
-      &api,
-    )
-    .await?;
-    a_client.set_remote_description(answer).await?;
-
-    //  A's media must reach the server before B joins,
-    //  or B hears A via the self-hel path instead of initial answer
+    // pin the test to the "relay exists at join time" path
     wait_for_relay(&room, a_id).await?;
 
-    // B joins
-    let (b_tx, _b_rx) = tokio::sync::mpsc::channel(8);
+    // B joins, publishing immediately
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+    let b_id = Uuid::new_v4();
     let b_client = make_client_pc().await?;
     start_fake_mic(make_fake_mic(&b_client).await?);
+    let b_heard = on_track_latch(&b_client);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api).await?;
 
-    let mut media_engine = MediaEngine::default();
+    // NEW-CONTRACT ASSERTION: B's join is immediately followed by a reneg
+    // offer carrying A's relay (Answer was consumed inside join())
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b).await?;
 
-    media_engine.register_default_codecs().unwrap();
+    // B's media reaching the server renegotiates A
+    let offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a).await?;
 
-    let mut registry = Registry::new();
-
-    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
-
-    let mut api = APIBuilder::new()
-      .with_media_engine(media_engine)
-      .with_interceptor_registry(registry);
-
-    let api = api.build();
-
-    let offer = b_client.create_offer(None).await?;
-    let mut gather = b_client.gathering_complete_promise().await;
-    b_client.set_local_description(offer).await?;
-    let _ = gather.recv().await;
-    let answer = handle_offer(
-      b_client.local_description().await.unwrap(),
-      room.clone(),
-      Uuid::new_v4(),
-      b_tx,
-      &api,
-    )
-    .await?;
-    b_client.set_remote_description(answer).await?;
-
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(10), a_rx.recv())
-      .await?
-      .ok_or_else(|| anyhow::anyhow!("A's stream closed"))??;
-    let ServerVoice::Offer(reneg_offer) = msg.try_into_domain()? else {
-      anyhow::bail!("Expected renegotation offer, got other msg");
-    };
-
-    // A sets new sdp from renegotation
-    a_client.set_remote_description(reneg_offer).await?;
-    let reneg_answer = a_client.create_answer(None).await?;
-    a_client.set_local_description(reneg_answer).await?;
-    handle_answer(
-      room.clone(),
-      a_id,
-      a_client.local_description().await.unwrap(),
-    )
-    .await?;
-
-    // B's audio reaches A after reneg (it's continously transmitting from spawn fake mic earlier)
-    tokio::time::timeout(std::time::Duration::from_secs(10), a_recv_rx).await??;
+    // both directions audible
+    tokio::time::timeout(Duration::from_secs(10), b_heard).await??; // B hears A
+    tokio::time::timeout(Duration::from_secs(10), a_heard).await??; // A hears B
     Ok(())
   }
 
-  // confirms order of on_track fires triggers correct renegs and ends in right state
+  // B joins while A's relay provably doesn't exist; A publishing later
+  // must still reach B via the self-heal renegotiation
   #[tokio::test]
   async fn late_publisher_self_heals_via_renegotiation() -> anyhow::Result<()> {
     let room: Arc<Room> = Room::default().into();
-    let mut media_engine = MediaEngine::default();
+    let api = make_server_api()?;
 
-    media_engine.register_default_codecs().unwrap();
-
-    let mut registry = Registry::new();
-
-    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
-
-    let mut api = APIBuilder::new()
-      .with_media_engine(media_engine)
-      .with_interceptor_registry(registry);
-
-    let api = api.build();
-
-    // A joins with a negotiated-but-silent mic: track is in the SDP, no packets yet
-    let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
+    // A joins with a negotiated-but-silent mic
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
     let a_id = Uuid::new_v4();
     let a_client = make_client_pc().await?;
     let a_mic = make_fake_mic(&a_client).await?;
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api).await?;
 
-    let offer = a_client.create_offer(None).await?;
-    let mut gather = a_client.gathering_complete_promise().await;
-    a_client.set_local_description(offer).await?;
-    let _ = gather.recv().await;
-    let answer = handle_offer(
-      a_client.local_description().await.unwrap(),
-      room.clone(),
-      a_id,
-      a_tx,
-      &api,
-    )
-    .await?;
-    a_client.set_remote_description(answer).await?;
-
-    // B joins while A's relay provably doesn't exist — B is listen-only
+    // B joins listen-only while A's relay is absent
     let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
     let b_id = Uuid::new_v4();
     let b_client = make_client_pc().await?;
@@ -517,31 +502,11 @@ mod tests {
         None,
       )
       .await?;
+    let b_heard = on_track_latch(&b_client);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api).await?;
 
-    let (b_recv_tx, b_recv_rx) = tokio::sync::oneshot::channel();
-    let mut b_recv_tx = Some(b_recv_tx);
-    b_client.on_track(Box::new(move |_, _, _| {
-      if let Some(tx) = b_recv_tx.take() {
-        let _ = tx.send(());
-      }
-      Box::pin(async {})
-    }));
-
-    let offer = b_client.create_offer(None).await?;
-    let mut gather = b_client.gathering_complete_promise().await;
-    b_client.set_local_description(offer).await?;
-    let _ = gather.recv().await;
-    let answer = handle_offer(
-      b_client.local_description().await.unwrap(),
-      room.clone(),
-      b_id,
-      b_tx,
-      &api,
-    )
-    .await?;
-    b_client.set_remote_description(answer).await?;
-
-    // sanity: we really are on the self-heal path — A's relay was absent at B's join
+    // sanity: no relay existed, so join() consumed an Answer and NO offer
+    // should have been sent to B yet
     {
       let peers = room.peers.read().await;
       let a_p = peers
@@ -553,30 +518,13 @@ mod tests {
       );
     }
 
-    // A starts speaking: server on_track(A) fires, wires relay to B, renegotiates B
+    // A starts speaking: on_track(A) wires relay to B and renegotiates B
     start_fake_mic(a_mic);
 
-    // B receives the server-initiated reneg offer
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(10), b_rx.recv())
-      .await?
-      .ok_or_else(|| anyhow::anyhow!("B's stream closed"))??;
-    let ServerVoice::Offer(reneg_offer) = msg.try_into_domain()? else {
-      anyhow::bail!("expected renegotiation offer, got other msg");
-    };
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b).await?;
 
-    // B answers; test plays the gRPC loop's role
-    b_client.set_remote_description(reneg_offer).await?;
-    let reneg_answer = b_client.create_answer(None).await?;
-    b_client.set_local_description(reneg_answer).await?;
-    handle_answer(
-      room.clone(),
-      b_id,
-      b_client.local_description().await.unwrap(),
-    )
-    .await?;
-
-    // A's audio reaches B despite B having joined "too early"
-    tokio::time::timeout(std::time::Duration::from_secs(10), b_recv_rx).await??;
+    tokio::time::timeout(Duration::from_secs(10), b_heard).await??;
     Ok(())
   }
 }

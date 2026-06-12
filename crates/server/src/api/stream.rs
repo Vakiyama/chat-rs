@@ -16,7 +16,7 @@ use chat_shared::{
   },
   domain::stream::{ClientText, ClientVoice, ServerText, ServerVoice},
 };
-use tokio::sync::mpsc::{self, error::SendError};
+use tokio::sync::mpsc::{self};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
 use uuid::Uuid;
@@ -167,8 +167,7 @@ impl StreamService for StreamServer {
               api = api.with_setting_engine(settings_engine);
             }
 
-            let api = api.build();
-            api
+            api.build()
           })
           .await;
 
@@ -176,9 +175,11 @@ impl StreamService for StreamServer {
           Ok(ClientVoice::Offer(desc)) => {
             if !room.peers.read().await.contains_key(&request_user_id) {
               match handle_offer(desc, room.clone(), request_user_id, tx.clone(), api).await {
-                Ok(answer) => {
-                  let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
+                Ok(()) => {
+                  println!("Success handling session description offer from client");
+                  // let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
                 }
+                // todo; tear down clients if err
                 Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
               }
             } else {
