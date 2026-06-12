@@ -42,9 +42,9 @@
           ];
 
           audioLibs = with pkgs; [
-  alsa-lib
-  libopus
-];
+            alsa-lib
+            libopus
+          ];
 
           pgStart = ''
             if ! pg_ctl status -D "$PGDATA" >/dev/null 2>&1; then
@@ -87,6 +87,8 @@
               # formatters
               pkgs.taplo
               pkgs.yamlfmt
+
+              pkgs.opentofu
             ]
             ++ guiLibs;
 

@@ -1,0 +1,188 @@
+use std::sync::Arc;
+
+use chat_shared::convert::TryIntoDomain;
+use chat_shared::domain::stream::{ClientVoice, ServerVoice, User};
+use chat_shared::domain::user::MeReturn;
+use iced::widget::container;
+use iced::{Element, Subscription, Task};
+use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
+mod chat_stream;
+pub mod config;
+pub mod mixer;
+pub mod webrtc_stream;
+
+use crate::chat_stream::ChatConnection;
+use crate::model::{Auth, Screen, Stream};
+use crate::screens::{auth, chat};
+use crate::webrtc_stream::WebRTCConnection;
+
+mod client;
+mod model;
+mod screens;
+mod types;
+
+const SPACE_GRID: u16 = 8;
+
+fn main() -> iced::Result {
+  iced::application(new, update, view)
+    .subscription(subscription)
+    .run()
+}
+
+fn new() -> (model::Model, Task<Message>) {
+  (
+    model::Model::default(),
+    Task::perform(
+      async {
+        let mut client = client::get().await;
+
+        if client.has_tokens().await {
+          client
+            .user
+            .me(())
+            .await
+            .unwrap()
+            .into_inner()
+            .try_into_domain()
+            .ok()
+        } else {
+          None
+        }
+      },
+      Message::Loaded,
+    ),
+  )
+}
+
+fn subscription(_model: &model::Model) -> Subscription<Message> {
+  Subscription::batch([
+    Subscription::run(chat_stream::connect).map(|event| event.into()),
+    Subscription::run(webrtc_stream::connect).map(|event| event.into()),
+  ])
+}
+
+#[derive(Clone)]
+pub enum Message {
+  Chat(chat::Message),
+  Auth(auth::Message),
+  Loaded(Option<MeReturn>),
+  ChatStreamConnected(ChatConnection),
+  ChatStreamDisconnected,
+  WebRTC(Box<ServerVoice>),
+  WebRTCSignalStreamConnected(WebRTCConnection),
+  WebRTCSignalStreamDisconnected,
+  InitWebRTCVoiceCall,
+  WebRTCClientCreated(
+    Arc<RTCPeerConnection>,
+    Box<RTCSessionDescription>,
+    Arc<cpal::Stream>,
+    Arc<cpal::Stream>,
+  ),
+  None,
+}
+
+fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
+  match message {
+    Message::Chat(msg) => {
+      if let Auth::LoggedIn(user) = &model.user
+        && let Screen::Chat(chat_model) = &mut model.screen
+      {
+        chat::update(chat_model, msg, user, model.chat_stream.clone()).map(Message::Chat)
+      } else {
+        iced::Task::none()
+      }
+    }
+    Message::Auth(msg) => {
+      if let Auth::NotLoggedIn = &model.user
+        && let Screen::Auth(auth_model) = &mut model.screen
+      {
+        match msg {
+          auth::Message::ApiVerifiedCode(Ok(response)) => {
+            model.screen = Screen::Chat(Default::default());
+            model.user = Auth::LoggedIn(User {
+              id: response.user_id,
+              name: response.username.clone(),
+            });
+
+            Task::future(async {
+              client::get()
+                .await
+                .insert_tokens(response.refresh_token, response.access_token)
+                .await;
+              // entry.delete_credential()?;
+              Message::None
+            })
+          }
+          msg => auth::update(auth_model, msg).map(Message::Auth),
+        }
+      } else if let Auth::LoggedIn(_) = model.user {
+        model.screen = Screen::Chat(Default::default());
+        iced::Task::none()
+      } else {
+        iced::Task::none()
+      }
+    }
+    Message::None => iced::Task::none(),
+    Message::Loaded(me_return) => match me_return {
+      Some(response) => {
+        model.screen = Screen::Chat(Default::default());
+        model.user = Auth::LoggedIn(User {
+          id: response.user_id,
+          name: response.username.clone(),
+        });
+
+        Task::none()
+      }
+      None => Task::none(),
+    },
+    Message::ChatStreamDisconnected => {
+      model.chat_stream = Stream::Disconnected;
+      Task::none()
+    }
+    Message::ChatStreamConnected(connection) => {
+      model.chat_stream = Stream::Connected(connection);
+      Task::none()
+    }
+    Message::WebRTC(server_msg) => webrtc_stream::handle(model, server_msg),
+    Message::WebRTCSignalStreamConnected(web_rtcconnection) => {
+      model.webrtc_stream = Stream::Connected(web_rtcconnection);
+
+      // for now, we'll join the global call right away
+      Task::done(Message::InitWebRTCVoiceCall)
+    }
+    Message::WebRTCSignalStreamDisconnected => {
+      model.webrtc_stream = Stream::Disconnected;
+      Task::none()
+    }
+    Message::InitWebRTCVoiceCall => webrtc_stream::start(),
+    Message::WebRTCClientCreated(client, offer, mic_stream, output_stream) => {
+      model.webrtc_client = Some(client);
+      model.mic_stream = Some(mic_stream);
+      model.output_stream = Some(output_stream);
+      let stream = model.webrtc_stream.clone();
+      Task::future(async move {
+        if let Stream::Connected(mut conn) = stream {
+          conn.send(ClientVoice::Offer(*offer))
+        }
+        crate::Message::None
+      })
+    }
+  }
+}
+
+fn view(model: &'_ model::Model) -> Element<'_, Message> {
+  let view = match &model.screen {
+    model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
+    model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
+  };
+
+  container(
+    container(view)
+      .padding(SPACE_GRID)
+      .style(container::rounded_box),
+  )
+  .padding(SPACE_GRID)
+  .into()
+}

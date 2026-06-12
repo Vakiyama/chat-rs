@@ -1,0 +1,38 @@
+[package]
+name = "chat-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+chat-shared.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tokio-stream.workspace = true
+webrtc.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+dotenvy.workspace = true
+tower.workspace = true
+thiserror.workspace = true
+http.workspace = true
+email_address.workspace = true
+
+# unambiguously server
+sea-orm = { version = "2.0.0-rc", features = ["sqlx-postgres", "runtime-tokio-native-tls", "macros", "schema-sync", "entity-registry"] }
+resend-rs = "0.21.1"
+jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
+hex = "0.4.3"
+tower-http = { version = "0.6.8", features = ["auth", "trace"] }
+tonic-middleware = "0.4.1"
+tokio-rate-limit = "0.8.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.10.0"               # verify codes

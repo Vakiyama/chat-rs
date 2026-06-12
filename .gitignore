@@ -6,3 +6,5 @@ target/*
 
 .pgdata/
 .pgsocket
+terraform.tfstate
+terraform.tfstate.backup
