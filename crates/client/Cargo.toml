@@ -1,0 +1,32 @@
+[package]
+name = "chat-client"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[dependencies]
+chat-shared.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tokio-stream.workspace = true
+webrtc.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+dotenvy.workspace = true
+tower.workspace = true
+http.workspace = true
+email_address.workspace = true
+
+# unambiguously client
+iced = { version = "0.14.0", features = ["tokio", "sipper", "image"] }
+cpal = "0.18.1"
+audiopus = "0.2.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"] }
+http-body-util = { version = "0.1.3", features = ["full"] }

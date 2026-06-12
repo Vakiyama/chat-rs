@@ -41,6 +41,11 @@
             expat
           ];
 
+          audioLibs = with pkgs; [
+            alsa-lib
+            libopus
+          ];
+
           pgStart = ''
             if ! pg_ctl status -D "$PGDATA" >/dev/null 2>&1; then
               (
@@ -82,6 +87,8 @@
               # formatters
               pkgs.taplo
               pkgs.yamlfmt
+
+              pkgs.opentofu
             ]
             ++ guiLibs;
 
@@ -108,11 +115,11 @@
               }
               {
                 name = "LD_LIBRARY_PATH";
-                value = pkgs.lib.makeLibraryPath guiLibs;
+                value = pkgs.lib.makeLibraryPath (guiLibs ++ audioLibs);
               }
               {
                 name = "PKG_CONFIG_PATH";
-                value = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" ([ pkgs.openssl ] ++ guiLibs);
+                value = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" ([ pkgs.openssl ] ++ guiLibs ++ audioLibs);
               }
               {
                 name = "RUST_BACKTRACE";

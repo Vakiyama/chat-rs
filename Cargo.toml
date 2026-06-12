@@ -1,49 +1,27 @@
-[package]
-name = "chat-rs"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["crates/shared", "crates/server", "crates/client"]
 
-[dependencies]
-axum = { version = "0.8.8", features = ["ws", "macros"] }
-futures-util = { version = "0.3.31", features = ["sink", "std"] }
-iced = { version = "0.14.0", features = ["tokio", "sipper", "image"] }
+[workspace.dependencies]
+# one place to pin versions everything inherits
 tokio = { version = "1.49.0", features = ["full"] }
-tokio-tungstenite = "0.28.0"
-dotenvy = "0.15"
-sea-orm = { version = "2.0.0-rc", features = [ "sqlx-postgres", "runtime-tokio-native-tls", "macros", "schema-sync", "entity-registry" ] }
-async-tungstenite = { version = "0.32.1", features = [ "tokio-runtime" ] }
-bytes = "1.11.1"
-rand = "0.10.0"
-resend-rs = "0.21.1"
-email_address = "0.2.9"
-serde = "1.0.228"
-jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
-hex = "0.4.3"
-tower-http = { version = "0.6.8", features = ["auth", "trace"] }
-http-body-util = { version = "0.1.3", features = [ "full" ] }
-http = "1.4.0"
-anyhow = "1.0.102"
-tower = "0.5.3"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-async-trait = "0.1.89"
 tonic = "0.14.6"
 prost = "0.14.3"
 prost-types = "0.14.3"
 tonic-prost = "0.14.6"
-tonic-middleware = "0.4.1"
 tokio-stream = "0.1.18"
-tokio-rate-limit = "0.8.1"
-tracing = "0.1.44"
-keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"] }
+webrtc = "0.17.1"
+serde = "1.0.228"
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+anyhow = "1.0.102"
 thiserror = "2.0.18"
-
-[dependencies.uuid]
-version = "1.19.0"
-features = [
-    "v4",
-    "serde"
-]
-
-[build-dependencies]
-tonic-prost-build = "0.14.6"
-protoc-bin-vendored = "3"
+bytes = "1.11.1"
+futures-util = { version = "0.3.31", features = ["sink", "std"] }
+tracing = "0.1.44"
+async-trait = "0.1.89"
+dotenvy = "0.15"
+chat-shared = { path = "crates/shared" }
+jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
+tower = "0.5.3"
+http = "1.4.0"
+email_address = "0.2.9"       
