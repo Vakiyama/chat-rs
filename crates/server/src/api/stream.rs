@@ -35,7 +35,7 @@ use webrtc::{
 
 use crate::{
   config::CONFIG,
-  library::webrtc::{Room, handle_answer, handle_offer},
+  library::webrtc::{Room, handle_answer, handle_leave, handle_offer},
 };
 
 #[derive(Default)]
@@ -149,9 +149,7 @@ impl StreamService for StreamServer {
               .with_media_engine(media_engine)
               .with_interceptor_registry(registry);
 
-            if let Some(public_ip) = CONFIG.server.public_ip.clone()
-              && let Some(udp_port) = CONFIG.server.udp_port.clone()
-            {
+            if let Some(udp_port) = CONFIG.server.udp_port.clone() {
               let mut settings_engine = SettingEngine::default();
 
               settings_engine.set_network_types(vec![NetworkType::Udp4]);
@@ -197,10 +195,10 @@ impl StreamService for StreamServer {
         }
       }
 
-      // remove peer from room, close pc
-      if let Some(peer) = room.peers.write().await.remove(&request_user_id) {
-        let _ = peer.pc.close().await;
-      }
+      // grpc msg loop ended, remove peer from room, close pc
+      let _ = handle_leave(room.clone(), request_user_id)
+        .await
+        .map_err(|err| println!("Error handling leave: {err}"));
     });
 
     let output_stream = ReceiverStream::new(rx);

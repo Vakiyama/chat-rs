@@ -23,7 +23,7 @@ use webrtc::{
     sdp::session_description::RTCSessionDescription,
   },
   rtp_transceiver::{
-    RTCRtpTransceiverInit, rtp_codec::RTPCodecType,
+    RTCRtpTransceiverInit, rtp_codec::RTPCodecType, rtp_sender::RTCRtpSender,
     rtp_transceiver_direction::RTCRtpTransceiverDirection,
   },
   track::track_local::{TrackLocalWriter, track_local_static_rtp::TrackLocalStaticRTP},
@@ -35,6 +35,7 @@ pub struct Participant {
   pub pc: Arc<RTCPeerConnection>,
   relay: RwLock<Option<Arc<TrackLocalStaticRTP>>>,
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+  outbound_senders: RwLock<HashMap<PeerId, Arc<RTCRtpSender>>>,
   // todo: simultaneous renegs can cause issues, potential solution is an atomic bool below for
   // queuing renegs when we hit this condition.
   // defer negotiating when flag is already active:
@@ -82,6 +83,7 @@ pub async fn handle_offer(
     pc: peer_connection.clone(),
     relay: RwLock::new(None),
     signal_tx: signal_tx.clone(),
+    outbound_senders: Default::default(),
   });
 
   let track_room = room.clone();
@@ -89,47 +91,62 @@ pub async fn handle_offer(
     println!("started audio track on peer connection");
     let room = track_room.clone();
     Box::pin(async move {
-      // 1. this publisher's relay track (Opus capability from the incoming track)
       let relay = Arc::new(TrackLocalStaticRTP::new(
         track.codec().capability,
         format!("audio-{me}"),
         format!("relay-{me}"),
       ));
 
-      // 2. register it, then add it to everyone already here
-      let me_p = room.peers.read().await.get(&me).cloned();
-      if let Some(me_p) = me_p {
-        *me_p.relay.write().await = Some(relay.clone());
-      }
+      // this participant must exist; bail loudly if not
+      let Some(me_p) = room.peers.read().await.get(&me).cloned() else {
+        eprintln!("on_track fired for {me} but they're not in the room");
+        return;
+      };
+      *me_p.relay.write().await = Some(relay.clone());
 
-      let others: Vec<Arc<Participant>> = {
+      let others: Vec<(PeerId, Arc<Participant>)> = {
         let peers = room.peers.read().await;
         peers
           .iter()
           .filter(|(id, _)| **id != me)
-          .map(|(_, p)| Arc::clone(p))
+          .map(|(id, p)| (*id, Arc::clone(p))) // Copy the id out of the guard
           .collect()
       };
 
-      for peer in others {
-        let sender = peer
+      for (peer_id, peer) in others {
+        let transceiver = match peer
           .pc
-          .add_track(relay.clone())
+          .add_transceiver_from_track(
+            relay.clone(),
+            Some(RTCRtpTransceiverInit {
+              direction: RTCRtpTransceiverDirection::Sendonly,
+              send_encodings: vec![],
+            }),
+          )
           .await
-          .map_err(|err| eprintln!("error adding track to peer pc in others: {err:?}"));
+        {
+          Ok(s) => s,
+          Err(e) => {
+            eprintln!("add_transceiver_from_track to {peer_id} failed: {e:?}");
+            continue;
+          }
+        };
+        let sender = transceiver.sender().await;
 
-        if let Ok(sender) = sender {
-          tokio::spawn(async move {
-            let mut buf = vec![0u8; 1500];
-            while sender.read(&mut buf).await.is_ok() {}
-          });
+        me_p
+          .outbound_senders
+          .write()
+          .await
+          .insert(peer_id, sender.clone());
 
-          // todo: simultaneous renegs can cause issues, potential solution is an atomic bool below for
-          // queuing renegs when we hit this condition.
-          // see Participant struct def for potential fix
-          let _ = renegotiate(&peer)
-            .await
-            .map_err(|err| eprintln!("renegotiate error: {err:?}"));
+        tokio::spawn(async move {
+          let mut buf = vec![0u8; 1500];
+          while sender.read(&mut buf).await.is_ok() {}
+        });
+
+        // todo: reneg serialization (negotiating/needs_renegotiation flags)
+        if let Err(e) = renegotiate(&peer).await {
+          eprintln!("renegotiate({peer_id}) error: {e:?}");
         }
       }
 
@@ -161,27 +178,46 @@ pub async fn handle_offer(
     .await?;
 
   // ── deliver existing publishers via one server-initiated renegotiation ──
-  let existing_relays: Vec<Arc<TrackLocalStaticRTP>> = {
+  let existing: Vec<(PeerId, Arc<Participant>, Arc<TrackLocalStaticRTP>)> = {
     let peers = room.peers.read().await;
-    let mut relays = Vec::new();
+    let mut out = Vec::new();
     for (id, p) in peers.iter() {
       if *id == me {
         continue;
       }
       if let Some(relay) = p.relay.read().await.clone() {
-        relays.push(relay);
+        out.push((*id, Arc::clone(p), relay));
       }
     }
-    relays
+    out
   };
 
-  if !existing_relays.is_empty() {
-    for relay in existing_relays {
-      let sender = peer_connection.add_track(relay).await?;
+  if !existing.is_empty() {
+    for (publisher_id, publisher, relay) in existing {
+      // add_track after remove_track fails with ErrRTPSenderNewTrackHasIncorrectEnvelope
+      // this setup leaves transceivers for long lived clients in sdp's, not a major issue but will
+      // cost sdp bytes
+      let transceiver = peer_connection
+        .add_transceiver_from_track(
+          relay.clone(),
+          Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            send_encodings: vec![],
+          }),
+        )
+        .await?;
+      let sender = transceiver.sender().await;
+
+      publisher
+        .outbound_senders
+        .write()
+        .await
+        .insert(me, sender.clone());
       tokio::spawn(async move {
         let mut buf = vec![0u8; 1500];
         while sender.read(&mut buf).await.is_ok() {}
       });
+      let _ = publisher_id; // (or use it in logs)
     }
     renegotiate(&participant).await?;
   }
@@ -201,6 +237,42 @@ async fn renegotiate(peer: &Participant) -> anyhow::Result<()> {
     .signal_tx
     .send(Ok(ServerVoice::Offer(local).into_proto()))
     .await?; // push to that peer's stream
+  Ok(())
+}
+
+pub async fn handle_leave(room: Arc<Room>, me: PeerId) -> anyhow::Result<()> {
+  // idempotent: second call finds nothing and returns
+  let Some(leaving) = room.peers.write().await.remove(&me) else {
+    return Ok(());
+  };
+
+  // snapshot the fan-out before closing anything
+  let outbound: Vec<(PeerId, Arc<RTCRtpSender>)> = {
+    let map = leaving.outbound_senders.read().await;
+    map.iter().map(|(id, s)| (*id, s.clone())).collect()
+  };
+
+  let _ = leaving.pc.close().await; // frees the mux conn — the poisoning fix
+
+  for (subscriber_id, sender) in outbound {
+    let Some(sub) = room.peers.read().await.get(&subscriber_id).cloned() else {
+      continue; // subscriber left in the meantime
+    };
+    if let Err(e) = sub.pc.remove_track(&sender).await {
+      eprintln!("remove_track on {subscriber_id} failed: {e:?}");
+      continue;
+    }
+    if let Err(e) = renegotiate(&sub).await {
+      eprintln!("renegotiate({subscriber_id}) after leave failed: {e:?}");
+    }
+  }
+
+  // reverse bookkeeping: senders ON my pc died with pc.close(),
+  // so purge my key from every remaining publisher's map
+  for (_, p) in room.peers.read().await.iter() {
+    p.outbound_senders.write().await.remove(&me);
+  }
+
   Ok(())
 }
 

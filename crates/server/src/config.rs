@@ -13,7 +13,6 @@ pub struct Config {
 pub struct ServerConfig {
   pub grpc_address: String,
   pub db_connection: String,
-  pub public_ip: Option<String>,
   pub udp_port: Option<String>,
 }
 
@@ -38,11 +37,6 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
       grpc_address: env("SERVER_GRPC_ADDRESS").unwrap_or_else(|| "127.0.0.1:3000".into()),
       db_connection: env("DB_CONNECTION")
         .unwrap_or_else(|| "postgres://postgres@localhost:5432/local".into()),
-      public_ip: if env_var == Environment::Dev {
-        None
-      } else {
-        Some(env("PUBLIC_IP").expect("PUBLIC_IP must be set in non DEV envs."))
-      },
       udp_port: if env_var == Environment::Dev {
         None
       } else {
