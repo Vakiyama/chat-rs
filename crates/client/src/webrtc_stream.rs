@@ -352,12 +352,20 @@ fn spawn_audio_processor(
     )
     .expect("opus encoder");
 
+    encoder
+      .set_inband_fec(true)
+      .expect("Failed to set Inband FEC");
+
     let mut cap_buf: Vec<f32> = Vec::new();
     let mut rnd_buf: Vec<f32> = Vec::new();
     let mut clean = vec![0f32; 480]; // one 10ms APM frame
     let mut rnd_sink = vec![0f32; 480];
     let mut pcm_20ms: Vec<f32> = Vec::with_capacity(960);
     let mut out = vec![0u8; 1500];
+    // for a noise gate in the future:
+    // let mut gate_hang = 0u32;
+    // const GATE_THRESHOLD: f32 = 0.01; // tune by ear
+    // const GATE_HANGOVER: u32 = 30;
 
     loop {
       tokio::select! {
@@ -378,6 +386,16 @@ fn spawn_audio_processor(
               eprintln!("apm capture error: {e:?}");
               continue;
             }
+            // let rms = (clean.iter().map(|s| s * s).sum::<f32>() / clean.len() as f32).sqrt();
+
+            // if rms > GATE_THRESHOLD {
+            //     gate_hang = GATE_HANGOVER;
+            // } else if gate_hang > 0 {
+            //     gate_hang -= 1;
+            // } else {
+            //     clean.fill(0.0);                // gate closed
+            // }
+
             pcm_20ms.extend_from_slice(&clean);
             if pcm_20ms.len() >= 960 {
               match encoder.encode_float(&pcm_20ms[..960], &mut out) {
