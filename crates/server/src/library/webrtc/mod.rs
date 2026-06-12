@@ -143,6 +143,9 @@ pub async fn handle_offer(
       .collect()
   };
 
+  // negotiate, return the answer
+  peer_connection.set_remote_description(offer).await?;
+
   for peer in existing {
     if let Some(relay) = peer.relay.read().await.clone() {
       let sender = peer_connection.add_track(relay).await?;
@@ -153,8 +156,6 @@ pub async fn handle_offer(
     }
   }
 
-  // negotiate, return the answer
-  peer_connection.set_remote_description(offer).await?;
   let answer = peer_connection.create_answer(None).await?;
   let mut gather = peer_connection.gathering_complete_promise().await;
   peer_connection.set_local_description(answer).await?;

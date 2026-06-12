@@ -91,6 +91,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
 // handle messages
 
 pub fn handle(model: &mut Model, msg: Box<ServerVoice>) -> Task<crate::Message> {
+  println!("receiving msg from server: {msg:?}");
   let Some(client) = &model.webrtc_client else {
     eprintln!("No webrtc client found when receiving server offer/answer");
     return Task::none();
