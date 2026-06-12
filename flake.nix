@@ -30,10 +30,10 @@
           guiLibs = with pkgs; [
             libGL
             vulkan-loader
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXi
-            xorg.libXrandr
+            libX11
+            libXcursor
+            libXi
+            libXrandr
             wayland
             libxkbcommon
             fontconfig
@@ -119,7 +119,9 @@
               }
               {
                 name = "PKG_CONFIG_PATH";
-                value = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" ([ pkgs.openssl ] ++ guiLibs ++ audioLibs);
+                value = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
+                  [ pkgs.openssl ] ++ guiLibs ++ audioLibs
+                );
               }
               {
                 name = "RUST_BACKTRACE";
