@@ -167,7 +167,7 @@ pub fn start() -> Task<crate::Message> {
   })
 }
 
-fn spawn_mic() -> anyhow::Result<cpal::Stream> {
+fn spawn_mic(tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>) -> anyhow::Result<cpal::Stream> {
   let host = cpal::default_host();
   let device = host
     .default_input_device()
@@ -180,7 +180,6 @@ fn spawn_mic() -> anyhow::Result<cpal::Stream> {
   assert!(sample_format == cpal::SampleFormat::F32);
   let channels = config.channels();
 
-  let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
   let stream_config: cpal::StreamConfig = config.into();
 
   let stream = device.build_input_stream(
@@ -282,10 +281,10 @@ pub async fn setup_client() -> anyhow::Result<(
   });
 
   let mixer = Mixer::default();
-  let (_cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
   let (rnd_tx, rnd_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
-  let cpal_stream_input = spawn_mic()?; // capture only
+  let cpal_stream_input = spawn_mic(cap_tx)?; // capture only
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx)?; // playback + render tee
   spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone()); // APM + Opus, owns the middle
 
