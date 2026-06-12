@@ -157,6 +157,23 @@
             ];
           };
         };
+
+      packages.client = pkgs.rustPlatform.buildRustPackage {
+        pname = "chat-rs-client";
+        version = "0.1.0";
+        src = ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        buildAndTestSubdir = "crates/client";   # or cargoBuildFlags = [ "-p" "chat-client" ]
+
+        nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+        buildInputs = [ pkgs.alsa-lib pkgs.libopus ];
+
+        postFixup = ''
+          wrapProgram $out/bin/client \
+            --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath guiLibs} \
+            --set ALSA_CONFIG_PATH "${pkgs.alsa-lib}/share/alsa/alsa.conf:${alsaConf}"
+        '';
+      };
     };
 
   nixConfig = {

@@ -23,3 +23,13 @@ jobs:
         env:
           DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p chat-client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-rs-windows
+          path: target/release/client.exe
