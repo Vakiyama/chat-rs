@@ -24,15 +24,14 @@ impl Mixer {
     self.0.lock().unwrap().remove(&src);
   }
 
-  pub fn mix_into(&self, out: &mut [f32], channels: usize) {
+  pub fn mix_mono(&self, out: &mut [f32]) {
     let mut m = self.0.lock().unwrap();
-    for frame in out.chunks_mut(channels) {
-      let s = m
+    for s in out.iter_mut() {
+      *s = m
         .values_mut()
         .filter_map(|q| q.pop_front())
         .sum::<f32>()
         .clamp(-1.0, 1.0);
-      frame.fill(s);
     }
   }
 }

@@ -3,12 +3,14 @@ use std::sync::Arc;
 use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
-use cpal::StreamConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
+use iced::futures::channel::mpsc::UnboundedSender;
 use iced::task::{Never, Sipper, sipper};
 use iced::{Task, futures};
+use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
+use sonora::{AudioProcessing, Config};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
@@ -165,7 +167,7 @@ pub fn start() -> Task<crate::Message> {
   })
 }
 
-async fn spawn_mic(track: Arc<TrackLocalStaticSample>) -> anyhow::Result<cpal::Stream> {
+fn spawn_mic() -> anyhow::Result<cpal::Stream> {
   let host = cpal::default_host();
   let device = host
     .default_input_device()
@@ -178,8 +180,8 @@ async fn spawn_mic(track: Arc<TrackLocalStaticSample>) -> anyhow::Result<cpal::S
   assert!(sample_format == cpal::SampleFormat::F32);
   let channels = config.channels();
 
-  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-  let stream_config: StreamConfig = config.into();
+  let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let stream_config: cpal::StreamConfig = config.into();
 
   let stream = device.build_input_stream(
     stream_config,
@@ -197,43 +199,13 @@ async fn spawn_mic(track: Arc<TrackLocalStaticSample>) -> anyhow::Result<cpal::S
 
   stream.play()?;
 
-  // encoder task accumulates 20ms frames, encodes and writes
-  tokio::spawn(async move {
-    // assuming 48K sample rate
-    let frame_size = sample_rate as usize / 50;
-    let encoder = audiopus::coder::Encoder::new(
-      audiopus::SampleRate::Hz48000,
-      audiopus::Channels::Mono,
-      audiopus::Application::Voip,
-    )
-    .expect("opus encoder");
-
-    let mut pcm: Vec<f32> = Vec::with_capacity(frame_size * 2);
-    let mut out = vec![0u8; 1500];
-    while let Some(chunk) = rx.recv().await {
-      pcm.extend_from_slice(&chunk);
-      while pcm.len() >= frame_size {
-        let frame: Vec<f32> = pcm.drain(..frame_size).collect();
-        match encoder.encode_float(&frame, &mut out) {
-          Ok(n) => {
-            let _ = track
-              .write_sample(&Sample {
-                data: bytes::Bytes::copy_from_slice(&out[..n]),
-                duration: std::time::Duration::from_millis(20),
-                ..Default::default()
-              })
-              .await;
-          }
-          Err(e) => eprintln!("opus encode error {e}"),
-        }
-      }
-    }
-  });
-
   Ok(stream) // when this stream drops, the mic stops.
 }
 
-fn spawn_speaker(mixer: Mixer) -> anyhow::Result<cpal::Stream> {
+fn spawn_speaker(
+  mixer: Mixer,
+  render_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+) -> anyhow::Result<cpal::Stream> {
   let host = cpal::default_host();
   let device = host
     .default_output_device()
@@ -245,22 +217,26 @@ fn spawn_speaker(mixer: Mixer) -> anyhow::Result<cpal::Stream> {
   assert!(sample_rate == 48000);
   assert!(sample_format == cpal::SampleFormat::F32);
 
-  // let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-  let stream_config: StreamConfig = config.into();
+  let stream_config: cpal::StreamConfig = config.into();
   let channels = stream_config.channels as usize;
+  let mut scratch: Vec<f32> = Vec::new();
 
   let stream = device.build_output_stream(
     stream_config,
     move |data: &mut [f32], _| {
-      mixer.mix_into(data, channels);
+      let frames = data.len() / channels;
+      scratch.resize(frames, 0.0);
+      mixer.mix_mono(&mut scratch); // mono mix, no channel logic
+      for (frame, s) in data.chunks_mut(channels).zip(scratch.iter()) {
+        frame.fill(*s); // upmix to device channels
+      }
+      let _ = render_tx.send(scratch.clone()); // tee to the APM
     },
-    |err| eprintln!("cpal input error: {err}"),
+    |err| eprintln!("cpal output error: {err}"),
     None,
   )?;
-
   stream.play()?;
-
-  Ok(stream) // when this stream drops, the output stops.
+  Ok(stream)
 }
 
 pub async fn setup_client() -> anyhow::Result<(
@@ -306,13 +282,15 @@ pub async fn setup_client() -> anyhow::Result<(
   });
 
   let mixer = Mixer::default();
+  let (_cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let (rnd_tx, rnd_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
-  let cpal_stream_input = spawn_mic(mic_track).await?;
-  let cpal_stream_output = spawn_speaker(mixer.clone())?;
+  let cpal_stream_input = spawn_mic()?; // capture only
+  let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx)?; // playback + render tee
+  spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone()); // APM + Opus, owns the middle
 
-  let mixer_for_tracks = mixer.clone();
   client.on_track(Box::new(move |track, _, _| {
-    let mixer = mixer_for_tracks.clone();
+    let mixer = mixer.clone();
     Box::pin(async move {
       println!("on track for client fired");
       let src = track.ssrc();
@@ -348,4 +326,77 @@ pub async fn setup_client() -> anyhow::Result<(
   // connection.send(ClientVoice::Offer(offer));
 
   Ok((client, offer, cpal_stream_input, cpal_stream_output))
+}
+
+fn spawn_audio_processor(
+  mut cap_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+  mut rnd_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+  track: Arc<TrackLocalStaticSample>,
+) {
+  tokio::spawn(async move {
+    let config = Config {
+      echo_canceller: Some(EchoCanceller::default()),
+      noise_suppression: Some(NoiseSuppression::default()),
+      gain_controller2: Some(GainController2::default()),
+      ..Default::default()
+    };
+    let mut apm = AudioProcessing::builder()
+      .config(config)
+      .capture_config(sonora::StreamConfig::new(48_000, 1))
+      .render_config(sonora::StreamConfig::new(48_000, 1))
+      .build();
+
+    let mut encoder = audiopus::coder::Encoder::new(
+      audiopus::SampleRate::Hz48000,
+      audiopus::Channels::Mono,
+      audiopus::Application::Voip,
+    )
+    .expect("opus encoder");
+
+    let mut cap_buf: Vec<f32> = Vec::new();
+    let mut rnd_buf: Vec<f32> = Vec::new();
+    let mut clean = vec![0f32; 480]; // one 10ms APM frame
+    let mut rnd_sink = vec![0f32; 480];
+    let mut pcm_20ms: Vec<f32> = Vec::with_capacity(960);
+    let mut out = vec![0u8; 1500];
+
+    loop {
+      tokio::select! {
+        Some(chunk) = rnd_rx.recv() => {
+          rnd_buf.extend_from_slice(&chunk);
+          while rnd_buf.len() >= 480 {
+            let frame: Vec<f32> = rnd_buf.drain(..480).collect();
+            if let Err(e) = apm.process_render_f32(&[&frame], &mut [&mut rnd_sink[..]]) {
+              eprintln!("apm render error: {e:?}");
+            }
+          }
+        }
+        Some(chunk) = cap_rx.recv() => {
+          cap_buf.extend_from_slice(&chunk);
+          while cap_buf.len() >= 480 {
+            let frame: Vec<f32> = cap_buf.drain(..480).collect();
+            if let Err(e) = apm.process_capture_f32(&[&frame], &mut [&mut clean[..]]) {
+              eprintln!("apm capture error: {e:?}");
+              continue;
+            }
+            pcm_20ms.extend_from_slice(&clean);
+            if pcm_20ms.len() >= 960 {
+              match encoder.encode_float(&pcm_20ms[..960], &mut out) {
+                Ok(n) => {
+                  let _ = track.write_sample(&Sample {
+                    data: bytes::Bytes::copy_from_slice(&out[..n]),
+                    duration: std::time::Duration::from_millis(20),
+                    ..Default::default()
+                  }).await;
+                }
+                Err(e) => eprintln!("opus encode error {e}"),
+              }
+              pcm_20ms.clear();
+            }
+          }
+        }
+        else => break,   // both channels closed → streams dropped → tear down
+      }
+    }
+  });
 }
