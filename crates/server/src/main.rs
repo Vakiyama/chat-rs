@@ -6,6 +6,7 @@ use tokio_rate_limit::{RateLimiter, RateLimiterConfig};
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
 
 use crate::api::auth::{
   AuthServer, ClientRateLimitInterceptor, DbTokenStore, InMemoryCodeStore, JWTAuthorizedInterceptor,
@@ -21,6 +22,10 @@ mod library;
 
 #[tokio::main]
 async fn main() {
+  tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+
   let auth_service: AuthServer<InMemoryCodeStore, DbTokenStore> = AuthServer::default();
 
   let jwt_interceptor = JWTAuthorizedInterceptor::default();

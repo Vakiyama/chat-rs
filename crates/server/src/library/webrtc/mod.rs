@@ -8,10 +8,11 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use webrtc::{
   api::{
-    APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
-    setting_engine::SettingEngine,
+    API, APIBuilder, interceptor_registry::register_default_interceptors,
+    media_engine::MediaEngine, setting_engine::SettingEngine,
   },
   ice::{
+    network_type::NetworkType,
     udp_mux::{UDPMuxDefault, UDPMuxParams},
     udp_network::UDPNetwork,
   },
@@ -51,41 +52,8 @@ pub async fn handle_offer(
   room: Arc<Room>,
   me: PeerId,
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+  api: &API,
 ) -> anyhow::Result<RTCSessionDescription> {
-  // Create a_client MediaEngine object to configure the supported codec
-  let mut media_engine = MediaEngine::default();
-
-  media_engine.register_default_codecs()?;
-
-  // Create a_client InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
-  // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
-  // this is enabled by default. If you are manually managing You MUST create a_client InterceptorRegistry
-  // for each PeerConnection.
-  let mut registry = Registry::new();
-
-  registry = register_default_interceptors(registry, &mut media_engine)?;
-
-  let mut api = APIBuilder::new()
-    .with_media_engine(media_engine)
-    .with_interceptor_registry(registry);
-
-  if let Some(public_ip) = CONFIG.server.public_ip.clone()
-    && let Some(udp_port) = CONFIG.server.udp_port.clone()
-  {
-    let mut settings_engine = SettingEngine::default();
-
-    settings_engine.set_nat_1to1_ips(vec![public_ip], RTCIceCandidateType::Host);
-    settings_engine.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(
-      tokio::net::UdpSocket::bind(format!("0.0.0.0:{udp_port}"))
-        .await
-        .unwrap(),
-    ))));
-
-    api = api.with_setting_engine(settings_engine);
-  }
-
-  let api = api.build();
-
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
       urls: vec!["stun:stun.l.google.com:19302".to_owned()],
@@ -366,8 +334,22 @@ mod tests {
     let _ = gather.recv().await;
     let offer = client.local_description().await.unwrap();
 
+    let mut media_engine = MediaEngine::default();
+
+    media_engine.register_default_codecs().unwrap();
+
+    let mut registry = Registry::new();
+
+    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
+
+    let mut api = APIBuilder::new()
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry);
+
+    let api = api.build();
+
     // server side handling of clientside offer
-    let answer = handle_offer(offer, room.clone(), Uuid::new_v4(), tx).await?;
+    let answer = handle_offer(offer, room.clone(), Uuid::new_v4(), tx, &api).await?;
     client.set_remote_description(answer).await?;
 
     // connected_rx will fire when Connected state is reached in on_.._state_change
@@ -402,12 +384,26 @@ mod tests {
     a_client.set_local_description(offer).await?;
     let _ = gather.recv().await;
 
+    let mut media_engine = MediaEngine::default();
+
+    media_engine.register_default_codecs().unwrap();
+
+    let mut registry = Registry::new();
+
+    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
+
+    let mut api = APIBuilder::new()
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry);
+
+    let api = api.build();
     // server handles a offer, sends answer, a sets new description
     let answer = handle_offer(
       a_client.local_description().await.unwrap(),
       room.clone(),
       a_id,
       a_tx,
+      &api,
     )
     .await?;
     a_client.set_remote_description(answer).await?;
@@ -421,6 +417,20 @@ mod tests {
     let b_client = make_client_pc().await?;
     start_fake_mic(make_fake_mic(&b_client).await?);
 
+    let mut media_engine = MediaEngine::default();
+
+    media_engine.register_default_codecs().unwrap();
+
+    let mut registry = Registry::new();
+
+    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
+
+    let mut api = APIBuilder::new()
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry);
+
+    let api = api.build();
+
     let offer = b_client.create_offer(None).await?;
     let mut gather = b_client.gathering_complete_promise().await;
     b_client.set_local_description(offer).await?;
@@ -430,6 +440,7 @@ mod tests {
       room.clone(),
       Uuid::new_v4(),
       b_tx,
+      &api,
     )
     .await?;
     b_client.set_remote_description(answer).await?;
@@ -461,6 +472,19 @@ mod tests {
   #[tokio::test]
   async fn late_publisher_self_heals_via_renegotiation() -> anyhow::Result<()> {
     let room: Arc<Room> = Room::default().into();
+    let mut media_engine = MediaEngine::default();
+
+    media_engine.register_default_codecs().unwrap();
+
+    let mut registry = Registry::new();
+
+    registry = register_default_interceptors(registry, &mut media_engine).unwrap();
+
+    let mut api = APIBuilder::new()
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry);
+
+    let api = api.build();
 
     // A joins with a negotiated-but-silent mic: track is in the SDP, no packets yet
     let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
@@ -477,6 +501,7 @@ mod tests {
       room.clone(),
       a_id,
       a_tx,
+      &api,
     )
     .await?;
     a_client.set_remote_description(answer).await?;
@@ -510,6 +535,7 @@ mod tests {
       room.clone(),
       b_id,
       b_tx,
+      &api,
     )
     .await?;
     b_client.set_remote_description(answer).await?;

@@ -4,6 +4,8 @@ use std::{
   sync::{Arc, Mutex, OnceLock},
 };
 
+use tokio::sync::OnceCell;
+
 use chat_shared::{
   convert::{
     IntoProto, TryIntoDomain,
@@ -18,8 +20,23 @@ use tokio::sync::mpsc::{self, error::SendError};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
 use uuid::Uuid;
+use webrtc::{
+  api::{
+    API, APIBuilder, interceptor_registry::register_default_interceptors,
+    media_engine::MediaEngine, setting_engine::SettingEngine,
+  },
+  ice::{
+    network_type::NetworkType,
+    udp_mux::{UDPMuxDefault, UDPMuxParams},
+    udp_network::UDPNetwork,
+  },
+  interceptor::registry::Registry,
+};
 
-use crate::library::webrtc::{Room, handle_answer, handle_offer};
+use crate::{
+  config::CONFIG,
+  library::webrtc::{Room, handle_answer, handle_offer},
+};
 
 #[derive(Default)]
 struct Manager {
@@ -80,6 +97,8 @@ impl Manager {
 
 static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
 
+static WEBRTC_API: OnceCell<API> = OnceCell::const_new();
+
 #[tonic::async_trait]
 impl StreamService for StreamServer {
   type ConnectTextStreamStream = ResponseStream<ServerTextMessage>;
@@ -111,10 +130,52 @@ impl StreamService for StreamServer {
       while let Some(msg) = inner_stream.next().await {
         let msg: Result<ClientVoice, _> = msg.and_then(|msg| msg.try_into_domain());
 
+        let api = WEBRTC_API
+          .get_or_init(async || {
+            // Create a_client MediaEngine object to configure the supported codec
+            let mut media_engine = MediaEngine::default();
+
+            media_engine.register_default_codecs().unwrap();
+
+            // Create a_client InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
+            // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
+            // this is enabled by default. If you are manually managing You MUST create a_client InterceptorRegistry
+            // for each PeerConnection.
+            let mut registry = Registry::new();
+
+            registry = register_default_interceptors(registry, &mut media_engine).unwrap();
+
+            let mut api = APIBuilder::new()
+              .with_media_engine(media_engine)
+              .with_interceptor_registry(registry);
+
+            if let Some(public_ip) = CONFIG.server.public_ip.clone()
+              && let Some(udp_port) = CONFIG.server.udp_port.clone()
+            {
+              let mut settings_engine = SettingEngine::default();
+
+              settings_engine.set_network_types(vec![NetworkType::Udp4]);
+              // settings_engine.set_nat_1to1_ips(vec![public_ip], RTCIceCandidateType::Host);
+              settings_engine.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(
+                UDPMuxParams::new(
+                  tokio::net::UdpSocket::bind(format!("0.0.0.0:{udp_port}"))
+                    .await
+                    .unwrap(),
+                ),
+              )));
+
+              api = api.with_setting_engine(settings_engine);
+            }
+
+            let api = api.build();
+            api
+          })
+          .await;
+
         match msg {
           Ok(ClientVoice::Offer(desc)) => {
             if !room.peers.read().await.contains_key(&request_user_id) {
-              match handle_offer(desc, room.clone(), request_user_id, tx.clone()).await {
+              match handle_offer(desc, room.clone(), request_user_id, tx.clone(), api).await {
                 Ok(answer) => {
                   let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
                 }

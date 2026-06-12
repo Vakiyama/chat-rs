@@ -129,6 +129,13 @@ pub fn handle(model: &mut Model, msg: Box<ServerVoice>) -> Task<crate::Message> 
       crate::Message::None
     }),
     ServerVoice::Answer(rtcsession_description) => Task::future(async move {
+      for line in rtcsession_description
+        .sdp
+        .lines()
+        .filter(|l| l.contains("candidate"))
+      {
+        println!("server candidate: {line}");
+      }
       let _ = client
         .set_remote_description(rtcsession_description)
         .await
@@ -326,7 +333,7 @@ pub async fn setup_client() -> anyhow::Result<(
   }));
 
   client.on_peer_connection_state_change(Box::new(move |new_state| {
-    println!("{new_state}");
+    println!("{new_state:?}");
 
     Box::pin(async {})
   }));
