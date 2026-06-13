@@ -10,6 +10,7 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -27,6 +28,43 @@
       perSystem =
         { pkgs, system, ... }:
         let
+          rustToolchain = (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default;
+          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+          # crane's cargo filter strips the .proto files build.rs compiles
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            name = "chat-rs-source";
+            filter = path: type: (pkgs.lib.hasSuffix ".proto" path) || (craneLib.filterCargoSources path type);
+          };
+
+          commonArgs = {
+            inherit src;
+            version = "0.1.0";
+            strictDeps = true;
+            PROTOC = "${pkgs.protobuf}/bin/protoc";
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.protobuf
+            ];
+            buildInputs = [
+              pkgs.openssl
+              pkgs.alsa-lib
+              pkgs.libopus
+            ];
+          };
+
+          cargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs
+            // {
+              pname = "chat-rs-deps";
+              # buildDepsOnly's dummy src omits the .proto files build.rs needs
+              postPatch = ''
+                cp -r ${src}/crates/shared/src/proto crates/shared/src/proto
+              '';
+            }
+          );
+
           guiLibs = with pkgs; [
             libGL
             vulkan-loader
@@ -91,6 +129,7 @@
               # native build deps
               pkgs.pkg-config
               pkgs.openssl
+              pkgs.protobuf
 
               # database
               pkgs.postgresql
@@ -144,7 +183,11 @@
               }
               {
                 name = "JWT_KEY";
-                value = "c2ce2a9e1b3f3c0c02dc11c49c868e154efbede9e46faa47c0bbef01af5a5e00";
+                value = "0000000000000000000000000000000000000000000000000000000000000000";
+              }
+              {
+                name = "PROTOC";
+                eval = "${pkgs.protobuf}/bin/protoc";
               }
             ];
 
@@ -168,23 +211,108 @@
             ];
           };
 
+          packages = {
+            server = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                pname = "chat-rs-server";
+                cargoExtraArgs = "--locked --package chat-server";
+                doCheck = false;
+                meta.mainProgram = "server";
+              }
+            );
 
-          packages.client = pkgs.rustPlatform.buildRustPackage {
-            pname = "chat-rs-client";
-            version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            buildAndTestSubdir = "crates/client";   # or cargoBuildFlags = [ "-p" "chat-client" ]
+            client-linux = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                pname = "chat-rs-client";
+                cargoExtraArgs = "--locked --package chat-client";
+                doCheck = false;
+                meta.mainProgram = "client";
+                nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+                postInstall = ''
+                  wrapProgram $out/bin/client \
+                    --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath guiLibs} \
+                    --set ALSA_CONFIG_PATH "${pkgs.alsa-lib}/share/alsa/alsa.conf:${alsaConf}"
+                '';
+              }
+            );
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            client-windows =
+              let
+                crossPkgs = pkgs.pkgsCross.mingwW64;
+                rustToolchainWin =
+                  (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default.override {
+                    targets = [ "x86_64-pc-windows-gnu" ];
+                  };
+                craneLibWin = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchainWin;
+                opusStatic = crossPkgs.libopus.overrideAttrs (old: {
+                  mesonFlags = (old.mesonFlags or [ ]) ++ [ "-Ddefault_library=static" ];
+                });
+              in
+              craneLibWin.buildPackage {
+                inherit src;
+                version = "0.1.0";
+                strictDeps = true;
+                pname = "chat-rs-client-windows";
+                cargoExtraArgs = "--locked --package chat-client";
+                doCheck = false;
 
-            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
-            buildInputs = [ pkgs.alsa-lib pkgs.libopus ];
+                CARGO_BUILD_TARGET = "x86_64-pc-windows-gnu";
 
-            postFixup = ''
-              wrapProgram $out/bin/client \
-                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath guiLibs} \
-                --set ALSA_CONFIG_PATH "${pkgs.alsa-lib}/share/alsa/alsa.conf:${alsaConf}"
-            '';
+                nativeBuildInputs = [
+                  pkgs.pkg-config
+                  pkgs.protobuf
+                ];
+                depsBuildBuild = [ crossPkgs.stdenv.cc ];
+                buildInputs = [
+                  opusStatic
+                  crossPkgs.windows.pthreads
+                ];
+
+                PROTOC = "${pkgs.protobuf}/bin/protoc";
+                # audiopus_sys would build opus from source (wrong arch) unless pointed at a prebuilt static lib
+                OPUS_STATIC = "1";
+                OPUS_NO_PKG = "1";
+                OPUS_LIB_DIR = "${opusStatic}/lib";
+
+                # rust's windows-gnu target links -l:libpthread.a from winpthreads
+                CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${crossPkgs.windows.pthreads}/lib";
+
+                # ring's cc-rs build looks up the compiler by rust triple, which nix doesn't export
+                "CC_x86_64-pc-windows-gnu" = "${crossPkgs.stdenv.cc}/bin/${crossPkgs.stdenv.cc.targetPrefix}cc";
+                "AR_x86_64-pc-windows-gnu" = "${crossPkgs.stdenv.cc.bintools.bintools}/bin/${crossPkgs.stdenv.cc.targetPrefix}ar";
+              };
           };
+
+          # webrtc tests need routable interfaces for ICE but glorious nix sandbox has only
+          # loopback, so skip them here
+          checks.tests = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              pname = "chat-rs-tests";
+              cargoExtraArgs = "--locked --package chat-server";
+              cargoTestExtraArgs = "-- --skip library::webrtc";
+              nativeCheckInputs = [ pkgs.postgresql ];
+              ENV = "DEV";
+              JWT_KEY = "0000000000000000000000000000000000000000000000000000000000000000";
+              RESEND_API_KEY = "test";
+              DB_CONNECTION = "postgres://postgres@localhost:5432/local";
+              preCheck = ''
+                export PGDATA=$(mktemp -d) PGHOST=$(mktemp -d)
+                initdb --auth=trust --no-locale --encoding=UTF8 -U postgres >/dev/null
+                pg_ctl start -D "$PGDATA" -w -o "-k $PGHOST -h localhost -p 5432" >/dev/null
+                createdb -h localhost -p 5432 -U postgres local
+              '';
+              postCheck = ''
+                pg_ctl stop -D "$PGDATA" -m immediate || true
+              '';
+            }
+          );
         };
 
     };
