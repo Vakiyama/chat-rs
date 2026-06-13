@@ -771,7 +771,7 @@ mod tests {
   use futures_util::FutureExt;
 
   use super::*;
-  use std::{panic::AssertUnwindSafe, time::Duration};
+  use std::panic::AssertUnwindSafe;
 
   fn test_key() -> HS256Key {
     let key_bytes: Bytes = hex::decode(&CONFIG.auth.jwt_key_hex)
@@ -792,11 +792,14 @@ mod tests {
   }
 
   fn make_expired_token(key: &HS256Key, user_id: UserId) -> Token {
-    let claims = Claims::create(Duration::from_secs(1).into())
+    let mut claims = Claims::create(jwt_simple::prelude::Duration::from_secs(0))
       .with_subject(user_id.to_string())
       .with_audience(JWT_REFRESH_TOKEN_AUD.to_string())
       .with_issuer(CONFIG.environment.to_string())
       .with_jwt_id(Uuid::new_v4());
+    claims.expires_at = claims
+      .expires_at
+      .map(|exp| exp - jwt_simple::prelude::Duration::from_hours(1));
 
     key.authenticate(claims).unwrap()
   }
@@ -894,21 +897,20 @@ mod tests {
     .await;
   }
 
-  async fn test_has_expired_token_removes_and_returns_expired(
-    store: &impl RefreshTokenStore,
+  async fn test_has_expired_token_removes_and_returns_expired<S: RefreshTokenStore>(
+    store: &S,
     key: &HS256Key,
   ) {
     with_test_user(|user_id| async move {
       let token = make_expired_token(key, user_id);
+      let tolerant_store = S::new(jwt_simple::prelude::Duration::from_hours(2));
 
-      store.insert(token.clone()).await.unwrap();
+      tolerant_store.insert(token.clone()).await.unwrap();
 
-      store
+      tolerant_store
         .has(&token)
         .await
         .expect("Token should be valid at this point");
-
-      tokio::time::sleep(Duration::from_secs(1)).await;
 
       let result = store.has(&token).await;
       assert!(matches!(result, Err(RefreshTokenStoreError::TokenExpired)));
