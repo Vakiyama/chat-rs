@@ -1,40 +1,31 @@
 # chat-rs
 
-## PRD
+A fast, native desktop app for text, voice, (eventually) video, and (eventually) screen sharing with a small group of friends.
 
-Key problem: Fast and secure text, voice, video and screen sharing based
-communication with a close set of friends.
+## Why chat-rs?
 
-Motivations: Discord is the leader in this space, but has some key issues:
+Discord does this well and serves enormous communities. chat-rs aims at something narrower: a lightweight, native experience for close friend groups. Two ideas drive it:
 
-- Client performance: Electron/web based apps are memory hungry and not
-  necessary for discord to exist.
-- Bloated feature set: Discord is desperately looking for monetization
-  opportunities, bloating the experience.
+- **Light on resources** — a native app rather than an Electron/web wrapper, so it stays easy on memory and CPU.
+- **Focused feature set** — core communication essentials done well.
 
-### Requirements
+## Features
 
-Text based instant messaging, supporting direct messaging and server based
-messaging.
+- Text messaging — direct messages and server/room-based channels
+- Voice chat
+- Cross-platform, with an easy install for non-technical users
 
-Peer to peer direct and room based voice chat.
+## Stack
 
-Cross platform, easy install for non technical users.
+**Client**
+- [iced](https://github.com/iced-rs/iced) — Elm-style cross-platform native GUI
+- [webrtc](https://github.com/webrtc-rs/webrtc) — voice, video, and screen sharing
 
-## Potential Stack
+**Server**
+- [tonic](https://github.com/hyperium/tonic) — gRPC with bidirectional streaming for messaging and call signaling
+- SFU for media — server-side fan-out of RTP tracks to room participants
+- [SeaORM](https://www.sea-ql.org/SeaORM/) + PostgreSQL — persistence
+- JWT-based auth
+- [tokio](https://tokio.rs/) — async runtime
 
-### Frontend
-
-iced for ELM style cross platform native GUI
-
-webrtc-rs for webRTC (voice calls, streaming)
-
-reqwest - http client
-
-### Backend Frontend
-
-axum - http server + tokie-tungstenite for web sockets
-
-libsql - db stuff
-
-tokio - for the async runtime
+The project is organized as a Cargo workspace, with separate crates for the protobuf definitions, domain types, and the conversions between them.
