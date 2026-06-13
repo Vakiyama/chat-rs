@@ -1,23 +1,22 @@
-use crate::config::CONFIG;
 use chat_shared::{
   convert::{IntoProto, stream::proto::ServerVoiceMessage},
   domain::stream::ServerVoice,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+  collections::HashMap,
+  sync::{
+    Arc,
+    atomic::{
+      AtomicBool,
+      Ordering::{self, SeqCst},
+    },
+  },
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use webrtc::{
-  api::{
-    API, APIBuilder, interceptor_registry::register_default_interceptors,
-    media_engine::MediaEngine, setting_engine::SettingEngine,
-  },
-  ice::{
-    network_type::NetworkType,
-    udp_mux::{UDPMuxDefault, UDPMuxParams},
-    udp_network::UDPNetwork,
-  },
-  ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer},
-  interceptor::registry::Registry,
+  api::API,
+  ice_transport::ice_server::RTCIceServer,
   peer_connection::{
     RTCPeerConnection, configuration::RTCConfiguration,
     sdp::session_description::RTCSessionDescription,
@@ -41,9 +40,8 @@ pub struct Participant {
   // defer negotiating when flag is already active:
 
   // renegotiate becomes: if negotiating is set, set needs_renegotiation and return (the wish is queued, not lost). Otherwise set negotiating, send the offer. In handle_answer, after applying: clear negotiating, and if needs_renegotiation was set, clear it and renegotiate once more — the fresh offer naturally includes all track changes accumulated since, so N queued requests collapse into one round. This is the standard SFU pattern. Two joins in the same instant is rare enough that I'd do fix 1 today, write Race 2 down in a comment at the renegotiate call site, and implement the flag pair when you wire up leave handling (which adds remove_track → more renegotiation triggers → the window widens).
-
-  //  negotiating: AtomicBool,   // an offer is in flight
-  //  needs_renegotiation: AtomicBool,
+  negotiating: AtomicBool, // an offer is in flight
+  needs_renegotiation: AtomicBool,
 }
 
 #[derive(Default)]
@@ -84,6 +82,8 @@ pub async fn handle_offer(
     relay: RwLock::new(None),
     signal_tx: signal_tx.clone(),
     outbound_senders: Default::default(),
+    negotiating: AtomicBool::new(true),
+    needs_renegotiation: AtomicBool::new(false),
   });
 
   let track_room = room.clone();
@@ -177,6 +177,8 @@ pub async fn handle_offer(
     .send(Ok(ServerVoice::Answer(answer).into_proto()))
     .await?;
 
+  participant.negotiating.swap(false, Ordering::SeqCst);
+
   // ── deliver existing publishers via one server-initiated renegotiation ──
   let existing: Vec<(PeerId, Arc<Participant>, Arc<TrackLocalStaticRTP>)> = {
     let peers = room.peers.read().await;
@@ -226,6 +228,11 @@ pub async fn handle_offer(
 }
 
 async fn renegotiate(peer: &Participant) -> anyhow::Result<()> {
+  if peer.negotiating.swap(true, SeqCst) {
+    peer.needs_renegotiation.store(true, SeqCst);
+    return Ok(());
+  }
+
   let offer = peer.pc.create_offer(None).await?;
   peer.pc.set_local_description(offer).await?;
   let local = peer
@@ -289,8 +296,13 @@ pub async fn handle_answer(
     .cloned()
     .ok_or_else(|| anyhow::anyhow!("received rtc answer for unknown peer"))?;
 
-  peer.pc.set_remote_description(answer).await?;
+  let result = peer.pc.set_remote_description(answer).await;
+  peer.negotiating.store(false, SeqCst); // clear even on failure, or the PC wedges forever
+  result?;
 
+  if peer.needs_renegotiation.swap(false, SeqCst) {
+    renegotiate(&peer).await?;
+  }
   Ok(())
 }
 
