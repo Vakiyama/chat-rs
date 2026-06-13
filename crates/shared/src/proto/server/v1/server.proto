@@ -1,0 +1,30 @@
+syntax = "proto3";
+package server.v1;
+
+import "google/protobuf/empty.proto";
+
+service ServerService {
+  rpc Servers   (google.protobuf.Empty)   returns (ServerResponse);
+}
+
+message Server {
+  string id = 1;
+  string name = 2;
+  repeated Channel channels = 3;
+}
+
+message Channel {
+ string id = 1;
+ string name = 2;
+ ChannelType type = 3;
+}
+
+enum ChannelType {
+  METHOD_TYPE_UNSPECIFIED = 0; 
+  TEXT = 1;
+  VOICE = 2;
+}
+
+message ServersResponse {
+  repeated Server servers = 1; 
+}

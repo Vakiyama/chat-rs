@@ -19,12 +19,15 @@ mod api;
 mod config;
 mod entities;
 mod library;
+mod seed;
 
 #[tokio::main]
 async fn main() {
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::from_default_env())
     .init();
+
+  seed::seed().await;
 
   let auth_service: AuthServer<InMemoryCodeStore, DbTokenStore> = AuthServer::default();
 

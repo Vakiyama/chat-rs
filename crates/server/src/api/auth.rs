@@ -1,4 +1,5 @@
 use crate::config::CONFIG;
+use crate::seed::seed;
 use chat_shared::convert::auth::proto::{RegisterRequest, RegisterResponse};
 use chat_shared::domain::auth::RegisterReturn;
 use chat_shared::{
@@ -640,7 +641,7 @@ impl AuthService for AuthServer<InMemoryCodeStore, DbTokenStore> {
           id: user_id,
           username,
           email,
-          status: entities::user::Status::Online,
+          status: entities::user::Status::Offline,
         }
         .into_active_model();
 
@@ -652,6 +653,8 @@ impl AuthService for AuthServer<InMemoryCodeStore, DbTokenStore> {
             eprintln!("Error creating user: {e}");
             tonic::Status::internal("Error while creating user.")
           })?;
+
+        seed().await;
       };
 
       self

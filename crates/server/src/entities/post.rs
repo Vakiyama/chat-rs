@@ -9,6 +9,9 @@ pub struct Model {
   pub id: Uuid,
   pub author_name: String,
   pub content: String,
+  pub channel_id: Option<Uuid>,
+  #[sea_orm(belongs_to, from = "channel_id", to = "id")]
+  pub channel: HasOne<super::channel::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

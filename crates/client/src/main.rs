@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chat_shared::convert::TryIntoDomain;
 use chat_shared::domain::stream::{ClientVoice, ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
+use iced::Theme::CatppuccinFrappe;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
 use webrtc::peer_connection::RTCPeerConnection;
@@ -27,6 +28,7 @@ const SPACE_GRID: u16 = 8;
 
 fn main() -> iced::Result {
   iced::application(new, update, view)
+    .theme(CatppuccinFrappe)
     .subscription(subscription)
     .run()
 }
