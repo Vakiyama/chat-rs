@@ -4,7 +4,7 @@ use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig};
+use cpal::{Device, SampleRate, SupportedStreamConfig};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::task::{Never, Sipper, sipper};
@@ -69,7 +69,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
           response.into_inner().fuse()
         }
-        Err(e) => {
+        Err(_) => {
           tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
           continue;
         }
@@ -293,7 +293,6 @@ pub async fn setup_client() -> anyhow::Result<(
     while sender.read(&mut buf).await.is_ok() {}
   });
 
-  let mixer = Mixer::default();
   let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
   let (rnd_tx, rnd_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
@@ -316,6 +315,8 @@ pub async fn setup_client() -> anyhow::Result<(
   )?;
   let in_rate = in_cfg.sample_rate();
   let out_rate = out_cfg.sample_rate();
+
+  let mixer = Mixer::new(out_rate); // jitter buffer sized in device-rate samples
 
   let cpal_stream_input = spawn_mic(cap_tx, in_cfg, in_dev)?; // capture only
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
