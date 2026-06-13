@@ -33,3 +33,5 @@ jobs:
         with:
           name: chat-rs-windows
           path: target/release/client.exe
+        env: 
+          SERVER_URL: ${{ secrets.SERVER_URL }}
