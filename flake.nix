@@ -46,6 +46,17 @@
             libopus
           ];
 
+          alsaConf = pkgs.writeText "asound.conf" ''
+            pcm_type.pipewire {
+              lib "${pkgs.pipewire}/lib/alsa-lib/libasound_module_pcm_pipewire.so"
+            }
+            ctl_type.pipewire {
+              lib "${pkgs.pipewire}/lib/alsa-lib/libasound_module_ctl_pipewire.so"
+            }
+            pcm.!default { type pipewire }
+            ctl.!default { type pipewire }
+          '';
+
           pgStart = ''
             if ! pg_ctl status -D "$PGDATA" >/dev/null 2>&1; then
               (
@@ -156,24 +167,26 @@
               }
             ];
           };
+
+
+          packages.client = pkgs.rustPlatform.buildRustPackage {
+            pname = "chat-rs-client";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            buildAndTestSubdir = "crates/client";   # or cargoBuildFlags = [ "-p" "chat-client" ]
+
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+            buildInputs = [ pkgs.alsa-lib pkgs.libopus ];
+
+            postFixup = ''
+              wrapProgram $out/bin/client \
+                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath guiLibs} \
+                --set ALSA_CONFIG_PATH "${pkgs.alsa-lib}/share/alsa/alsa.conf:${alsaConf}"
+            '';
+          };
         };
 
-              # packages.client = pkgs.rustPlatform.buildRustPackage {
-              #   pname = "chat-rs-client";
-              #   version = "0.1.0";
-              #   src = ./.;
-              #   cargoLock.lockFile = ./Cargo.lock;
-              #   buildAndTestSubdir = "crates/client";   # or cargoBuildFlags = [ "-p" "chat-client" ]
-
-              #   nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
-              #   buildInputs = [ pkgs.alsa-lib pkgs.libopus ];
-
-              #   postFixup = ''
-              #     wrapProgram $out/bin/client \
-              #       --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath guiLibs} \
-              #       --set ALSA_CONFIG_PATH "${pkgs.alsa-lib}/share/alsa/alsa.conf:${alsaConf}"
-              #   '';
-              # };
     };
 
   nixConfig = {
