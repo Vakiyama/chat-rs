@@ -180,9 +180,9 @@ fn pick_config(
   // prefer an f32 range that can do 48k
   if let Some(r) = f32_ranges
     .iter()
-    .find(|r| r.min_sample_rate() <= 48_000 && r.max_sample_rate() >= 48_000)
+    .find(|r| r.min_sample_rate() <= TARGET_RATE && r.max_sample_rate() >= TARGET_RATE)
   {
-    return Ok(r.clone().with_sample_rate(48_000));
+    return Ok(r.clone().with_sample_rate(TARGET_RATE));
   }
   // else the device's own default, if it's f32
   if default.sample_format() == cpal::SampleFormat::F32 {
@@ -323,7 +323,7 @@ pub async fn setup_client() -> anyhow::Result<(
   spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone(), in_rate, out_rate)?; // APM + Opus, owns the middle
 
   client.on_track(Box::new(move |track, _, _| {
-    let mut out_rs = Resampler::new(48_000, out_rate).expect("Failed to create resampler"); // one per peer; stateful, not shared
+    let mut out_rs = Resampler::new(TARGET_RATE, out_rate).expect("Failed to create resampler"); // one per peer; stateful, not shared
     let mixer = mixer.clone();
     Box::pin(async move {
       println!("on track for client fired");
@@ -359,7 +359,10 @@ pub async fn setup_client() -> anyhow::Result<(
   let mut gather = client.gathering_complete_promise().await;
   client.set_local_description(offer).await?;
   let _ = gather.recv().await;
-  let offer = client.local_description().await.unwrap();
+  let offer = client
+    .local_description()
+    .await
+    .ok_or(anyhow::anyhow!("Client has no local description"))?;
 
   // connection.send(ClientVoice::Offer(offer));
 
@@ -373,7 +376,7 @@ fn spawn_audio_processor(
   in_rate: SampleRate,
   out_rate: SampleRate,
 ) -> anyhow::Result<()> {
-  let mut cap_rs = Resampler::new(in_rate, 48_000)?;
+  let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
   tokio::spawn(async move {
     let config = Config {
@@ -384,7 +387,7 @@ fn spawn_audio_processor(
     };
     let mut apm = AudioProcessing::builder()
       .config(config)
-      .capture_config(sonora::StreamConfig::new(48_000, 1))
+      .capture_config(sonora::StreamConfig::new(TARGET_RATE, 1))
       .render_config(sonora::StreamConfig::new(out_rate, 1))
       .build();
 
@@ -429,10 +432,36 @@ fn spawn_audio_processor(
 
           while cap_buf.len() >= 480 {
             let frame: Vec<f32> = cap_buf.drain(..480).collect();
-            if let Err(e) = apm.process_capture_f32(&[&frame], &mut [&mut clean[..]]) {
-              eprintln!("apm capture error: {e:?}");
-              continue;
+
+            // to prevent internal err, we catch unwind and rebuild the apm:
+            // thread 'tokio-rt-worker' (2506228) panicked at /home/user/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sonora-aec3-0.1.0/src/adaptive_fir_filter.rs:136:22:
+            // slice index starts at 13 but ends at 12
+            // note: run with RUST_BACKTRACE=1 environment variable to display a backtrace
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              apm.process_capture_f32(&[&frame], &mut [&mut clean[..]])
+            }));
+
+            match result {
+                Ok(Ok(())) => pcm_20ms.extend_from_slice(&clean),
+                Ok(Err(e)) => { eprintln!("apm capture err: {e:?}"); pcm_20ms.extend_from_slice(&frame); }
+                Err(_) => {
+                    eprintln!("AEC3 PANICKED — rebuilding APM, passing frame raw");
+                    let config = Config {
+                      echo_canceller: Some(EchoCanceller::default()),
+                      noise_suppression: Some(NoiseSuppression::default()),
+                      gain_controller2: Some(GainController2::default()),
+                      ..Default::default()
+                    };
+                    apm = AudioProcessing::builder()
+                      .config(config)
+                      .capture_config(sonora::StreamConfig::new(TARGET_RATE, 1))
+                      .render_config(sonora::StreamConfig::new(out_rate, 1))
+                      .build();
+
+                    pcm_20ms.extend_from_slice(&frame);   // raw > silence
+                }
             }
+
             // let rms = (clean.iter().map(|s| s * s).sum::<f32>() / clean.len() as f32).sqrt();
 
             // if rms > GATE_THRESHOLD {
@@ -443,7 +472,6 @@ fn spawn_audio_processor(
             //     clean.fill(0.0);                // gate closed
             // }
 
-            pcm_20ms.extend_from_slice(&clean);
             if pcm_20ms.len() >= 960 {
               match encoder.encode_float(&pcm_20ms[..960], &mut out) {
                 Ok(n) => {
