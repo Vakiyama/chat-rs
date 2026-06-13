@@ -4,6 +4,7 @@ use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, SampleRate};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::futures::channel::mpsc::UnboundedSender;
@@ -167,15 +168,33 @@ pub fn start() -> Task<crate::Message> {
   })
 }
 
+const TARGET_RATE: u32 = 48_000;
+
+fn pick_config(
+  mut ranges: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+) -> anyhow::Result<cpal::SupportedStreamConfig> {
+  ranges
+    .find(|r| {
+      r.sample_format() == SampleFormat::F32
+        && r.min_sample_rate() <= TARGET_RATE
+        && r.max_sample_rate() >= TARGET_RATE
+    })
+    .map(|r| r.with_sample_rate(TARGET_RATE))
+    .ok_or_else(|| anyhow::anyhow!("no f32 config supporting {TARGET_RATE}Hz"))
+}
+
 fn spawn_mic(tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>) -> anyhow::Result<cpal::Stream> {
   let host = cpal::default_host();
   let device = host
     .default_input_device()
     .ok_or_else(|| anyhow::anyhow!("no input device"))?;
-  let config = device.default_input_config()?;
+
+  let config = pick_config(device.supported_input_configs()?)?;
+
   let sample_rate: u32 = config.sample_rate();
   let sample_format = config.sample_format();
 
+  println!("sample rate: {}", sample_rate);
   assert!(sample_rate == 48000);
   assert!(sample_format == cpal::SampleFormat::F32);
   let channels = config.channels();
@@ -209,7 +228,7 @@ fn spawn_speaker(
   let device = host
     .default_output_device()
     .ok_or_else(|| anyhow::anyhow!("no output device"))?;
-  let config = device.default_output_config()?;
+  let config = pick_config(device.supported_output_configs()?)?;
   let sample_rate: u32 = config.sample_rate();
   let sample_format = config.sample_format();
 
