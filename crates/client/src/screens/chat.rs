@@ -122,7 +122,6 @@ pub fn update(
   user: &User,
   stream: Stream<chat_stream::ChatConnection>,
 ) -> Task<Message> {
-  println!("{message:#?}");
   match message {
     Message::UserChangedChatInput(new) => {
       model.input = new;
