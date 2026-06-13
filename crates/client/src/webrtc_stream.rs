@@ -426,7 +426,6 @@ fn spawn_audio_processor(
           cap_buf.extend_from_slice(&at48k);     // now genuinely 48k
 
 
-          cap_buf.extend_from_slice(&chunk);
           while cap_buf.len() >= 480 {
             let frame: Vec<f32> = cap_buf.drain(..480).collect();
             if let Err(e) = apm.process_capture_f32(&[&frame], &mut [&mut clean[..]]) {
