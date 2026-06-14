@@ -18,10 +18,7 @@ impl PostsService for PostsServer {
     &self,
     request: tonic::Request<chat_shared::convert::post::proto::PostsRequest>,
   ) -> Result<tonic::Response<PostsResponse>, tonic::Status> {
-    let _request_user_id = request
-      .extensions()
-      .get::<Uuid>()
-      .ok_or_else(|| tonic::Status::unauthenticated("Unauthenticated"))?;
+    let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
 
     let PostsRequest {
       text_channel_id,
@@ -30,6 +27,18 @@ impl PostsService for PostsServer {
     } = request.into_inner().try_into_domain()?;
 
     let db = database::get().await;
+
+    let member = entities::server::Entity::load()
+      .with(entities::user::Entity)
+      .filter(entities::server::Entity::COLUMN.id.eq(request_user_id))
+      .one(db)
+      .await
+      .unwrap();
+
+    if member.is_none() {
+      eprintln!("Requesting user is not a member of target server.");
+      return Err(tonic::Status::unauthenticated("Unauthenticated"));
+    };
 
     let mut query = entities::post::Entity::find().has_related(
       entities::channel::Entity,
