@@ -2,13 +2,20 @@ syntax = "proto3";
 package posts.v1;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
 
 service PostsService {
-  rpc Posts   (PostsRequest)   returns (PostsResponse);
+  rpc GetPosts   (GetPostsRequest)   returns (GetPostsResponse);
+  rpc CreatePost (CreatePostRequest) returns (google.protobuf.Empty);
 }
 
-message PostsRequest {
-  string text_channel_id = 1;
+message CreatePostRequest {
+  string content = 1;
+  string channel_id = 2;
+}
+
+message GetPostsRequest {
+  string channel_id = 1;
   uint64 limit = 2;
   optional google.protobuf.Timestamp starting_before_timestamp = 3;
 }
@@ -20,7 +27,7 @@ message Post {
   google.protobuf.Timestamp created_at = 4;
 }
 
-message PostsResponse {
+message GetPostsResponse {
   repeated Post posts = 1;
   optional google.protobuf.Timestamp next_timestamp = 2;
 }

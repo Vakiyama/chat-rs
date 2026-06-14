@@ -7,21 +7,31 @@ use crate::convert::TryFromProto;
 use crate::domain::post::*;
 use chrono::DateTime;
 use prost_types::Timestamp;
+use proto::CreatePostRequest as CreatePostRequestProto;
+use proto::GetPostsRequest as GetPostsRequestProto;
+use proto::GetPostsResponse as GetPostsResponseProto;
 use proto::Post as PostProto;
-use proto::PostsRequest as PostsRequestProto;
-use proto::PostsResponse as PostsResponseProto;
 use tonic::Status;
 use uuid::Uuid;
 
-impl IntoProto<PostsResponseProto> for PostsResponse {
-  fn into_proto(self) -> PostsResponseProto {
+impl IntoProto<CreatePostRequestProto> for CreatePostCommand {
+  fn into_proto(self) -> CreatePostRequestProto {
+    CreatePostRequestProto {
+      content: self.content,
+      channel_id: self.channel_id.into(),
+    }
+  }
+}
+
+impl IntoProto<GetPostsResponseProto> for GetPostsResponse {
+  fn into_proto(self) -> GetPostsResponseProto {
     let next_timestamp = self.next_timestamp.map(|next_timestamp| {
       let seconds = next_timestamp.timestamp();
       let nanos = next_timestamp.timestamp_subsec_nanos() as i32;
       Timestamp { seconds, nanos }
     });
 
-    PostsResponseProto {
+    GetPostsResponseProto {
       posts: self.posts.into_iter().map(|p| p.into_proto()).collect(),
       next_timestamp,
     }
@@ -43,29 +53,46 @@ impl IntoProto<PostProto> for Post {
   }
 }
 
-impl TryFromProto<PostsRequestProto> for PostsRequest {
+impl TryFromProto<CreatePostRequestProto> for CreatePostCommand {
   type Error = Status;
 
-  fn try_from_proto(proto: PostsRequestProto) -> Result<Self, Self::Error> {
-    let text_channel_id = Uuid::parse_str(&proto.text_channel_id)
+  fn try_from_proto(proto: CreatePostRequestProto) -> Result<Self, Self::Error> {
+    if proto.content.trim().is_empty() {
+      return Err(tonic::Status::invalid_argument("Content cannot be empty."));
+    };
+
+    Ok(CreatePostCommand {
+      content: proto.content.trim().into(),
+      channel_id: proto.channel_id.try_into().map_err(|err| {
+        tonic::Status::invalid_argument(format!("Could not parse channel id: {err}"))
+      })?,
+    })
+  }
+}
+
+impl TryFromProto<GetPostsRequestProto> for GetPostsRequest {
+  type Error = Status;
+
+  fn try_from_proto(proto: GetPostsRequestProto) -> Result<Self, Self::Error> {
+    let channel_id = Uuid::parse_str(&proto.channel_id)
       .map_err(|_| Status::invalid_argument("invalid text_channel_id"))?;
 
     let starting_before_timestamp = proto.starting_before_timestamp.and_then(|timestamp| {
       DateTime::from_timestamp(timestamp.seconds, timestamp.nanos.try_into().unwrap_or(0))
     });
 
-    Ok(PostsRequest {
-      text_channel_id,
+    Ok(GetPostsRequest {
+      channel_id,
       limit: proto.limit,
       starting_before_timestamp,
     })
   }
 }
 
-impl TryFromProto<PostsResponseProto> for PostsResponse {
+impl TryFromProto<GetPostsResponseProto> for GetPostsResponse {
   type Error = Status;
 
-  fn try_from_proto(proto: PostsResponseProto) -> Result<Self, Self::Error> {
+  fn try_from_proto(proto: GetPostsResponseProto) -> Result<Self, Self::Error> {
     let mut posts = Vec::new();
     for post in proto.posts {
       posts.push(Post::try_from_proto(post)?);
@@ -75,7 +102,7 @@ impl TryFromProto<PostsResponseProto> for PostsResponse {
       DateTime::from_timestamp(timestamp.seconds, timestamp.nanos.try_into().unwrap_or(0))
     });
 
-    Ok(PostsResponse {
+    Ok(GetPostsResponse {
       posts,
       next_timestamp,
     })

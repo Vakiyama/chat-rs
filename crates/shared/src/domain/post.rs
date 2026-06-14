@@ -10,14 +10,20 @@ pub struct Post {
 }
 
 #[derive(Clone, Debug)]
-pub struct PostsResponse {
+pub struct GetPostsResponse {
   pub posts: Vec<Post>,
   pub next_timestamp: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PostsRequest {
-  pub text_channel_id: Uuid,
+pub struct GetPostsRequest {
+  pub channel_id: Uuid,
   pub limit: u64,
   pub starting_before_timestamp: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreatePostCommand {
+  pub content: String,
+  pub channel_id: Uuid,
 }

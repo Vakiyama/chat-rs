@@ -8,7 +8,6 @@ use uuid::Uuid;
 pub struct Model {
   #[sea_orm(primary_key)]
   pub id: Uuid,
-  pub author_name: String,
   pub content: String,
   pub channel_id: Option<Uuid>,
   #[sea_orm(belongs_to, from = "channel_id", to = "id")]
