@@ -4,7 +4,7 @@ package server.v1;
 import "google/protobuf/empty.proto";
 
 service ServerService {
-  rpc Servers   (google.protobuf.Empty)   returns (ServerResponse);
+  rpc Servers   (google.protobuf.Empty)   returns (ServersResponse);
 }
 
 message Server {

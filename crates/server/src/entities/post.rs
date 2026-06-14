@@ -1,3 +1,4 @@
+use chrono::Utc;
 use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 
@@ -12,6 +13,7 @@ pub struct Model {
   pub channel_id: Option<Uuid>,
   #[sea_orm(belongs_to, from = "channel_id", to = "id")]
   pub channel: HasOne<super::channel::Entity>,
+  pub created_at: chrono::DateTime<Utc>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

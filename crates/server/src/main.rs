@@ -1,5 +1,7 @@
 use crate::config::CONFIG;
 use chat_shared::convert::auth::proto::auth_service_server::AuthServiceServer;
+use chat_shared::convert::post::proto::posts_service_server::PostsServiceServer;
+use chat_shared::convert::server::proto::server_service_server::ServerServiceServer;
 use chat_shared::convert::stream::proto::stream_service_server::StreamServiceServer;
 use chat_shared::convert::user::proto::user_service_server::UserServiceServer;
 use tokio_rate_limit::{RateLimiter, RateLimiterConfig};
@@ -12,6 +14,8 @@ use crate::api::auth::{
   AuthServer, ClientRateLimitInterceptor, DbTokenStore, InMemoryCodeStore, JWTAuthorizedInterceptor,
 };
 
+use crate::api::post::PostsServer;
+use crate::api::server::ServerServer;
 use crate::api::stream::StreamServer;
 use crate::api::user::UserServer;
 
@@ -54,9 +58,21 @@ async fn main() {
 
   let private_user_service = ServiceBuilder::new()
     .layer(tonic_middleware::RequestInterceptorLayer::new(
-      jwt_interceptor,
+      jwt_interceptor.clone(),
     ))
     .service(UserServiceServer::new(UserServer));
+
+  let private_server_service = ServiceBuilder::new()
+    .layer(tonic_middleware::RequestInterceptorLayer::new(
+      jwt_interceptor.clone(),
+    ))
+    .service(ServerServiceServer::new(ServerServer));
+
+  let private_posts_service = ServiceBuilder::new()
+    .layer(tonic_middleware::RequestInterceptorLayer::new(
+      jwt_interceptor,
+    ))
+    .service(PostsServiceServer::new(PostsServer));
 
   let grpc = Server::builder()
     .layer(
@@ -69,6 +85,8 @@ async fn main() {
     )
     .add_service(private_stream_service)
     .add_service(private_user_service)
+    .add_service(private_server_service)
+    .add_service(private_posts_service)
     .add_service(auth_service)
     .serve(CONFIG.server.grpc_address.parse().unwrap());
 

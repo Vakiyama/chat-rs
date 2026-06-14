@@ -1,6 +1,8 @@
 use crate::config::CONFIG;
 use chat_shared::convert::IntoProto;
 use chat_shared::convert::auth::proto::auth_service_client::AuthServiceClient;
+use chat_shared::convert::post::proto::posts_service_client::PostsServiceClient;
+use chat_shared::convert::server::proto::server_service_client::ServerServiceClient;
 use chat_shared::convert::stream::proto::stream_service_client::StreamServiceClient;
 use chat_shared::convert::user::proto::user_service_client::UserServiceClient;
 use chat_shared::domain::auth::RefreshCommand;
@@ -188,6 +190,8 @@ pub struct GrpcClient {
   pub auth: AuthServiceClient<Channel>,
   pub stream: StreamServiceClient<AuthService>,
   pub user: UserServiceClient<AuthService>,
+  pub server: ServerServiceClient<AuthService>,
+  pub posts: PostsServiceClient<AuthService>,
   tokens: Arc<Mutex<TokenStore>>,
 }
 
@@ -280,13 +284,17 @@ pub async fn get() -> GrpcClient {
       let auth_channel = AuthService::new(channel.clone(), tokens.clone(), true);
 
       let stream = StreamServiceClient::new(auth_channel_no_replay);
-      let user = UserServiceClient::new(auth_channel);
+      let user = UserServiceClient::new(auth_channel.clone());
+      let server = ServerServiceClient::new(auth_channel.clone());
+      let posts = PostsServiceClient::new(auth_channel);
 
       let client = GrpcClient {
         auth: AuthServiceClient::new(channel.clone()),
         stream,
         tokens,
         user,
+        server,
+        posts,
       };
 
       let _ = client.load_from_credential_store().await;

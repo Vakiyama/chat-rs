@@ -182,7 +182,7 @@ fn pick_config(
     .iter()
     .find(|r| r.min_sample_rate() <= TARGET_RATE && r.max_sample_rate() >= TARGET_RATE)
   {
-    return Ok(r.clone().with_sample_rate(TARGET_RATE));
+    return Ok((*r).with_sample_rate(TARGET_RATE));
   }
   // else the device's own default, if it's f32
   if default.sample_format() == cpal::SampleFormat::F32 {

@@ -23,6 +23,7 @@ dotenvy.workspace = true
 tower.workspace = true
 http.workspace = true
 email_address.workspace = true
+chrono.workspace = true
 
 # unambiguously client
 iced = { version = "0.14.0", features = ["tokio", "sipper", "image"] }
