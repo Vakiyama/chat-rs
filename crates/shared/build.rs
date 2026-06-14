@@ -1,7 +1,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let protoc_path = protoc_bin_vendored::protoc_bin_path().unwrap();
-  unsafe {
-    std::env::set_var("PROTOC", protoc_path);
+  if std::env::var_os("PROTOC").is_none() {
+    let protoc_path = protoc_bin_vendored::protoc_bin_path().unwrap();
+    unsafe {
+      std::env::set_var("PROTOC", protoc_path);
+    }
   }
 
   tonic_prost_build::configure()

@@ -37,16 +37,23 @@ resource "hcloud_firewall" "chat" {
   }
 }
 
+resource "hcloud_primary_ip" "chat_v4" {
+  name          = "chat-rs-v4"
+  type          = "ipv4"
+  location      = "hil"
+  auto_delete   = false        # survives `tofu destroy` of the server
+}
+
 resource "hcloud_server" "chat" {
   name         = "chat-rs"
   server_type  = "cpx11"
-  location     = "hil" # Hillsboro, Oregon
+  location     = "hil"
   image        = "debian-12"
   ssh_keys     = [hcloud_ssh_key.me.id]
   firewall_ids = [hcloud_firewall.chat.id]
 
   public_net {
-    ipv4_enabled = true
+    ipv4         = hcloud_primary_ip.chat_v4.id
     ipv6_enabled = true
   }
 
@@ -60,5 +67,5 @@ resource "hcloud_server" "chat" {
 }
 
 output "public_ip" {
-  value = hcloud_server.chat.ipv4_address
+  value = hcloud_primary_ip.chat_v4.ip_address
 }
