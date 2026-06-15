@@ -1,4 +1,6 @@
+use chrono::DateTime;
 use jwt_simple::reexports::serde_json;
+use prost_types::Timestamp;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub mod proto {
@@ -6,8 +8,8 @@ pub mod proto {
 }
 
 use crate::{
-  convert::{IntoProto, TryFromProto, TryIntoDomain},
-  domain::stream::*,
+  convert::{self, IntoProto, TryFromProto, TryIntoDomain},
+  domain::{post::Post, stream::*},
 };
 use proto::*;
 use tonic::Status;
@@ -69,10 +71,15 @@ impl IntoProto<DisplayUser> for User {
 impl IntoProto<ClientTextMessage> for ClientText {
   fn into_proto(self) -> ClientTextMessage {
     match self {
-      ClientText::ChatMessage { from, text } => ClientTextMessage {
-        payload: Some(client_text_message::Payload::Chat(ChatMessage {
-          from: Some(from.into_proto()),
-          text,
+      ClientText::CreatePostRequest {
+        id,
+        content,
+        channel_id,
+      } => ClientTextMessage {
+        payload: Some(client_text_message::Payload::Post(CreatePostRequest {
+          id: id.into(),
+          content,
+          channel_id: channel_id.to_string(),
         })),
       },
     }
@@ -82,12 +89,23 @@ impl IntoProto<ClientTextMessage> for ClientText {
 impl IntoProto<ServerTextMessage> for ServerText {
   fn into_proto(self) -> ServerTextMessage {
     match self {
-      ServerText::ChatMessage { from, text } => ServerTextMessage {
-        payload: Some(server_text_message::Payload::Chat(ChatMessage {
-          from: Some(from.into_proto()),
-          text,
-        })),
-      },
+      ServerText::Post(post) => {
+        let seconds = post.created_at.timestamp();
+        let nanos = post.created_at.timestamp_subsec_nanos() as i32;
+        let created_at = Timestamp { seconds, nanos };
+
+        ServerTextMessage {
+          payload: Some(server_text_message::Payload::Chat(
+            convert::stream::proto::Post {
+              id: post.id.into(),
+              server_id: post.server_id.into(),
+              author_name: post.author_name,
+              content: post.content,
+              created_at: Some(created_at),
+            },
+          )),
+        }
+      }
       ServerText::JoinedRoom { from } => ServerTextMessage {
         payload: Some(server_text_message::Payload::JoinedRoom(JoinedRoom {
           from: Some(from.into_proto()),
@@ -179,14 +197,32 @@ impl TryFromProto<ServerTextMessage> for ServerText {
           })
         }
         server_text_message::Payload::Chat(chat_message) => {
-          let Some(user) = chat_message.from else {
-            return Err(tonic::Status::invalid_argument("Missing user"));
-          };
+          // let Some(user) = chat_message.from else {
+          //   return Err(tonic::Status::invalid_argument("Missing user"));
+          // };
 
-          Ok(ServerText::ChatMessage {
-            from: user.try_into_domain()?,
-            text: chat_message.text,
-          })
+          let created_at = chat_message
+            .created_at
+            .and_then(|timestamp| {
+              DateTime::from_timestamp(timestamp.seconds, timestamp.nanos.try_into().unwrap_or(0))
+            })
+            .ok_or(tonic::Status::invalid_argument(
+              "created_at is invalid or missing.",
+            ))?;
+
+          Ok(ServerText::Post(Post {
+            id: chat_message
+              .id
+              .try_into()
+              .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))?,
+            server_id: chat_message
+              .server_id
+              .try_into()
+              .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))?,
+            author_name: chat_message.author_name,
+            content: chat_message.content,
+            created_at,
+          }))
         }
       }
     } else {
@@ -201,21 +237,22 @@ impl TryFromProto<ClientTextMessage> for ClientText {
   fn try_from_proto(proto: ClientTextMessage) -> Result<Self, Self::Error> {
     if let Some(payload) = proto.payload {
       match payload {
-        client_text_message::Payload::Chat(chat_message) => {
-          let Some(user) = chat_message.from else {
-            return Err(tonic::Status::invalid_argument("Missing user"));
-          };
-
-          Ok(ClientText::ChatMessage {
-            from: user.try_into_domain()?,
-            text: chat_message.text,
-          })
-        }
+        client_text_message::Payload::Post(chat_message) => Ok(ClientText::CreatePostRequest {
+          id: parse_id(chat_message.id)?,
+          content: chat_message.content,
+          channel_id: parse_id(chat_message.channel_id)?,
+        }),
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
     }
   }
+}
+
+pub fn parse_id(id_str: String) -> Result<Uuid, tonic::Status> {
+  id_str
+    .try_into()
+    .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))
 }
 
 impl TryFromProto<DisplayUser> for User {

@@ -7,21 +7,11 @@ use crate::convert::TryFromProto;
 use crate::domain::post::*;
 use chrono::DateTime;
 use prost_types::Timestamp;
-use proto::CreatePostRequest as CreatePostRequestProto;
 use proto::GetPostsRequest as GetPostsRequestProto;
 use proto::GetPostsResponse as GetPostsResponseProto;
 use proto::Post as PostProto;
 use tonic::Status;
 use uuid::Uuid;
-
-impl IntoProto<CreatePostRequestProto> for CreatePostCommand {
-  fn into_proto(self) -> CreatePostRequestProto {
-    CreatePostRequestProto {
-      content: self.content,
-      channel_id: self.channel_id.into(),
-    }
-  }
-}
 
 impl IntoProto<GetPostsResponseProto> for GetPostsResponse {
   fn into_proto(self) -> GetPostsResponseProto {
@@ -47,26 +37,10 @@ impl IntoProto<PostProto> for Post {
     PostProto {
       id: self.id.to_string(),
       author_name: self.author_name,
+      server_id: self.server_id.into(),
       content: self.content,
       created_at: Some(created_at),
     }
-  }
-}
-
-impl TryFromProto<CreatePostRequestProto> for CreatePostCommand {
-  type Error = Status;
-
-  fn try_from_proto(proto: CreatePostRequestProto) -> Result<Self, Self::Error> {
-    if proto.content.trim().is_empty() {
-      return Err(tonic::Status::invalid_argument("Content cannot be empty."));
-    };
-
-    Ok(CreatePostCommand {
-      content: proto.content.trim().into(),
-      channel_id: proto.channel_id.try_into().map_err(|err| {
-        tonic::Status::invalid_argument(format!("Could not parse channel id: {err}"))
-      })?,
-    })
   }
 }
 
@@ -114,6 +88,8 @@ impl TryFromProto<PostProto> for Post {
 
   fn try_from_proto(proto: PostProto) -> Result<Self, Self::Error> {
     let id = Uuid::parse_str(&proto.id).map_err(|_| Status::invalid_argument("invalid post id"))?;
+    let server_id = Uuid::parse_str(&proto.server_id)
+      .map_err(|_| Status::invalid_argument("invalid server id"))?;
 
     let created_at = proto
       .created_at
@@ -126,6 +102,7 @@ impl TryFromProto<PostProto> for Post {
 
     Ok(Post {
       id,
+      server_id,
       author_name: proto.author_name,
       content: proto.content,
       created_at,

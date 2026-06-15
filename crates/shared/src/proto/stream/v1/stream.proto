@@ -1,6 +1,8 @@
 syntax = "proto3";
 package stream.v1;
 
+import "google/protobuf/timestamp.proto";
+
 service StreamService {
   rpc ConnectTextStream (stream ClientTextMessage) returns (stream ServerTextMessage);
   rpc ConnectVoiceStream (stream ClientVoiceMessage) returns (stream ServerVoiceMessage);
@@ -33,9 +35,12 @@ message DisplayUser {
   string name = 2;
 }
 
-message ChatMessage {
-  DisplayUser from = 1;
-  string text = 2;
+message Post {
+  string id = 1;
+  string server_id = 2;
+  string author_name = 3;
+  string content = 4;
+  google.protobuf.Timestamp created_at = 5;
 }
 
 message JoinedRoom {
@@ -50,12 +55,18 @@ message ServerTextMessage {
   oneof payload {
     JoinedRoom  joined_room = 1;
     LeftRoom    left_room   = 2;
-    ChatMessage chat        = 3;
+    Post        chat        = 3;
   }
 }
 
 message ClientTextMessage {
   oneof payload {
-    ChatMessage chat = 1;
+    CreatePostRequest post = 1;
   }
+}
+
+message CreatePostRequest {
+  string id = 1;
+  string content = 2;
+  string channel_id = 3;
 }

@@ -6,13 +6,8 @@ import "google/protobuf/empty.proto";
 
 service PostsService {
   rpc GetPosts   (GetPostsRequest)   returns (GetPostsResponse);
-  rpc CreatePost (CreatePostRequest) returns (google.protobuf.Empty);
 }
 
-message CreatePostRequest {
-  string content = 1;
-  string channel_id = 2;
-}
 
 message GetPostsRequest {
   string channel_id = 1;
@@ -22,9 +17,10 @@ message GetPostsRequest {
 
 message Post {
   string id = 1;
-  string author_name = 2;
-  string content = 3;
-  google.protobuf.Timestamp created_at = 4;
+  string server_id = 2;
+  string author_name = 3;
+  string content = 4;
+  google.protobuf.Timestamp created_at = 5;
 }
 
 message GetPostsResponse {

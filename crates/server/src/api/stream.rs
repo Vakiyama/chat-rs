@@ -11,7 +11,7 @@ use chat_shared::{
     IntoProto, TryIntoDomain,
     stream::proto::{
       ClientTextMessage, ClientVoiceMessage, ServerTextMessage, ServerVoiceMessage,
-      stream_service_server::StreamService,
+      client_text_message, stream_service_server::StreamService,
     },
   },
   domain::stream::{ClientText, ClientVoice, ServerText, ServerVoice},
@@ -224,20 +224,27 @@ impl StreamService for StreamServer {
 
     tokio::spawn(async move {
       while let Some(msg) = inner_stream.next().await {
-        match msg {
-          Ok(msg) => {
+        let domain_msg: Result<ClientText, _> = msg.and_then(|msg| msg.try_into_domain());
+
+        match domain_msg {
+          Ok(ClientText::CreatePostRequest {
+            id,
+            content,
+            channel_id,
+          }) => {
+            todo!()
             // handler: atm, we only deal with chat message relaying and ignore others
-            if let Ok(ClientText::ChatMessage { from, text }) = msg.try_into_domain() {
-              let targets = manager.lock().unwrap().targets(&socket_id);
+            // if let Ok(ClientText::CreatePostRequest { from, text }) = msg.try_into_domain() {
+            //   let targets = manager.lock().unwrap().targets(&socket_id);
 
-              if let Some(user_id) = request_user_id
-                && from.id == user_id
-              {
-                let server_msg = ServerText::ChatMessage { from, text };
+            //   if let Some(user_id) = request_user_id
+            //     && from.id == user_id
+            //   {
+            //     let server_msg = ServerText::ChatMessage { from, text };
 
-                Manager::emit(targets, server_msg.into_proto()).await;
-              };
-            }
+            //     Manager::emit(targets, server_msg.into_proto()).await;
+            //   };
+            // }
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")

@@ -1,10 +1,20 @@
+#[derive(Default)]
 pub enum AsyncData<T, E> {
+  #[default]
   NotAsked,
   Loading,
   Done(Result<T, E>),
 }
 
 impl<A, E> AsyncData<A, E> {
+  pub async fn load<Fun>(&mut self, loader: Fun)
+  where
+    Fun: AsyncFnOnce() -> Result<A, E>,
+  {
+    *self = Self::Loading;
+    *self = Self::Done(loader().await);
+  }
+
   pub fn map<Fun, B>(self, handler: Fun) -> AsyncData<B, E>
   where
     Fun: FnOnce(A) -> B,

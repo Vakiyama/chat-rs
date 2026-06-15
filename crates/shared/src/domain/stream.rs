@@ -1,6 +1,13 @@
 use uuid::Uuid;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
+use crate::domain::post::Post;
+
+#[derive(Clone, Debug)]
+pub struct CreatePostCommand {
+  pub content: String,
+  pub channel_id: Uuid,
+}
 #[derive(Clone, Debug)]
 pub struct User {
   pub id: Uuid,
@@ -8,14 +15,18 @@ pub struct User {
 }
 
 pub enum ClientText {
-  ChatMessage { from: User, text: String },
+  CreatePostRequest {
+    id: Uuid,
+    content: String,
+    channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]
 pub enum ServerText {
   JoinedRoom { from: User },
   LeftRoom { from: User },
-  ChatMessage { from: User, text: String },
+  Post(Post),
 }
 
 pub enum ClientVoice {

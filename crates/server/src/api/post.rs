@@ -3,9 +3,7 @@ use chat_shared::{
     IntoProto, TryIntoDomain,
     post::proto::{GetPostsResponse, posts_service_server::PostsService},
   },
-  domain::post::{
-    CreatePostCommand, GetPostsRequest, GetPostsResponse as DomainGetPostsResponse, Post,
-  },
+  domain::post::{GetPostsRequest, GetPostsResponse as DomainGetPostsResponse, Post},
 };
 use sea_orm::{EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
@@ -16,39 +14,39 @@ pub struct PostsServer;
 
 #[tonic::async_trait]
 impl PostsService for PostsServer {
-  async fn create_post(
-    &self,
-    request: tonic::Request<chat_shared::convert::post::proto::CreatePostRequest>,
-  ) -> Result<tonic::Response<()>, tonic::Status> {
-    let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
+  // async fn create_post(
+  //   &self,
+  //   request: tonic::Request<chat_shared::convert::post::proto::CreatePostRequest>,
+  // ) -> Result<tonic::Response<()>, tonic::Status> {
+  //   let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
 
-    let CreatePostCommand {
-      content,
-      channel_id,
-    } = request.into_inner().try_into_domain()?;
+  //   let CreatePostCommand {
+  //     content,
+  //     channel_id,
+  //   } = request.into_inner().try_into_domain()?;
 
-    let db = database::get().await;
+  //   let db = database::get().await;
 
-    can_user_access_channel(request_user_id, channel_id).await?;
+  //   can_user_access_channel(request_user_id, channel_id).await?;
 
-    entities::post::Entity::insert(
-      entities::post::Model {
-        id: uuid::Uuid::new_v4(),
-        content,
-        channel_id: Some(channel_id),
-        created_at: chrono::Utc::now(),
-      }
-      .into_active_model(),
-    )
-    .exec(db)
-    .await
-    .map_err(|err| {
-      eprintln!("error inserting post: {err}");
-      tonic::Status::internal("Error occurred inserting post.")
-    })?;
+  //   entities::post::Entity::insert(
+  //     entities::post::Model {
+  //       id: uuid::Uuid::new_v4(),
+  //       content,
+  //       channel_id: Some(channel_id),
+  //       created_at: chrono::Utc::now(),
+  //     }
+  //     .into_active_model(),
+  //   )
+  //   .exec(db)
+  //   .await
+  //   .map_err(|err| {
+  //     eprintln!("error inserting post: {err}");
+  //     tonic::Status::internal("Error occurred inserting post.")
+  //   })?;
 
-    Ok(tonic::Response::new(()))
-  }
+  //   Ok(tonic::Response::new(()))
+  // }
 
   async fn get_posts(
     &self,
@@ -88,6 +86,18 @@ impl PostsService for PostsServer {
       );
     };
 
+    let channel = entities::channel::Entity::load()
+      .with((entities::text_channel::Entity, entities::server::Entity))
+      .filter(entities::channel::COLUMN.id.eq(channel_id))
+      .one(db)
+      .await
+      .unwrap();
+
+    let server_id = channel
+      .and_then(|channel| channel.text_channel.into_option())
+      .and_then(|text_channel| text_channel.server_id)
+      .ok_or(tonic::Status::not_found("Server not found"))?;
+
     let mut posts: Vec<Post> = query
       .limit(limit + 1)
       .order_by_desc(entities::post::Entity::COLUMN.created_at)
@@ -101,6 +111,7 @@ impl PostsService for PostsServer {
       .map(|model| Post {
         id: model.id,
         author_name: username.clone().unwrap(),
+        server_id,
         content: model.content,
         created_at: model.created_at,
       })
