@@ -64,6 +64,20 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
     Auth::LoggedIn(_) => Subscription::batch([
       Subscription::run(chat_stream::connect).map(|event| event.into()),
       Subscription::run(webrtc_stream::connect).map(|event| event.into()),
+      iced::event::listen_with(|event, status, _window| match (event, status) {
+        (
+          iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character(_),
+            text: Some(text),
+            modifiers,
+            ..
+          }),
+          iced::event::Status::Ignored,
+        ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
+          Some(Message::Chat(chat::Message::TypeAhead(text.into())))
+        }
+        _ => None,
+      }),
     ]),
     Auth::NotLoggedIn => Subscription::none(),
   }

@@ -11,7 +11,7 @@ use chat_shared::domain::server::{ChannelType, Server, ServersResponse};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Local, Utc};
 use iced::widget::keyed::column;
-use iced::widget::{column, scrollable, text, text_input};
+use iced::widget::{column, operation, scrollable, text, text_input};
 use iced::widget::{container, row};
 use iced::{Border, Length, Pixels, Task};
 use indexmap::IndexMap;
@@ -79,6 +79,7 @@ pub enum Message {
   ApiReturnedInitialPosts(Result<GetPostsResponse, tonic::Status>),
   ApiReturnedMorePosts(Result<GetPostsResponse, tonic::Status>),
   UserScrolledToTop,
+  TypeAhead(String),
   Init,
   None,
 }
@@ -326,7 +327,27 @@ pub fn update(
         )
       })
     }
+    Message::TypeAhead(input) => {
+      let Some(current_text_channel_id) = (match model.view {
+        View::TextChannel(TextChannel { id, .. }) => Some(id),
+        _ => None,
+      }) else {
+        return Task::none();
+      };
+
+      let text_input_id = make_text_input_id(&current_text_channel_id);
+      // model
+      model.input.push_str(&input);
+      Task::batch([
+        operation::focus(text_input_id.clone()), // text_input::move_cursor_to_end(self.message_input_id.clone()),
+        operation::move_cursor_to_end(text_input_id),
+      ])
+    }
   }
+}
+
+fn make_text_input_id(text_channel_id: &Uuid) -> String {
+  format!("text_input_{}", { text_channel_id.to_string() })
 }
 
 // --------------------------------- VIEW ---------------------------------
@@ -375,6 +396,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
         posts,
         &model.input,
         text_channel.loading_more,
+        &text_channel.id,
       ),
     },
   };
@@ -403,6 +425,7 @@ fn view_text_chat_window<'a>(
   posts: &'a IndexMap<Uuid, RenderedPost>,
   text_input_string: &'a str,
   loading_more: bool,
+  text_channel_id: &'a Uuid,
 ) -> Element<'a, Message> {
   // let children: Element<'_, Message> = column![
   //   container(Column::with_children(posts))
@@ -421,6 +444,7 @@ fn view_text_chat_window<'a>(
     row![view_posts(posts, loading_more)].padding([SPACE_GRID, 0]),
     // row: text posts - user list
     text_input(&format!("Message #{name}"), text_input_string)
+      .id(make_text_input_id(text_channel_id))
       .on_input(Message::UserChangedChatInput)
       .on_submit(Message::UserSubmittedChatInput)
       .style(|theme, status| {
@@ -454,10 +478,10 @@ fn view_text_chat_window<'a>(
 }
 
 fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
-  container(text(format!("#{name}")))
+  container(text(format!("#{name}")).size(16))
     .width(Length::Fill)
     .style(container::secondary)
-    .padding(SPACE_GRID)
+    .padding([SPACE_GRID / 2, SPACE_GRID])
     .into()
 }
 
