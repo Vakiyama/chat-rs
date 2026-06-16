@@ -6,8 +6,7 @@ use chat_shared::{
   domain::post::{GetPostsRequest, GetPostsResponse as DomainGetPostsResponse, Post},
 };
 use sea_orm::{
-  EntityTrait, ExprTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
-  QuerySelect, RelationTrait,
+  EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
 use uuid::Uuid;
 
@@ -30,15 +29,6 @@ impl PostsService for PostsServer {
     } = request.into_inner().try_into_domain()?;
 
     let db = database::get().await;
-
-    let username: Option<String> = entities::user::Entity::find_by_id(request_user_id)
-      .inner_join(entities::server::Entity)
-      .select_only()
-      .column(entities::user::Column::Username)
-      .into_tuple()
-      .one(db)
-      .await
-      .unwrap();
 
     let channel = entities::channel::Entity::find()
       .filter(
@@ -97,8 +87,6 @@ impl PostsService for PostsServer {
         created_at: post.created_at,
       })
       .collect();
-
-    println!("{:?}", posts);
 
     let has_more = posts.len() > limit as usize;
     let next_timestamp = if has_more {

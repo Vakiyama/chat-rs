@@ -7,8 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, SupportedStreamConfig};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
+use iced::futures;
 use iced::task::{Never, Sipper, sipper};
-use iced::{Task, futures};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
 use sonora::{AudioProcessing, Config};
 use webrtc::api::APIBuilder;
@@ -26,7 +26,6 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use crate::audio_processing::mixer::Mixer;
 use crate::audio_processing::resampler::Resampler;
 use crate::client;
-use crate::model::{Model, Stream};
 
 #[derive(Debug, Clone)]
 pub struct WebRTCConnection(mpsc::Sender<ClientVoiceMessage>);

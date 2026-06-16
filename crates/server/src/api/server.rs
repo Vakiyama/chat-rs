@@ -26,9 +26,6 @@ impl ServerService for ServerServer {
     let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
     let db = database::get().await;
 
-    // INFO grpc_request{method=/server.v1.ServerService/Servers}: sqlx::query: summary="SELECT \"server\".\"id\", \"server\".\"name\" FROM …" db.statement="\n\nSELECT \"server\".\"id\", \"server\".\"name\" FROM \"server\" WHERE \"user\".\"id\" = $1\n" rows_affected=0 rows_returned=0 elapsed=345.751µs elapsed_secs=0.000345751
-    // error fetching servers: Query Error: error returned from database: missing FROM-clause entry for table "user"
-
     let server_models = entities::server::Entity::find()
       .inner_join(entities::user::Entity)
       .filter(entities::user::COLUMN.id.eq(request_user_id))

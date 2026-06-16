@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use chat_shared::convert::TryIntoDomain;
-use chat_shared::domain::stream::{ClientVoice, ServerVoice, User};
+use chat_shared::domain::stream::{ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
 use iced::Theme::CatppuccinFrappe;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub mod audio_processing;
 mod chat_stream;
