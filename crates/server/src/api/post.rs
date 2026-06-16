@@ -108,6 +108,8 @@ impl PostsService for PostsServer {
       None
     };
 
+    posts.reverse();
+
     Ok(tonic::Response::new(
       DomainGetPostsResponse {
         posts,
