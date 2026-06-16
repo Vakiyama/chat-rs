@@ -37,10 +37,9 @@ message DisplayUser {
 
 message Post {
   string id = 1;
-  string server_id = 2;
-  string author_name = 3;
-  string content = 4;
-  google.protobuf.Timestamp created_at = 5;
+  string author_name = 2;
+  string content = 3;
+  google.protobuf.Timestamp created_at = 4;
 }
 
 message JoinedRoom {
@@ -68,5 +67,5 @@ message ClientTextMessage {
 message CreatePostRequest {
   string id = 1;
   string content = 2;
-  string channel_id = 3;
+  string text_channel_id = 3;
 }

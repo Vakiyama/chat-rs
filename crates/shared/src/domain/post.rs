@@ -4,7 +4,6 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub struct Post {
   pub id: Uuid,
-  pub server_id: Uuid,
   pub author_name: String,
   pub content: String,
   pub created_at: chrono::DateTime<Utc>,
@@ -18,7 +17,7 @@ pub struct GetPostsResponse {
 
 #[derive(Clone, Debug)]
 pub struct GetPostsRequest {
-  pub channel_id: Uuid,
+  pub text_channel_id: Uuid,
   pub limit: u64,
   pub starting_before_timestamp: Option<chrono::DateTime<Utc>>,
 }

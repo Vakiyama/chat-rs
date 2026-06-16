@@ -74,12 +74,12 @@ impl IntoProto<ClientTextMessage> for ClientText {
       ClientText::CreatePostRequest {
         id,
         content,
-        channel_id,
+        text_channel_id,
       } => ClientTextMessage {
         payload: Some(client_text_message::Payload::Post(CreatePostRequest {
           id: id.into(),
+          text_channel_id: text_channel_id.to_string(),
           content,
-          channel_id: channel_id.to_string(),
         })),
       },
     }
@@ -98,7 +98,6 @@ impl IntoProto<ServerTextMessage> for ServerText {
           payload: Some(server_text_message::Payload::Chat(
             convert::stream::proto::Post {
               id: post.id.into(),
-              server_id: post.server_id.into(),
               author_name: post.author_name,
               content: post.content,
               created_at: Some(created_at),
@@ -215,10 +214,6 @@ impl TryFromProto<ServerTextMessage> for ServerText {
               .id
               .try_into()
               .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))?,
-            server_id: chat_message
-              .server_id
-              .try_into()
-              .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))?,
             author_name: chat_message.author_name,
             content: chat_message.content,
             created_at,
@@ -240,7 +235,7 @@ impl TryFromProto<ClientTextMessage> for ClientText {
         client_text_message::Payload::Post(chat_message) => Ok(ClientText::CreatePostRequest {
           id: parse_id(chat_message.id)?,
           content: chat_message.content,
-          channel_id: parse_id(chat_message.channel_id)?,
+          text_channel_id: parse_id(chat_message.text_channel_id)?,
         }),
       }
     } else {

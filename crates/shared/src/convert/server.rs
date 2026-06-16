@@ -3,6 +3,9 @@ pub mod proto {
 }
 
 use crate::convert::IntoProto;
+use crate::convert::TryFromProto;
+use crate::convert::TryIntoDomain;
+use crate::convert::stream::parse_id;
 use crate::domain::server::*;
 use proto::Channel as ChannelProto;
 use proto::ChannelType as ChannelTypeProto;
@@ -12,11 +15,7 @@ use proto::ServersResponse as ServersResponseProto;
 impl IntoProto<ServersResponseProto> for ServersResponse {
   fn into_proto(self) -> ServersResponseProto {
     ServersResponseProto {
-      servers: self
-        .servers
-        .into_iter()
-        .map(|s| s.into_proto())
-        .collect(),
+      servers: self.servers.into_iter().map(|s| s.into_proto()).collect(),
     }
   }
 }
@@ -36,7 +35,7 @@ impl IntoProto<ChannelProto> for Channel {
     ChannelProto {
       id: self.id.to_string(),
       name: self.name,
-      r#type: self.r#type.into_proto() as i32,
+      r#type: self.r#type.into_proto(),
     }
   }
 }
@@ -50,3 +49,55 @@ impl IntoProto<i32> for ChannelType {
     }
   }
 }
+
+impl TryFromProto<ServersResponseProto> for ServersResponse {
+  type Error = tonic::Status;
+
+  fn try_from_proto(proto: ServersResponseProto) -> Result<Self, Self::Error> {
+    Ok(Self {
+      servers: proto
+        .servers
+        .into_iter()
+        .map(|server_proto| server_proto.try_into_domain())
+        .collect::<Result<Vec<Server>, tonic::Status>>()?,
+    })
+  }
+}
+
+impl TryFromProto<ServerProto> for Server {
+  type Error = tonic::Status;
+
+  fn try_from_proto(proto: ServerProto) -> Result<Self, Self::Error> {
+    Ok(Self {
+      id: parse_id(proto.id)?,
+      name: proto.name,
+      channels: proto
+        .channels
+        .into_iter()
+        .map(|channel_proto| channel_proto.try_into_domain())
+        .collect::<Result<Vec<Channel>, tonic::Status>>()?,
+    })
+  }
+}
+
+impl TryFromProto<ChannelProto> for Channel {
+  type Error = tonic::Status;
+
+  fn try_from_proto(proto: ChannelProto) -> Result<Self, Self::Error> {
+    Ok(Self {
+      id: parse_id(proto.id)?,
+      name: proto.name,
+      r#type: match proto.r#type {
+        1 => Ok(ChannelType::Text),
+        2 => Ok(ChannelType::Voice),
+        _ => Err(tonic::Status::invalid_argument("Invalid channel type")),
+      }?,
+    })
+  }
+}
+
+// enum ChannelType {
+//   METHOD_TYPE_UNSPECIFIED = 0;
+//   TEXT = 1;
+//   VOICE = 2;
+// }

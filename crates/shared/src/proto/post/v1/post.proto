@@ -10,17 +10,16 @@ service PostsService {
 
 
 message GetPostsRequest {
-  string channel_id = 1;
+  string text_channel_id = 1;
   uint64 limit = 2;
   optional google.protobuf.Timestamp starting_before_timestamp = 3;
 }
 
 message Post {
   string id = 1;
-  string server_id = 2;
-  string author_name = 3;
-  string content = 4;
-  google.protobuf.Timestamp created_at = 5;
+  string author_name = 2;
+  string content = 3;
+  google.protobuf.Timestamp created_at = 4;
 }
 
 message GetPostsResponse {

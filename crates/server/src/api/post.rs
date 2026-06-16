@@ -5,7 +5,10 @@ use chat_shared::{
   },
   domain::post::{GetPostsRequest, GetPostsResponse as DomainGetPostsResponse, Post},
 };
-use sea_orm::{EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+  EntityTrait, ExprTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+  QuerySelect, RelationTrait,
+};
 use uuid::Uuid;
 
 use crate::{entities, library::database};
@@ -14,40 +17,6 @@ pub struct PostsServer;
 
 #[tonic::async_trait]
 impl PostsService for PostsServer {
-  // async fn create_post(
-  //   &self,
-  //   request: tonic::Request<chat_shared::convert::post::proto::CreatePostRequest>,
-  // ) -> Result<tonic::Response<()>, tonic::Status> {
-  //   let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
-
-  //   let CreatePostCommand {
-  //     content,
-  //     channel_id,
-  //   } = request.into_inner().try_into_domain()?;
-
-  //   let db = database::get().await;
-
-  //   can_user_access_channel(request_user_id, channel_id).await?;
-
-  //   entities::post::Entity::insert(
-  //     entities::post::Model {
-  //       id: uuid::Uuid::new_v4(),
-  //       content,
-  //       channel_id: Some(channel_id),
-  //       created_at: chrono::Utc::now(),
-  //     }
-  //     .into_active_model(),
-  //   )
-  //   .exec(db)
-  //   .await
-  //   .map_err(|err| {
-  //     eprintln!("error inserting post: {err}");
-  //     tonic::Status::internal("Error occurred inserting post.")
-  //   })?;
-
-  //   Ok(tonic::Response::new(()))
-  // }
-
   async fn get_posts(
     &self,
     request: tonic::Request<chat_shared::convert::post::proto::GetPostsRequest>,
@@ -55,7 +24,7 @@ impl PostsService for PostsServer {
     let request_user_id = request.extensions().get::<Uuid>().copied().unwrap();
 
     let GetPostsRequest {
-      channel_id,
+      text_channel_id,
       limit,
       starting_before_timestamp,
     } = request.into_inner().try_into_domain()?;
@@ -63,7 +32,7 @@ impl PostsService for PostsServer {
     let db = database::get().await;
 
     let username: Option<String> = entities::user::Entity::find_by_id(request_user_id)
-      .filter(entities::server::Entity::COLUMN.id.eq(request_user_id))
+      .inner_join(entities::server::Entity)
       .select_only()
       .column(entities::user::Column::Username)
       .into_tuple()
@@ -71,7 +40,19 @@ impl PostsService for PostsServer {
       .await
       .unwrap();
 
-    can_user_access_channel(request_user_id, channel_id).await?;
+    let channel = entities::channel::Entity::find()
+      .filter(
+        entities::channel::COLUMN
+          .text_channel_id
+          .eq(text_channel_id),
+      )
+      .one(db)
+      .await
+      .unwrap();
+
+    let channel_id = channel.unwrap().id;
+
+    can_user_access_channel(request_user_id, text_channel_id).await?;
 
     let mut query = entities::post::Entity::find().has_related(
       entities::channel::Entity,
@@ -93,7 +74,7 @@ impl PostsService for PostsServer {
       .await
       .unwrap();
 
-    let server_id = channel
+    channel
       .and_then(|channel| channel.text_channel.into_option())
       .and_then(|text_channel| text_channel.server_id)
       .ok_or(tonic::Status::not_found("Server not found"))?;
@@ -111,11 +92,12 @@ impl PostsService for PostsServer {
       .map(|model| Post {
         id: model.id,
         author_name: username.clone().unwrap(),
-        server_id,
         content: model.content,
         created_at: model.created_at,
       })
       .collect();
+
+    println!("{:?}", posts);
 
     let has_more = posts.len() > limit as usize;
     let next_timestamp = if has_more {
@@ -135,28 +117,31 @@ impl PostsService for PostsServer {
   }
 }
 
-async fn can_user_access_channel(user_id: Uuid, channel_id: Uuid) -> Result<(), tonic::Status> {
+async fn can_user_access_channel(
+  user_id: Uuid,
+  text_channel_id: Uuid,
+) -> Result<(), tonic::Status> {
   let db = database::get().await;
 
-  // todo: we don't have the user_user relationship yet, so we just check for a user->server->text_channel relationship
-
-  let server = entities::server::Entity::load()
-    .with(entities::user::Entity)
-    .with((entities::text_channel::Entity, entities::channel::Entity))
-    .filter(
-      entities::channel::Entity::COLUMN
-        .id
-        .eq(channel_id)
-        .and(entities::user::COLUMN.id.eq(user_id)),
+  let count = entities::text_channel::Entity::find()
+    .filter(entities::text_channel::COLUMN.id.eq(text_channel_id))
+    .inner_join(entities::server::Entity)
+    .join_rev(
+      JoinType::InnerJoin,
+      entities::user_server::Relation::Server.def(),
     )
-    .one(db)
+    // membership predicate on the junction
+    .filter(entities::user_server::COLUMN.user_id.eq(user_id))
+    .count(db)
     .await
-    .unwrap();
+    .map_err(|err| {
+      eprintln!("error checking channel access: {err}");
+      tonic::Status::internal("Error occurred checking access.")
+    })?;
 
-  if server.is_none() {
-    eprintln!("Requesting user cannot access target server.");
+  if count == 0 {
+    eprintln!("Requesting user cannot access target channel.");
     return Err(tonic::Status::unauthenticated("Unauthenticated"));
-  };
-
+  }
   Ok(())
 }

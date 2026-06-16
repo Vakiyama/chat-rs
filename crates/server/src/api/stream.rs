@@ -4,6 +4,7 @@ use std::{
   sync::{Arc, Mutex, OnceLock},
 };
 
+use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
 use tokio::sync::OnceCell;
 
 use chat_shared::{
@@ -11,10 +12,13 @@ use chat_shared::{
     IntoProto, TryIntoDomain,
     stream::proto::{
       ClientTextMessage, ClientVoiceMessage, ServerTextMessage, ServerVoiceMessage,
-      client_text_message, stream_service_server::StreamService,
+      stream_service_server::StreamService,
     },
   },
-  domain::stream::{ClientText, ClientVoice, ServerText, ServerVoice},
+  domain::{
+    post::Post,
+    stream::{ClientText, ClientVoice, ServerText},
+  },
 };
 use tokio::sync::mpsc::{self};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
@@ -35,7 +39,11 @@ use webrtc::{
 
 use crate::{
   config::CONFIG,
-  library::webrtc::{Room, handle_answer, handle_leave, handle_offer},
+  entities,
+  library::{
+    database,
+    webrtc::{Room, handle_answer, handle_leave, handle_offer},
+  },
 };
 
 #[derive(Default)]
@@ -80,6 +88,14 @@ impl Manager {
           None
         }
       })
+      .collect()
+  }
+
+  fn targets_with_self(&self) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
+    self
+      .sockets
+      .iter()
+      .map(|(_, sender)| sender.clone())
       .collect()
   }
   /// broadcasts to all passed in targets
@@ -213,6 +229,13 @@ impl StreamService for StreamServer {
     request: tonic::Request<tonic::Streaming<ClientTextMessage>>,
   ) -> Result<tonic::Response<Self::ConnectTextStreamStream>, tonic::Status> {
     let request_user_id = request.extensions().get::<Uuid>().copied();
+    let db = database::get().await;
+
+    let user = entities::user::Entity::find_by_id(request_user_id.unwrap())
+      .one(db)
+      .await
+      .unwrap()
+      .unwrap();
 
     let mut inner_stream = request.into_inner();
 
@@ -230,21 +253,50 @@ impl StreamService for StreamServer {
           Ok(ClientText::CreatePostRequest {
             id,
             content,
-            channel_id,
+            text_channel_id,
           }) => {
-            todo!()
             // handler: atm, we only deal with chat message relaying and ignore others
-            // if let Ok(ClientText::CreatePostRequest { from, text }) = msg.try_into_domain() {
-            //   let targets = manager.lock().unwrap().targets(&socket_id);
+            let targets = manager.lock().unwrap().targets_with_self();
 
-            //   if let Some(user_id) = request_user_id
-            //     && from.id == user_id
-            //   {
-            //     let server_msg = ServerText::ChatMessage { from, text };
+            if let Some(user_id) = request_user_id {
+              let server_msg = ServerText::Post(Post {
+                id,
+                author_name: user.username.clone(),
+                content: content.clone(),
+                created_at: chrono::Utc::now(),
+              });
 
-            //     Manager::emit(targets, server_msg.into_proto()).await;
-            //   };
-            // }
+              let channel = entities::channel::Entity::find()
+                .filter(
+                  entities::channel::COLUMN
+                    .text_channel_id
+                    .eq(text_channel_id),
+                )
+                .one(db)
+                .await
+                .unwrap();
+
+              let channel_id = channel.unwrap().id;
+
+              entities::post::Entity::insert(
+                entities::post::Model {
+                  id: uuid::Uuid::new_v4(),
+                  content,
+                  channel_id: Some(channel_id),
+                  created_at: chrono::Utc::now(),
+                }
+                .into_active_model(),
+              )
+              .exec(db)
+              .await
+              .map_err(|err| {
+                eprintln!("error inserting post: {err}");
+                tonic::Status::internal("Error occurred inserting post.")
+              })
+              .unwrap();
+
+              Manager::emit(targets, server_msg.into_proto()).await;
+            };
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")

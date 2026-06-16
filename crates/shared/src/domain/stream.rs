@@ -18,7 +18,7 @@ pub enum ClientText {
   CreatePostRequest {
     id: Uuid,
     content: String,
-    channel_id: Uuid,
+    text_channel_id: Uuid,
   },
 }
 

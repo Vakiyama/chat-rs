@@ -103,7 +103,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::LoggedIn(user) => {
       model.screen = Screen::Chat(Default::default());
       model.user = Auth::LoggedIn(user);
-      iced::Task::none()
+      iced::Task::done(Message::Chat(chat::Message::Init))
     }
     Message::Auth(msg) => {
       if let Auth::NotLoggedIn = &model.user
@@ -128,7 +128,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         }
       } else if let Auth::LoggedIn(_) = model.user {
         model.screen = Screen::Chat(Default::default());
-        iced::Task::none()
+        iced::Task::done(Message::Chat(chat::Message::Init))
       } else {
         iced::Task::none()
       }
@@ -142,7 +142,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           name: response.username.clone(),
         });
 
-        Task::none()
+        iced::Task::done(Message::Chat(chat::Message::Init))
       }
       None => Task::none(),
     },
@@ -184,7 +184,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
-    model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
+    model::Screen::Chat(model) => screens::chat::view(model).map(Message::Chat),
   };
 
   container(

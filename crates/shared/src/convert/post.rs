@@ -37,9 +37,27 @@ impl IntoProto<PostProto> for Post {
     PostProto {
       id: self.id.to_string(),
       author_name: self.author_name,
-      server_id: self.server_id.into(),
       content: self.content,
       created_at: Some(created_at),
+    }
+  }
+}
+
+impl IntoProto<GetPostsRequestProto> for GetPostsRequest {
+  fn into_proto(self) -> GetPostsRequestProto {
+    let starting_before_timestamp =
+      self
+        .starting_before_timestamp
+        .map(|starting_before_timestamp| {
+          let seconds = starting_before_timestamp.timestamp();
+          let nanos = starting_before_timestamp.timestamp_subsec_nanos() as i32;
+          Timestamp { seconds, nanos }
+        });
+
+    GetPostsRequestProto {
+      text_channel_id: self.text_channel_id.into(),
+      limit: self.limit,
+      starting_before_timestamp,
     }
   }
 }
@@ -48,7 +66,7 @@ impl TryFromProto<GetPostsRequestProto> for GetPostsRequest {
   type Error = Status;
 
   fn try_from_proto(proto: GetPostsRequestProto) -> Result<Self, Self::Error> {
-    let channel_id = Uuid::parse_str(&proto.channel_id)
+    let text_channel_id = Uuid::parse_str(&proto.text_channel_id)
       .map_err(|_| Status::invalid_argument("invalid text_channel_id"))?;
 
     let starting_before_timestamp = proto.starting_before_timestamp.and_then(|timestamp| {
@@ -56,7 +74,7 @@ impl TryFromProto<GetPostsRequestProto> for GetPostsRequest {
     });
 
     Ok(GetPostsRequest {
-      channel_id,
+      text_channel_id,
       limit: proto.limit,
       starting_before_timestamp,
     })
@@ -88,8 +106,6 @@ impl TryFromProto<PostProto> for Post {
 
   fn try_from_proto(proto: PostProto) -> Result<Self, Self::Error> {
     let id = Uuid::parse_str(&proto.id).map_err(|_| Status::invalid_argument("invalid post id"))?;
-    let server_id = Uuid::parse_str(&proto.server_id)
-      .map_err(|_| Status::invalid_argument("invalid server id"))?;
 
     let created_at = proto
       .created_at
@@ -102,7 +118,6 @@ impl TryFromProto<PostProto> for Post {
 
     Ok(Post {
       id,
-      server_id,
       author_name: proto.author_name,
       content: proto.content,
       created_at,
