@@ -14,6 +14,7 @@ mod chat_stream;
 pub mod config;
 pub mod webrtc_stream;
 
+use crate::audio_processing::call_handler::spawn_voice;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, Screen, Stream};
 use crate::screens::{auth, chat};
@@ -78,13 +79,8 @@ pub enum Message {
   WebRTC(Box<ServerVoice>),
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
-  InitWebRTCVoiceCall,
-  WebRTCClientCreated(
-    Arc<RTCPeerConnection>,
-    Box<RTCSessionDescription>,
-    Arc<cpal::Stream>,
-    Arc<cpal::Stream>,
-  ),
+  JoinVoice,
+  LeaveVoice,
   None,
   LoggedIn(User),
 }
@@ -152,31 +148,36 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::ChatStreamConnected(connection) => {
       model.chat_stream = Stream::Connected(connection);
+
       Task::none()
     }
-    Message::WebRTC(server_msg) => webrtc_stream::handle(model, server_msg),
-    Message::WebRTCSignalStreamConnected(web_rtcconnection) => {
-      model.webrtc_stream = Stream::Connected(web_rtcconnection);
+    Message::JoinVoice => {
+      if let Some(v) = &model.voice {
+        v.join();
+      }
+      Task::none()
+    }
+    Message::LeaveVoice => {
+      if let Some(v) = &model.voice {
+        v.leave();
+      }
+      Task::none()
+    }
+    Message::WebRTC(msg) => {
+      if let Some(v) = &model.voice {
+        v.signal(*msg);
+      }
+      Task::none()
+    }
+    Message::WebRTCSignalStreamConnected(conn) => {
+      model.voice = Some(spawn_voice(conn));
 
-      // for now, we'll join the global call right away
-      Task::done(Message::InitWebRTCVoiceCall)
+      Task::done(Message::JoinVoice)
     }
     Message::WebRTCSignalStreamDisconnected => {
+      model.voice = None; // drops the handle → actor loop ends
       model.webrtc_stream = Stream::Disconnected;
       Task::none()
-    }
-    Message::InitWebRTCVoiceCall => webrtc_stream::start(),
-    Message::WebRTCClientCreated(client, offer, mic_stream, output_stream) => {
-      model.webrtc_client = Some(client);
-      model.mic_stream = Some(mic_stream);
-      model.output_stream = Some(output_stream);
-      let stream = model.webrtc_stream.clone();
-      Task::future(async move {
-        if let Stream::Connected(mut conn) = stream {
-          conn.send(ClientVoice::Offer(*offer))
-        }
-        crate::Message::None
-      })
     }
   }
 }

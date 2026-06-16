@@ -1,10 +1,7 @@
-use std::sync::Arc;
-
-use chat_shared::domain::stream::User;
-use webrtc::peer_connection::RTCPeerConnection;
-
+use crate::audio_processing::call_handler::VoiceHandle;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
+use chat_shared::domain::stream::User;
 
 use crate::{chat_stream, webrtc_stream};
 
@@ -24,9 +21,7 @@ pub struct Model {
   pub user: Auth,
   pub chat_stream: Stream<chat_stream::ChatConnection>,
   pub webrtc_stream: Stream<webrtc_stream::WebRTCConnection>,
-  pub webrtc_client: Option<Arc<RTCPeerConnection>>,
-  pub mic_stream: Option<Arc<cpal::Stream>>,
-  pub output_stream: Option<Arc<cpal::Stream>>,
+  pub voice: Option<VoiceHandle>,
 }
 
 pub enum Screen {
@@ -41,9 +36,7 @@ impl Default for Model {
       user: Auth::NotLoggedIn,
       chat_stream: Stream::Disconnected,
       webrtc_stream: Stream::Disconnected,
-      webrtc_client: None,
-      mic_stream: None,
-      output_stream: None,
+      voice: None,
     }
   }
 }
