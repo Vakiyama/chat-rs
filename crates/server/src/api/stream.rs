@@ -283,6 +283,7 @@ impl StreamService for StreamServer {
                   id: uuid::Uuid::new_v4(),
                   content,
                   channel_id: Some(channel_id),
+                  author_id: Some(user.id),
                   created_at: chrono::Utc::now(),
                 }
                 .into_active_model(),

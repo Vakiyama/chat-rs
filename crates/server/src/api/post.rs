@@ -81,6 +81,7 @@ impl PostsService for PostsServer {
 
     let mut posts: Vec<Post> = query
       .limit(limit + 1)
+      .find_both_related(entities::user::Entity)
       .order_by_desc(entities::post::Entity::COLUMN.created_at)
       .all(db)
       .await
@@ -89,11 +90,11 @@ impl PostsService for PostsServer {
         tonic::Status::internal("Error occurred fetching posts.")
       })?
       .into_iter()
-      .map(|model| Post {
-        id: model.id,
-        author_name: username.clone().unwrap(),
-        content: model.content,
-        created_at: model.created_at,
+      .map(|(post, poster)| Post {
+        id: post.id,
+        author_name: poster.username,
+        content: post.content,
+        created_at: post.created_at,
       })
       .collect();
 

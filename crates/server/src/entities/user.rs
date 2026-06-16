@@ -26,6 +26,8 @@ pub struct Model {
   pub servers: HasMany<super::server::Entity>,
   #[sea_orm(has_many)]
   pub refresh_tokens: HasMany<super::refresh_token::Entity>,
+  #[sea_orm(has_many)]
+  pub posts: HasMany<super::post::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
