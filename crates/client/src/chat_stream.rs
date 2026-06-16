@@ -21,6 +21,13 @@ impl ChatConnection {
       .try_send(message.into_proto())
       .expect("Send message to server");
   }
+
+  pub fn try_send(
+    &mut self,
+    message: ClientText,
+  ) -> Result<(), mpsc::TrySendError<ClientTextMessage>> {
+    self.0.try_send(message.into_proto())
+  }
 }
 
 #[derive(Debug, Clone)]

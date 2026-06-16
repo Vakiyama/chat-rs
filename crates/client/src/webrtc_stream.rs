@@ -7,8 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, SupportedStreamConfig};
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
+use iced::futures;
 use iced::task::{Never, Sipper, sipper};
-use iced::{Task, futures};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
 use sonora::{AudioProcessing, Config};
 use webrtc::api::APIBuilder;
@@ -26,7 +26,6 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use crate::audio_processing::mixer::Mixer;
 use crate::audio_processing::resampler::Resampler;
 use crate::client;
-use crate::model::{Model, Stream};
 
 #[derive(Debug, Clone)]
 pub struct WebRTCConnection(mpsc::Sender<ClientVoiceMessage>);
@@ -93,81 +92,6 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
 // handle messages
 
-pub fn handle(model: &mut Model, msg: Box<ServerVoice>) -> Task<crate::Message> {
-  println!("receiving msg from server: {msg:?}");
-  let Some(client) = &model.webrtc_client else {
-    eprintln!("No webrtc client found when receiving server offer/answer");
-    return Task::none();
-  };
-
-  let client = client.clone();
-  let webrtc_stream = model.webrtc_stream.clone();
-
-  match *msg {
-    ServerVoice::Offer(rtcsession_description) => Task::future(async move {
-      let Stream::Connected(mut connection) = webrtc_stream else {
-        eprintln!("No webrtc connection found when receiving server offer");
-        return crate::Message::None;
-      };
-
-      let _ = {
-        async || -> anyhow::Result<()> {
-          client
-            .set_remote_description(rtcsession_description)
-            .await?;
-          let reneg_answer = client.create_answer(None).await?;
-          client.set_local_description(reneg_answer).await?;
-
-          let answer = client
-            .local_description()
-            .await
-            .ok_or(anyhow::anyhow!("No local description"))?;
-
-          connection.send(ClientVoice::Answer(answer));
-          Ok(())
-        }
-      }()
-      .await
-      .map_err(|e| eprintln!("Error handling server offer: {e:?}"));
-
-      crate::Message::None
-    }),
-    ServerVoice::Answer(rtcsession_description) => Task::future(async move {
-      for line in rtcsession_description
-        .sdp
-        .lines()
-        .filter(|l| l.contains("candidate"))
-      {
-        println!("server candidate: {line}");
-      }
-      let _ = client
-        .set_remote_description(rtcsession_description)
-        .await
-        .map_err(|e| eprintln!("Error setting remote desc from server asnwer: {e:?}"));
-
-      crate::Message::None
-    }),
-  }
-}
-
-pub fn start() -> Task<crate::Message> {
-  Task::future(async move {
-    let client = setup_client()
-      .await
-      .map_err(|e| eprintln!("Error setting up initial client! {e:?}"));
-
-    match client {
-      Ok((client, offer, mic_stream, output_stream)) => crate::Message::WebRTCClientCreated(
-        client.into(),
-        offer.into(),
-        mic_stream.into(),
-        output_stream.into(),
-      ),
-      Err(_) => crate::Message::None,
-    }
-  })
-}
-
 const TARGET_RATE: u32 = 48_000;
 
 fn pick_config(
@@ -182,7 +106,7 @@ fn pick_config(
     .iter()
     .find(|r| r.min_sample_rate() <= TARGET_RATE && r.max_sample_rate() >= TARGET_RATE)
   {
-    return Ok(r.clone().with_sample_rate(TARGET_RATE));
+    return Ok((*r).with_sample_rate(TARGET_RATE));
   }
   // else the device's own default, if it's f32
   if default.sample_format() == cpal::SampleFormat::F32 {

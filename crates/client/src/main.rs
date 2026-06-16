@@ -1,18 +1,16 @@
-use std::sync::Arc;
-
 use chat_shared::convert::TryIntoDomain;
-use chat_shared::domain::stream::{ClientVoice, ServerVoice, User};
+use chat_shared::domain::stream::{ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
+use iced::Theme::CatppuccinFrappe;
 use iced::widget::container;
 use iced::{Element, Subscription, Task};
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub mod audio_processing;
 mod chat_stream;
 pub mod config;
 pub mod webrtc_stream;
 
+use crate::audio_processing::call_handler::spawn_voice;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, Screen, Stream};
 use crate::screens::{auth, chat};
@@ -27,6 +25,7 @@ const SPACE_GRID: u16 = 8;
 
 fn main() -> iced::Result {
   iced::application(new, update, view)
+    .theme(CatppuccinFrappe)
     .subscription(subscription)
     .run()
 }
@@ -61,6 +60,20 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
     Auth::LoggedIn(_) => Subscription::batch([
       Subscription::run(chat_stream::connect).map(|event| event.into()),
       Subscription::run(webrtc_stream::connect).map(|event| event.into()),
+      iced::event::listen_with(|event, status, _window| match (event, status) {
+        (
+          iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character(_),
+            text: Some(text),
+            modifiers,
+            ..
+          }),
+          iced::event::Status::Ignored,
+        ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
+          Some(Message::Chat(chat::Message::TypeAhead(text.into())))
+        }
+        _ => None,
+      }),
     ]),
     Auth::NotLoggedIn => Subscription::none(),
   }
@@ -76,13 +89,8 @@ pub enum Message {
   WebRTC(Box<ServerVoice>),
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
-  InitWebRTCVoiceCall,
-  WebRTCClientCreated(
-    Arc<RTCPeerConnection>,
-    Box<RTCSessionDescription>,
-    Arc<cpal::Stream>,
-    Arc<cpal::Stream>,
-  ),
+  JoinVoice,
+  LeaveVoice,
   None,
   LoggedIn(User),
 }
@@ -101,7 +109,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::LoggedIn(user) => {
       model.screen = Screen::Chat(Default::default());
       model.user = Auth::LoggedIn(user);
-      iced::Task::none()
+      iced::Task::done(Message::Chat(chat::Message::Init))
     }
     Message::Auth(msg) => {
       if let Auth::NotLoggedIn = &model.user
@@ -126,7 +134,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         }
       } else if let Auth::LoggedIn(_) = model.user {
         model.screen = Screen::Chat(Default::default());
-        iced::Task::none()
+        iced::Task::done(Message::Chat(chat::Message::Init))
       } else {
         iced::Task::none()
       }
@@ -140,7 +148,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           name: response.username.clone(),
         });
 
-        Task::none()
+        iced::Task::done(Message::Chat(chat::Message::Init))
       }
       None => Task::none(),
     },
@@ -150,31 +158,36 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::ChatStreamConnected(connection) => {
       model.chat_stream = Stream::Connected(connection);
+
       Task::none()
     }
-    Message::WebRTC(server_msg) => webrtc_stream::handle(model, server_msg),
-    Message::WebRTCSignalStreamConnected(web_rtcconnection) => {
-      model.webrtc_stream = Stream::Connected(web_rtcconnection);
+    Message::JoinVoice => {
+      if let Some(v) = &model.voice {
+        v.join();
+      }
+      Task::none()
+    }
+    Message::LeaveVoice => {
+      if let Some(v) = &model.voice {
+        v.leave();
+      }
+      Task::none()
+    }
+    Message::WebRTC(msg) => {
+      if let Some(v) = &model.voice {
+        v.signal(*msg);
+      }
+      Task::none()
+    }
+    Message::WebRTCSignalStreamConnected(conn) => {
+      model.voice = Some(spawn_voice(conn));
 
-      // for now, we'll join the global call right away
-      Task::done(Message::InitWebRTCVoiceCall)
+      Task::done(Message::JoinVoice)
     }
     Message::WebRTCSignalStreamDisconnected => {
+      model.voice = None; // drops the handle → actor loop ends
       model.webrtc_stream = Stream::Disconnected;
       Task::none()
-    }
-    Message::InitWebRTCVoiceCall => webrtc_stream::start(),
-    Message::WebRTCClientCreated(client, offer, mic_stream, output_stream) => {
-      model.webrtc_client = Some(client);
-      model.mic_stream = Some(mic_stream);
-      model.output_stream = Some(output_stream);
-      let stream = model.webrtc_stream.clone();
-      Task::future(async move {
-        if let Stream::Connected(mut conn) = stream {
-          conn.send(ClientVoice::Offer(*offer))
-        }
-        crate::Message::None
-      })
     }
   }
 }
@@ -182,7 +195,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
-    model::Screen::Chat(model) => screens::chat::view(model, "#general").map(Message::Chat),
+    model::Screen::Chat(model) => screens::chat::view(model).map(Message::Chat),
   };
 
   container(

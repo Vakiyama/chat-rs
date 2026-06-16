@@ -15,6 +15,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 jwt-simple.workspace = true
+chrono.workspace = true
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

@@ -25,6 +25,7 @@ tower.workspace = true
 thiserror.workspace = true
 http.workspace = true
 email_address.workspace = true
+chrono.workspace = true
 
 # unambiguously server
 sea-orm = { version = "2.0.0-rc", features = ["sqlx-postgres", "runtime-tokio-native-tls", "macros", "schema-sync", "entity-registry"] }
