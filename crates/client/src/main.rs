@@ -2,8 +2,9 @@ use chat_shared::convert::TryIntoDomain;
 use chat_shared::domain::stream::{ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
 use iced::Theme::CatppuccinFrappe;
-use iced::widget::container;
-use iced::{Element, Subscription, Task};
+use iced::widget::{Text, container, text};
+use iced::{Element, Font, Subscription, Task};
+use material_icons::{Icon, icon_to_char};
 
 pub mod audio_processing;
 mod chat_stream;
@@ -26,8 +27,17 @@ const SPACE_GRID: u16 = 8;
 fn main() -> iced::Result {
   iced::application(new, update, view)
     .theme(CatppuccinFrappe)
+    .font(material_icons::FONT)
     .subscription(subscription)
     .run()
+}
+
+// for icon loading
+
+pub const MATERIAL: Font = Font::with_name("Material Icons");
+
+pub fn icon<'a>(i: Icon) -> Text<'a> {
+  text(icon_to_char(i).to_string()).font(MATERIAL)
 }
 
 fn new() -> (model::Model, Task<Message>) {

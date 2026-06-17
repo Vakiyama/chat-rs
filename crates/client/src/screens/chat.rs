@@ -1,25 +1,29 @@
 use std::str::FromStr;
 
 use crate::screens::chat::View::NoneSelected;
-use crate::{Element, chat_stream, client};
+use crate::{Element, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
 
 use crate::types::async_data::AsyncData;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
-use chat_shared::domain::server::{ChannelType, Server, ServersResponse};
+use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Local, Utc};
+use iced::Alignment::Center;
+use iced::font::Weight;
 use iced::widget::keyed::column;
-use iced::widget::{column, operation, scrollable, text, text_input};
+use iced::widget::scrollable::{Scrollbar, Scroller};
+use iced::widget::{button, column, operation, scrollable, text, text_input};
 use iced::widget::{container, row};
-use iced::{Border, Length, Pixels, Task};
+use iced::{Border, Color, Font, Length, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
+use material_icons::Icon;
 use uuid::Uuid;
 
 // --------------------------------- MODEL ---------------------------------
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
@@ -27,13 +31,14 @@ pub struct Model {
 }
 
 // todo: view should model which server we're in, then which text channel we're in.
-#[derive(Default)]
+#[derive(Default, Clone)]
 enum View {
   #[default]
   NoneSelected,
   TextChannel(TextChannel),
 }
 
+#[derive(Clone)]
 struct TextChannel {
   id: Uuid,
   posts: AsyncData<IndexMap<Uuid, RenderedPost>, tonic::Status>,
@@ -353,7 +358,7 @@ fn make_text_input_id(text_channel_id: &Uuid) -> String {
 // --------------------------------- VIEW ---------------------------------
 
 pub fn view(model: &Model) -> Element<'_, Message> {
-  let servers_loaded = match &model.servers {
+  let servers_loaded_message = match &model.servers {
     AsyncData::NotAsked | AsyncData::Loading => Some("Loading servers...".to_string()),
     AsyncData::Done(Ok(_)) => None,
     AsyncData::Done(Err(status)) => Some(format!(
@@ -362,7 +367,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     )),
   };
 
-  if let Some(loading_msg) = servers_loaded {
+  if let Some(loading_msg) = servers_loaded_message {
     return container(text(loading_msg).center())
       .width(Length::Fill)
       .height(Length::Fill)
@@ -401,7 +406,172 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     },
   };
 
-  column![text_chat].spacing({ SPACE_GRID / 2 } as u32).into()
+  // todo; assuming one server ever
+  let channels = model
+    .servers
+    .as_ref()
+    .map(|server| server[0].channels.as_slice())
+    .get_or(&[]);
+
+  // todo: hardcoded server name until we add server to model
+  row![
+    view_channels("The Intergalactic Federation", &model.view, channels),
+    text_chat
+  ]
+  .spacing({ SPACE_GRID } as u32)
+  .into()
+}
+
+fn view_channels<'a>(
+  server_name: &'a str,
+  view: &'a View,
+  channels: &'a [Channel],
+) -> Element<'a, Message> {
+  let (text_channels, voice_channels): (Vec<&Channel>, Vec<&Channel>) =
+    channels.iter().partition(|channel| match channel.r#type {
+      ChannelType::Text => true,
+      ChannelType::Voice => false,
+    });
+
+  let rendered_text: Vec<Element<'a, Message>> = text_channels
+    .into_iter()
+    .map(|text_channel| -> Element<'a, Message> {
+      let is_selected = match view {
+        NoneSelected => false,
+        View::TextChannel(text_channel_view) => text_channel.id == text_channel_view.id,
+      };
+
+      let selected_font_style = move |theme: &Theme| -> text::Style {
+        text::Style {
+          color: if is_selected {
+            Some(theme.extended_palette().background.neutral.text)
+          } else {
+            None
+          },
+        }
+      };
+
+      button(
+        row![
+          icon(Icon::Tag).style(selected_font_style),
+          container(
+            text(&text_channel.name)
+              .wrapping(text::Wrapping::None)
+              .style(selected_font_style)
+          )
+        ]
+        .spacing((SPACE_GRID) as u32)
+        .align_y(Center)
+        .clip(true),
+      )
+      .style(|theme: &Theme, status| -> button::Style {
+        let palette = theme.extended_palette();
+        let background = match status {
+          button::Status::Active => None,
+          button::Status::Hovered => Some(palette.background.stronger.color.into()),
+          button::Status::Pressed => Some(palette.background.strong.color.into()),
+          button::Status::Disabled => None,
+        };
+
+        button::Style {
+          background,
+          text_color: palette.background.base.text,
+          border: Border {
+            radius: (SPACE_GRID as u32 / 2).into(),
+            ..Default::default()
+          },
+          ..button::Style::default()
+        }
+      })
+      .width(Length::Fill)
+      .on_press(Message::UserSelectedTextChannel {
+        text_channel_id: text_channel.id,
+        name: text_channel.name.clone(),
+      })
+      // .style(container::primary)
+      .into()
+    })
+    .collect();
+
+  let rendered_voice: Vec<Element<'a, Message>> = voice_channels
+    .into_iter()
+    .map(|voice_channel| -> Element<'a, Message> {
+      button(
+        row![
+          icon(Icon::Mic),
+          container(text(&voice_channel.name).wrapping(text::Wrapping::None))
+        ]
+        .spacing((SPACE_GRID) as u32)
+        .align_y(Center)
+        .clip(true),
+      )
+      .style(|theme: &Theme, status| -> button::Style {
+        let palette = theme.extended_palette();
+        let background = match status {
+          button::Status::Active => None,
+          button::Status::Hovered => Some(palette.background.stronger.color.into()),
+          button::Status::Pressed => Some(palette.background.strong.color.into()),
+          button::Status::Disabled => None,
+        };
+
+        button::Style {
+          background,
+          text_color: palette.background.base.text,
+          border: Border {
+            radius: (SPACE_GRID as u32 / 2).into(),
+            ..Default::default()
+          },
+          ..button::Style::default()
+        }
+      })
+      .width(Length::Fill)
+      .on_press(Message::None)
+      // .style(container::primary)
+      .into()
+    })
+    .collect();
+
+  container(
+    scrollable(column![
+      container(
+        text(server_name)
+          .font(Font {
+            weight: Weight::Bold,
+            ..Default::default()
+          })
+          .size(14)
+      )
+      .width(Length::Fill)
+      .padding(SPACE_GRID),
+      iced::widget::rule::horizontal(2),
+      iced::widget::space().height(SPACE_GRID as u32),
+      column![
+        column(rendered_text)
+          .spacing((SPACE_GRID / 2) as u32)
+          .width(Length::Fill),
+        column(rendered_voice)
+          .spacing((SPACE_GRID / 2) as u32)
+          .width(Length::Fill),
+      ]
+      .width(Length::Fill)
+      .spacing((SPACE_GRID) as u32),
+    ])
+    .width(290)
+    .height(Length::Fill),
+  )
+  .style(|theme| -> container::Style {
+    let palette = theme.extended_palette();
+
+    container::Style {
+      background: Some(palette.background.weakest.color.into()),
+      text_color: Some(palette.background.weakest.text),
+      border: border::rounded(2),
+      ..container::Style::default()
+    }
+  })
+  .padding(SPACE_GRID / 2)
+  .height(Length::Fill)
+  .into()
 }
 
 // for when we display online text_chat members
@@ -534,7 +704,9 @@ fn view_posts<'a>(
         row![
           text(display_time).style(text::secondary), //.align_x(Alignment::Start),
           text(name).style(text::base),
-          text(content).style(text_color)
+          text(content)
+            .style(text_color)
+            .wrapping(text::Wrapping::WordOrGlyph)
         ]
         .spacing(Pixels(SPACE_GRID.into()))
         .into(),
@@ -544,7 +716,10 @@ fn view_posts<'a>(
 
   children.extend(posts);
 
-  scrollable(column::Column::with_children(children))
+  let scrollbar = Scrollbar::new().width(4).scroller_width(4);
+
+  scrollable(column::Column::with_children(children).padding(padding::right(SPACE_GRID as u32)))
+    .direction(scrollable::Direction::Vertical(scrollbar))
     .anchor_bottom()
     .on_scroll(|viewport| {
       // distance from the *top* under anchor_bottom == reversed offset
