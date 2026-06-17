@@ -22,10 +22,15 @@ message ServerVoiceMessage {
   }
 }
 
+message LeaveRoom {
+  string voice_channel_id = 1;
+}
+
 message ClientVoiceMessage {
   oneof payload {
     SessionDescriptionWithId offer = 1;
     SessionDescriptionWithId answer = 2; 
+    LeaveRoom leave_room = 3;
   }
 }
 

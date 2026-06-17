@@ -227,13 +227,23 @@ impl StreamService for StreamServer {
             println!("received answer from peer {request_user_id}");
 
             let mut room_manager = ROOM_MANAGER.lock().await;
-
             let room = room_manager
               .rooms
               .entry(voice_channel_id)
               .or_insert(Room::default().into());
 
             let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
+          }
+          Ok(ClientVoice::LeaveRoom { voice_channel_id }) => {
+            let mut room_manager = ROOM_MANAGER.lock().await;
+            let room = room_manager
+              .rooms
+              .entry(voice_channel_id)
+              .or_insert(Room::default().into());
+
+            let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
+              .await
+              .map_err(|err| println!("Error handling leave: {err}"));
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
@@ -242,7 +252,7 @@ impl StreamService for StreamServer {
         }
       }
 
-      // grpc msg loop ended, remove peer from room, close pc
+      // grpc msg loop ended, remove peer from any rooms, close pc
 
       for (id, room) in &ROOM_MANAGER.lock().await.rooms {
         let _ = handle_leave(room.clone(), request_user_id, *id)

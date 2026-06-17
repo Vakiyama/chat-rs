@@ -38,6 +38,9 @@ pub enum ClientVoice {
     description: RTCSessionDescription,
     voice_channel_id: Uuid,
   },
+  LeaveRoom {
+    voice_channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]

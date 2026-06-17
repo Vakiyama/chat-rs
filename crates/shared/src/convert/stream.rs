@@ -59,6 +59,11 @@ impl IntoProto<ClientVoiceMessage> for ClientVoice {
         description: serde_json::to_string(&description).unwrap(),
         voice_channel_id: voice_channel_id.into(),
       }),
+      ClientVoice::LeaveRoom { voice_channel_id } => {
+        client_voice_message::Payload::LeaveRoom(LeaveRoom {
+          voice_channel_id: voice_channel_id.into(),
+        })
+      }
     };
 
     ClientVoiceMessage {
@@ -153,6 +158,9 @@ impl TryFromProto<ClientVoiceMessage> for ClientVoice {
             voice_channel_id: parse_id(offer.voice_channel_id)?,
           })
         }
+        client_voice_message::Payload::LeaveRoom(leave_room) => Ok(ClientVoice::LeaveRoom {
+          voice_channel_id: parse_id(leave_room.voice_channel_id)?,
+        }),
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))

@@ -56,6 +56,12 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             let _ = active.pc.close().await;
 
             let mut room_id = cloned_room_id.lock().await;
+            if let Some(room_id) = *room_id {
+              conn.send(ClientVoice::LeaveRoom {
+                voice_channel_id: room_id,
+              });
+            };
+
             *room_id = None;
           }
           match setup_client().await {
@@ -87,6 +93,13 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           if let Some(active) = call.take() {
             let _ = active.pc.close().await;
             let mut room_id = cloned_room_id.lock().await;
+
+            if let Some(room_id) = *room_id {
+              conn.send(ClientVoice::LeaveRoom {
+                voice_channel_id: room_id,
+              });
+            };
+
             *room_id = None;
           }
         }
