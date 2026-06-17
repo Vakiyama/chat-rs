@@ -98,25 +98,23 @@ fn pick_config(
   default: cpal::SupportedStreamConfig,
   ranges: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
 ) -> anyhow::Result<cpal::SupportedStreamConfig> {
-  let mut f32_ranges: Vec<_> = ranges
-    .filter(|r| r.sample_format() == cpal::SampleFormat::F32)
-    .collect();
-  // prefer an f32 range that can do 48k
-  if let Some(r) = f32_ranges
-    .iter()
-    .find(|r| r.min_sample_rate() <= TARGET_RATE && r.max_sample_rate() >= TARGET_RATE)
-  {
-    return Ok((*r).with_sample_rate(TARGET_RATE));
-  }
-  // else the device's own default, if it's f32
+  // shared-mode WASAPI only grants the device's current mix format, so trust the default first
   if default.sample_format() == cpal::SampleFormat::F32 {
     return Ok(default);
   }
-  // else any f32 range at its max
-  f32_ranges
-    .pop()
-    .map(|r| r.with_max_sample_rate())
-    .ok_or_else(|| anyhow::anyhow!("no f32 config on this device"))
+  // default isn't f32: look for any f32 range that contains the default's rate
+  let rate = default.sample_rate();
+  let mut f32_ranges: Vec<_> = ranges
+    .filter(|r| {
+      r.sample_format() == cpal::SampleFormat::F32
+        && r.min_sample_rate() <= rate
+        && r.max_sample_rate() >= rate
+    })
+    .collect();
+  if let Some(range) = f32_ranges.pop() {
+    return Ok(range.with_sample_rate(rate));
+  }
+  anyhow::bail!("no f32 config at device rate {rate}")
 }
 
 fn spawn_mic(
@@ -237,6 +235,7 @@ pub async fn setup_client() -> anyhow::Result<(
     out_dev.default_output_config()?,
     out_dev.supported_output_configs()?,
   )?;
+  println!("in cfg: {in_cfg:?}  out cfg: {out_cfg:?}");
   let in_rate = in_cfg.sample_rate();
   let out_rate = out_cfg.sample_rate();
 
