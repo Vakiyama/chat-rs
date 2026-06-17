@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::audio_processing::call_handler::VoiceHandle;
 use crate::screens::chat::View::NoneSelected;
 use crate::{Element, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
@@ -13,10 +14,10 @@ use chrono::{Local, Utc};
 use iced::Alignment::Center;
 use iced::font::Weight;
 use iced::widget::keyed::column;
-use iced::widget::scrollable::{Scrollbar, Scroller};
+use iced::widget::scrollable::Scrollbar;
 use iced::widget::{button, column, operation, scrollable, text, text_input};
 use iced::widget::{container, row};
-use iced::{Border, Color, Font, Length, Pixels, Task, Theme, border, padding};
+use iced::{Border, Font, Length, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
 use material_icons::Icon;
 use uuid::Uuid;
@@ -27,6 +28,7 @@ use uuid::Uuid;
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
+  active_voice_channel_id: Option<Uuid>,
   input: String,
 }
 
@@ -85,6 +87,8 @@ pub enum Message {
   ApiReturnedMorePosts(Result<GetPostsResponse, tonic::Status>),
   UserScrolledToTop,
   TypeAhead(String),
+  JoinVoice { voice_channel_id: Uuid },
+  LeaveVoice,
   Init,
   None,
 }
@@ -95,6 +99,7 @@ pub fn update(
   message: Message,
   user: &User,
   stream: Stream<chat_stream::ChatConnection>,
+  voice: Option<VoiceHandle>,
 ) -> Task<Message> {
   match message {
     Message::UserChangedChatInput(new) => {
@@ -348,6 +353,20 @@ pub fn update(
         operation::move_cursor_to_end(text_input_id),
       ])
     }
+    Message::JoinVoice { voice_channel_id } => {
+      if let Some(voice) = &voice {
+        voice.join(voice_channel_id);
+        model.active_voice_channel_id = Some(voice_channel_id);
+      }
+      Task::none()
+    }
+    Message::LeaveVoice => {
+      if let Some(voice) = &voice {
+        voice.leave();
+        model.active_voice_channel_id = None;
+      }
+      Task::none()
+    }
   }
 }
 
@@ -415,7 +434,12 @@ pub fn view(model: &Model) -> Element<'_, Message> {
 
   // todo: hardcoded server name until we add server to model
   row![
-    view_channels("The Intergalactic Federation", &model.view, channels),
+    view_channels(
+      "The Intergalactic Federation",
+      &model.view,
+      channels,
+      model.active_voice_channel_id
+    ),
     text_chat
   ]
   .spacing({ SPACE_GRID } as u32)
@@ -426,6 +450,7 @@ fn view_channels<'a>(
   server_name: &'a str,
   view: &'a View,
   channels: &'a [Channel],
+  active_voice_channel_id: Option<Uuid>,
 ) -> Element<'a, Message> {
   let (text_channels, voice_channels): (Vec<&Channel>, Vec<&Channel>) =
     channels.iter().partition(|channel| match channel.r#type {
@@ -496,10 +521,39 @@ fn view_channels<'a>(
   let rendered_voice: Vec<Element<'a, Message>> = voice_channels
     .into_iter()
     .map(|voice_channel| -> Element<'a, Message> {
+      let is_selected = match active_voice_channel_id {
+        None => false,
+        Some(id) => voice_channel.id == id,
+      };
+
+      let selected_font_style = move |theme: &Theme| -> text::Style {
+        text::Style {
+          color: if is_selected {
+            Some(theme.extended_palette().background.neutral.text)
+          } else {
+            None
+          },
+        }
+      };
+
+      let selected_icon_font_style = move |theme: &Theme| -> text::Style {
+        text::Style {
+          color: if is_selected {
+            Some(theme.extended_palette().success.base.color)
+          } else {
+            None
+          },
+        }
+      };
+
       button(
         row![
-          icon(Icon::Mic),
-          container(text(&voice_channel.name).wrapping(text::Wrapping::None))
+          icon(Icon::Mic).style(selected_icon_font_style),
+          container(
+            text(&voice_channel.name)
+              .wrapping(text::Wrapping::None)
+              .style(selected_font_style)
+          )
         ]
         .spacing((SPACE_GRID) as u32)
         .align_y(Center)
@@ -525,53 +579,64 @@ fn view_channels<'a>(
         }
       })
       .width(Length::Fill)
-      .on_press(Message::None)
+      .on_press(Message::JoinVoice {
+        voice_channel_id: voice_channel.id,
+      })
       // .style(container::primary)
       .into()
     })
     .collect();
 
-  container(
-    scrollable(column![
-      container(
-        text(server_name)
-          .font(Font {
-            weight: Weight::Bold,
-            ..Default::default()
-          })
-          .size(14)
-      )
-      .width(Length::Fill)
-      .padding(SPACE_GRID),
-      iced::widget::rule::horizontal(2),
-      iced::widget::space().height(SPACE_GRID as u32),
-      column![
-        column(rendered_text)
-          .spacing((SPACE_GRID / 2) as u32)
-          .width(Length::Fill),
-        column(rendered_voice)
-          .spacing((SPACE_GRID / 2) as u32)
-          .width(Length::Fill),
-      ]
-      .width(Length::Fill)
-      .spacing((SPACE_GRID) as u32),
-    ])
-    .width(290)
-    .height(Length::Fill),
-  )
-  .style(|theme| -> container::Style {
-    let palette = theme.extended_palette();
+  let channel_list = scrollable(column![
+    container(
+      text(server_name)
+        .font(Font {
+          weight: Weight::Bold,
+          ..Default::default()
+        })
+        .size(14)
+    )
+    .width(Length::Fill)
+    .padding(SPACE_GRID),
+    iced::widget::rule::horizontal(2),
+    iced::widget::space().height(SPACE_GRID as u32),
+    column![
+      column(rendered_text)
+        .spacing((SPACE_GRID / 2) as u32)
+        .width(Length::Fill),
+      column(rendered_voice)
+        .spacing((SPACE_GRID / 2) as u32)
+        .width(Length::Fill),
+    ]
+    .width(Length::Fill)
+    .spacing((SPACE_GRID) as u32),
+  ])
+  .width(Length::Fill)
+  .height(Length::Fill);
 
-    container::Style {
-      background: Some(palette.background.weakest.color.into()),
-      text_color: Some(palette.background.weakest.text),
-      border: border::rounded(2),
-      ..container::Style::default()
-    }
-  })
-  .padding(SPACE_GRID / 2)
-  .height(Length::Fill)
-  .into()
+  let mut sidebar = column![channel_list]
+    .height(Length::Fill)
+    .spacing((SPACE_GRID / 2) as u32);
+
+  if let Some(leave_call) = view_leave_call(active_voice_channel_id, channels) {
+    sidebar = sidebar.push(leave_call);
+  }
+
+  container(sidebar)
+    .width(290)
+    .style(|theme| -> container::Style {
+      let palette = theme.extended_palette();
+
+      container::Style {
+        background: Some(palette.background.weakest.color.into()),
+        text_color: Some(palette.background.weakest.text),
+        border: border::rounded(2),
+        ..container::Style::default()
+      }
+    })
+    .padding(SPACE_GRID / 2)
+    .height(Length::Fill)
+    .into()
 }
 
 // for when we display online text_chat members
@@ -733,4 +798,79 @@ fn view_posts<'a>(
     .height(Length::Fill)
     .width(Length::Fill)
     .into()
+}
+
+// renders a "voice connected" footer pinned to the bottom of the sidebar.
+// returns None when there's no active call, so the caller can skip pushing it.
+fn view_leave_call<'a>(
+  active_voice_channel_id: Option<Uuid>,
+  channels: &'a [Channel],
+) -> Option<Element<'a, Message>> {
+  let voice_channel_id = active_voice_channel_id?;
+
+  let channel_name = channels
+    .iter()
+    .find(|channel| channel.id == voice_channel_id)
+    .map(|channel| channel.name.as_str())
+    .unwrap_or("Voice");
+
+  let status = column![
+    text("Voice Connected")
+      .size(13)
+      .style(|theme: &Theme| {
+        text::Style {
+          color: Some(theme.extended_palette().success.base.color),
+        }
+      })
+      .font(Font {
+        weight: Weight::Bold,
+        ..Default::default()
+      }),
+    text(channel_name)
+      .size(12)
+      .style(text::secondary)
+      .wrapping(text::Wrapping::None),
+  ]
+  .spacing(2)
+  .width(Length::Fill);
+
+  let leave_button = button(icon(Icon::CallEnd))
+    .on_press(Message::LeaveVoice)
+    .style(|theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let background = match status {
+        button::Status::Active => None,
+        button::Status::Hovered => Some(palette.danger.weak.color.into()),
+        button::Status::Pressed => Some(palette.danger.base.color.into()),
+        button::Status::Disabled => None,
+      };
+
+      button::Style {
+        background,
+        text_color: palette.danger.base.color,
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    });
+
+  let panel = container(
+    row![status, leave_button]
+      .align_y(Center)
+      .spacing(SPACE_GRID as u32),
+  )
+  .width(Length::Fill)
+  .padding(SPACE_GRID)
+  .style(|theme: &Theme| {
+    let palette = theme.extended_palette();
+    container::Style {
+      background: Some(palette.background.weak.color.into()),
+      border: border::rounded(2),
+      ..container::Style::default()
+    }
+  });
+
+  Some(panel.into())
 }

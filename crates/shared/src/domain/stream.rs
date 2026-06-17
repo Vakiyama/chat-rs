@@ -30,12 +30,24 @@ pub enum ServerText {
 }
 
 pub enum ClientVoice {
-  Offer(RTCSessionDescription),
-  Answer(RTCSessionDescription),
+  Offer {
+    description: RTCSessionDescription,
+    voice_channel_id: Uuid,
+  },
+  Answer {
+    description: RTCSessionDescription,
+    voice_channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]
 pub enum ServerVoice {
-  Offer(RTCSessionDescription),
-  Answer(RTCSessionDescription),
+  Offer {
+    description: RTCSessionDescription,
+    voice_channel_id: Uuid,
+  },
+  Answer {
+    description: RTCSessionDescription,
+    voice_channel_id: Uuid,
+  },
 }

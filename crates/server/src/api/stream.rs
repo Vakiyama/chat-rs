@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{Arc, Mutex, OnceLock},
+  sync::{Arc, Mutex},
 };
 
 use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
@@ -111,7 +111,15 @@ impl Manager {
 
 // temporary room singleton
 
-static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
+// static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
+
+#[derive(Default)]
+struct VoiceRoomManager {
+  rooms: HashMap<Uuid, Arc<Room>>,
+}
+
+static ROOM_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<VoiceRoomManager>> =
+  std::sync::LazyLock::new(|| tokio::sync::Mutex::new(VoiceRoomManager::default()));
 
 static WEBRTC_API: OnceCell<API> = OnceCell::const_new();
 
@@ -129,14 +137,6 @@ impl StreamService for StreamServer {
     let Some(request_user_id) = request_user_id else {
       return Err(tonic::Status::unauthenticated("Unauthenitcated"));
     };
-
-    // eventually setup rooms, for now, one global room
-    let room = GLOBAL_ROOM.get_or_init(|| {
-      Room {
-        peers: HashMap::new().into(),
-      }
-      .into()
-    });
 
     let mut inner_stream = request.into_inner();
 
@@ -186,9 +186,29 @@ impl StreamService for StreamServer {
           .await;
 
         match msg {
-          Ok(ClientVoice::Offer(desc)) => {
+          Ok(ClientVoice::Offer {
+            description: offer,
+            voice_channel_id,
+          }) => {
+            // eventually setup rooms, for now, one global room
+            let mut room_manager = ROOM_MANAGER.lock().await;
+
+            let room = room_manager
+              .rooms
+              .entry(voice_channel_id)
+              .or_insert(Room::default().into());
+
             if !room.peers.read().await.contains_key(&request_user_id) {
-              match handle_offer(desc, room.clone(), request_user_id, tx.clone(), api).await {
+              match handle_offer(
+                offer,
+                room.clone(),
+                request_user_id,
+                tx.clone(),
+                api,
+                voice_channel_id,
+              )
+              .await
+              {
                 Ok(()) => {
                   println!("Success handling session description offer from client");
                   // let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
@@ -200,9 +220,20 @@ impl StreamService for StreamServer {
               eprintln!("User offer rejected; already in room.");
             }
           }
-          Ok(ClientVoice::Answer(answer)) => {
+          Ok(ClientVoice::Answer {
+            description: answer,
+            voice_channel_id,
+          }) => {
             println!("received answer from peer {request_user_id}");
-            let _ = handle_answer(room.clone(), request_user_id, answer).await;
+
+            let mut room_manager = ROOM_MANAGER.lock().await;
+
+            let room = room_manager
+              .rooms
+              .entry(voice_channel_id)
+              .or_insert(Room::default().into());
+
+            let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
@@ -212,9 +243,12 @@ impl StreamService for StreamServer {
       }
 
       // grpc msg loop ended, remove peer from room, close pc
-      let _ = handle_leave(room.clone(), request_user_id)
-        .await
-        .map_err(|err| println!("Error handling leave: {err}"));
+
+      for (id, room) in &ROOM_MANAGER.lock().await.rooms {
+        let _ = handle_leave(room.clone(), request_user_id, *id)
+          .await
+          .map_err(|err| println!("Error handling leave: {err}"));
+      }
     });
 
     let output_stream = ReceiverStream::new(rx);
@@ -255,49 +289,46 @@ impl StreamService for StreamServer {
             content,
             text_channel_id,
           }) => {
-            // handler: atm, we only deal with chat message relaying and ignore others
             let targets = manager.lock().unwrap().targets_with_self();
 
-            if let Some(user_id) = request_user_id {
-              let server_msg = ServerText::Post(Post {
-                id,
-                author_name: user.username.clone(),
-                content: content.clone(),
-                created_at: chrono::Utc::now(),
-              });
+            let server_msg = ServerText::Post(Post {
+              id,
+              author_name: user.username.clone(),
+              content: content.clone(),
+              created_at: chrono::Utc::now(),
+            });
 
-              let channel = entities::channel::Entity::find()
-                .filter(
-                  entities::channel::COLUMN
-                    .text_channel_id
-                    .eq(text_channel_id),
-                )
-                .one(db)
-                .await
-                .unwrap();
-
-              let channel_id = channel.unwrap().id;
-
-              entities::post::Entity::insert(
-                entities::post::Model {
-                  id: uuid::Uuid::new_v4(),
-                  content,
-                  channel_id: Some(channel_id),
-                  author_id: Some(user.id),
-                  created_at: chrono::Utc::now(),
-                }
-                .into_active_model(),
+            let channel = entities::channel::Entity::find()
+              .filter(
+                entities::channel::COLUMN
+                  .text_channel_id
+                  .eq(text_channel_id),
               )
-              .exec(db)
+              .one(db)
               .await
-              .map_err(|err| {
-                eprintln!("error inserting post: {err}");
-                tonic::Status::internal("Error occurred inserting post.")
-              })
               .unwrap();
 
-              Manager::emit(targets, server_msg.into_proto()).await;
-            };
+            let channel_id = channel.unwrap().id;
+
+            entities::post::Entity::insert(
+              entities::post::Model {
+                id: uuid::Uuid::new_v4(),
+                content,
+                channel_id: Some(channel_id),
+                author_id: Some(user.id),
+                created_at: chrono::Utc::now(),
+              }
+              .into_active_model(),
+            )
+            .exec(db)
+            .await
+            .map_err(|err| {
+              eprintln!("error inserting post: {err}");
+              tonic::Status::internal("Error occurred inserting post.")
+            })
+            .unwrap();
+
+            Manager::emit(targets, server_msg.into_proto()).await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")

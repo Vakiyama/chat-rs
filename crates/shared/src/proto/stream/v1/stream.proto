@@ -10,21 +10,22 @@ service StreamService {
 
 // Voice Streams:
 
-message SessionDescription {
-  string RTCSessionDescription = 1;
+message SessionDescriptionWithId {
+  string description = 1;
+  string voice_channel_id = 2;
 }
 
 message ServerVoiceMessage {
   oneof payload {
-    SessionDescription offer = 1;
-    SessionDescription answer = 2;
+    SessionDescriptionWithId offer = 1;
+    SessionDescriptionWithId answer = 2;
   }
 }
 
 message ClientVoiceMessage {
   oneof payload {
-    SessionDescription offer = 1;
-    SessionDescription answer = 2; 
+    SessionDescriptionWithId offer = 1;
+    SessionDescriptionWithId answer = 2; 
   }
 }
 

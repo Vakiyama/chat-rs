@@ -5,6 +5,7 @@ use iced::Theme::CatppuccinFrappe;
 use iced::widget::{Text, container, text};
 use iced::{Element, Font, Subscription, Task};
 use material_icons::{Icon, icon_to_char};
+use uuid::Uuid;
 
 pub mod audio_processing;
 mod chat_stream;
@@ -99,8 +100,6 @@ pub enum Message {
   WebRTC(Box<ServerVoice>),
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
-  JoinVoice,
-  LeaveVoice,
   None,
   LoggedIn(User),
 }
@@ -111,7 +110,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
-        chat::update(chat_model, msg, user, model.chat_stream.clone()).map(Message::Chat)
+        chat::update(
+          chat_model,
+          msg,
+          user,
+          model.chat_stream.clone(),
+          model.voice.clone(),
+        )
+        .map(Message::Chat)
       } else {
         iced::Task::none()
       }
@@ -171,18 +177,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 
       Task::none()
     }
-    Message::JoinVoice => {
-      if let Some(v) = &model.voice {
-        v.join();
-      }
-      Task::none()
-    }
-    Message::LeaveVoice => {
-      if let Some(v) = &model.voice {
-        v.leave();
-      }
-      Task::none()
-    }
     Message::WebRTC(msg) => {
       if let Some(v) = &model.voice {
         v.signal(*msg);
@@ -192,7 +186,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::WebRTCSignalStreamConnected(conn) => {
       model.voice = Some(spawn_voice(conn));
 
-      Task::done(Message::JoinVoice)
+      Task::none()
     }
     Message::WebRTCSignalStreamDisconnected => {
       model.voice = None; // drops the handle → actor loop ends

@@ -55,6 +55,7 @@ pub async fn handle_offer(
   me: PeerId,
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
   api: &API,
+  voice_channel_id: Uuid,
 ) -> anyhow::Result<()> {
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
@@ -145,7 +146,7 @@ pub async fn handle_offer(
         });
 
         // todo: reneg serialization (negotiating/needs_renegotiation flags)
-        if let Err(e) = renegotiate(&peer).await {
+        if let Err(e) = renegotiate(&peer, voice_channel_id).await {
           eprintln!("renegotiate({peer_id}) error: {e:?}");
         }
       }
@@ -174,7 +175,13 @@ pub async fn handle_offer(
   // negotiation done: join the room, then answer the client
   room.peers.write().await.insert(me, participant.clone());
   signal_tx
-    .send(Ok(ServerVoice::Answer(answer).into_proto()))
+    .send(Ok(
+      ServerVoice::Answer {
+        description: answer,
+        voice_channel_id,
+      }
+      .into_proto(),
+    ))
     .await?;
 
   participant.negotiating.swap(false, Ordering::SeqCst);
@@ -221,13 +228,13 @@ pub async fn handle_offer(
       });
       let _ = publisher_id; // (or use it in logs)
     }
-    renegotiate(&participant).await?;
+    renegotiate(&participant, voice_channel_id).await?;
   }
 
   Ok(())
 }
 
-async fn renegotiate(peer: &Participant) -> anyhow::Result<()> {
+async fn renegotiate(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
   if peer.negotiating.swap(true, SeqCst) {
     peer.needs_renegotiation.store(true, SeqCst);
     return Ok(());
@@ -242,12 +249,22 @@ async fn renegotiate(peer: &Participant) -> anyhow::Result<()> {
     .ok_or_else(|| anyhow::anyhow!("no local description"))?;
   peer
     .signal_tx
-    .send(Ok(ServerVoice::Offer(local).into_proto()))
+    .send(Ok(
+      ServerVoice::Offer {
+        description: local,
+        voice_channel_id,
+      }
+      .into_proto(),
+    ))
     .await?; // push to that peer's stream
   Ok(())
 }
 
-pub async fn handle_leave(room: Arc<Room>, me: PeerId) -> anyhow::Result<()> {
+pub async fn handle_leave(
+  room: Arc<Room>,
+  me: PeerId,
+  voice_channel_id: Uuid,
+) -> anyhow::Result<()> {
   // idempotent: second call finds nothing and returns
   let Some(leaving) = room.peers.write().await.remove(&me) else {
     return Ok(());
@@ -269,7 +286,7 @@ pub async fn handle_leave(room: Arc<Room>, me: PeerId) -> anyhow::Result<()> {
       eprintln!("remove_track on {subscriber_id} failed: {e:?}");
       continue;
     }
-    if let Err(e) = renegotiate(&sub).await {
+    if let Err(e) = renegotiate(&sub, voice_channel_id).await {
       eprintln!("renegotiate({subscriber_id}) after leave failed: {e:?}");
     }
   }
@@ -287,6 +304,7 @@ pub async fn handle_answer(
   room: Arc<Room>,
   me: PeerId,
   answer: RTCSessionDescription,
+  voice_channel_id: Uuid,
 ) -> anyhow::Result<()> {
   let peer = room
     .peers
@@ -301,7 +319,7 @@ pub async fn handle_answer(
   result?;
 
   if peer.needs_renegotiation.swap(false, SeqCst) {
-    renegotiate(&peer).await?;
+    renegotiate(&peer, voice_channel_id).await?;
   }
   Ok(())
 }
@@ -356,14 +374,14 @@ mod tests {
 
   async fn expect_answer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
     match recv_signal(rx).await? {
-      ServerVoice::Answer(desc) => Ok(desc),
+      ServerVoice::Answer { description, .. } => Ok(description),
       other => anyhow::bail!("expected Answer, got {other:?}"),
     }
   }
 
   async fn expect_offer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
     match recv_signal(rx).await? {
-      ServerVoice::Offer(desc) => Ok(desc),
+      ServerVoice::Offer { description, .. } => Ok(description),
       other => anyhow::bail!("expected Offer, got {other:?}"),
     }
   }
@@ -376,6 +394,7 @@ mod tests {
     tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
     rx: &mut SignalRx,
     api: &API,
+    voice_channel_id: Uuid,
   ) -> anyhow::Result<()> {
     let offer = client.create_offer(None).await?;
     let mut gather = client.gathering_complete_promise().await;
@@ -387,6 +406,7 @@ mod tests {
       id,
       tx,
       api,
+      voice_channel_id,
     )
     .await?;
     let answer = expect_answer(rx).await?;
@@ -400,11 +420,18 @@ mod tests {
     room: &Arc<Room>,
     id: PeerId,
     offer: RTCSessionDescription,
+    voice_channel_id: Uuid,
   ) -> anyhow::Result<()> {
     client.set_remote_description(offer).await?;
     let answer = client.create_answer(None).await?;
     client.set_local_description(answer).await?;
-    handle_answer(room.clone(), id, client.local_description().await.unwrap()).await
+    handle_answer(
+      room.clone(),
+      id,
+      client.local_description().await.unwrap(),
+      voice_channel_id,
+    )
+    .await
   }
 
   // one-shot on_track latch
@@ -491,6 +518,7 @@ mod tests {
 
   #[tokio::test]
   async fn offer_handshake_reaches_connected() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
     let room: Arc<Room> = Room::default().into();
     let api = make_server_api()?;
 
@@ -514,7 +542,7 @@ mod tests {
       Box::pin(async {})
     }));
 
-    join(&client, &room, Uuid::new_v4(), tx, &mut rx, &api).await?;
+    join(&client, &room, Uuid::new_v4(), tx, &mut rx, &api, room_id).await?;
 
     tokio::time::timeout(Duration::from_secs(10), connected_rx).await??;
     Ok(())
@@ -525,6 +553,7 @@ mod tests {
   //   - A hears B via the reneg triggered by B's media arriving
   #[tokio::test]
   async fn both_directions_with_sequential_joins() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
     let room: Arc<Room> = Room::default().into();
     let api = make_server_api()?;
 
@@ -534,7 +563,7 @@ mod tests {
     let a_client = make_client_pc().await?;
     start_fake_mic(make_fake_mic(&a_client).await?);
     let a_heard = on_track_latch(&a_client);
-    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api).await?;
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
 
     // pin the test to the "relay exists at join time" path
     wait_for_relay(&room, a_id).await?;
@@ -545,16 +574,16 @@ mod tests {
     let b_client = make_client_pc().await?;
     start_fake_mic(make_fake_mic(&b_client).await?);
     let b_heard = on_track_latch(&b_client);
-    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api).await?;
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
 
     // NEW-CONTRACT ASSERTION: B's join is immediately followed by a reneg
     // offer carrying A's relay (Answer was consumed inside join())
     let offer_to_b = expect_offer(&mut b_rx).await?;
-    answer_reneg(&b_client, &room, b_id, offer_to_b).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
 
     // B's media reaching the server renegotiates A
     let offer_to_a = expect_offer(&mut a_rx).await?;
-    answer_reneg(&a_client, &room, a_id, offer_to_a).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a, room_id).await?;
 
     // both directions audible
     tokio::time::timeout(Duration::from_secs(10), b_heard).await??; // B hears A
@@ -566,6 +595,7 @@ mod tests {
   // must still reach B via the self-heal renegotiation
   #[tokio::test]
   async fn late_publisher_self_heals_via_renegotiation() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
     let room: Arc<Room> = Room::default().into();
     let api = make_server_api()?;
 
@@ -574,7 +604,7 @@ mod tests {
     let a_id = Uuid::new_v4();
     let a_client = make_client_pc().await?;
     let a_mic = make_fake_mic(&a_client).await?;
-    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api).await?;
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
 
     // B joins listen-only while A's relay is absent
     let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
@@ -587,7 +617,7 @@ mod tests {
       )
       .await?;
     let b_heard = on_track_latch(&b_client);
-    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api).await?;
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
 
     // sanity: no relay existed, so join() consumed an Answer and NO offer
     // should have been sent to B yet
@@ -606,7 +636,7 @@ mod tests {
     start_fake_mic(a_mic);
 
     let offer_to_b = expect_offer(&mut b_rx).await?;
-    answer_reneg(&b_client, &room, b_id, offer_to_b).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
 
     tokio::time::timeout(Duration::from_secs(10), b_heard).await??;
     Ok(())
