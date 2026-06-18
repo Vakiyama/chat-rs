@@ -65,6 +65,8 @@
             }
           );
 
+          serverUrl = "http://5.78.193.193:3000";
+
           guiLibs = with pkgs; [
             libGL
             vulkan-loader
@@ -231,6 +233,7 @@
                 cargoExtraArgs = "--locked --package chat-client";
                 doCheck = false;
                 meta.mainProgram = "client";
+                DEFAULT_SERVER_URL = serverUrl;
                 nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
                 postInstall = ''
                   wrapProgram $out/bin/client \
@@ -244,10 +247,9 @@
             client-windows =
               let
                 crossPkgs = pkgs.pkgsCross.mingwW64;
-                rustToolchainWin =
-                  (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default.override {
-                    targets = [ "x86_64-pc-windows-gnu" ];
-                  };
+                rustToolchainWin = (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default.override {
+                  targets = [ "x86_64-pc-windows-gnu" ];
+                };
                 craneLibWin = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchainWin;
                 opusStatic = crossPkgs.libopus.overrideAttrs (old: {
                   mesonFlags = (old.mesonFlags or [ ]) ++ [ "-Ddefault_library=static" ];
@@ -255,6 +257,7 @@
               in
               craneLibWin.buildPackage {
                 inherit src;
+                DEFAULT_SERVER_URL = serverUrl;
                 version = "0.1.0";
                 strictDeps = true;
                 pname = "chat-rs-client-windows";
@@ -284,7 +287,8 @@
 
                 # ring's cc-rs build looks up the compiler by rust triple, which nix doesn't export
                 "CC_x86_64-pc-windows-gnu" = "${crossPkgs.stdenv.cc}/bin/${crossPkgs.stdenv.cc.targetPrefix}cc";
-                "AR_x86_64-pc-windows-gnu" = "${crossPkgs.stdenv.cc.bintools.bintools}/bin/${crossPkgs.stdenv.cc.targetPrefix}ar";
+                "AR_x86_64-pc-windows-gnu" =
+                  "${crossPkgs.stdenv.cc.bintools.bintools}/bin/${crossPkgs.stdenv.cc.targetPrefix}ar";
               };
           };
 

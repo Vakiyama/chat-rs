@@ -26,3 +26,6 @@ tower = "0.5.3"
 http = "1.4.0"
 email_address = "0.2.9"       
 chrono = "0.4.44"
+
+[patch.crates-io]
+sonora-aec3 = { git = "https://github.com/dignifiedquire/sonora", rev = "dec6a074725e82ef371a024fc45236d60f0acf52" }
