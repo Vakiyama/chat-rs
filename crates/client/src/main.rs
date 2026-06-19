@@ -141,6 +141,7 @@ pub enum Message {
   Loaded(Option<MeReturn>),
   ChatStreamConnected(ChatConnection),
   ChatStreamDisconnected,
+  ChatLatencyUpdated(u32),
   WebRTC(Box<ServerVoice>),
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
@@ -244,6 +245,12 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::ChatStreamConnected(connection) => {
       model.chat_stream = Stream::Connected(connection);
 
+      Task::none()
+    }
+    Message::ChatLatencyUpdated(latency_ms) => {
+      if let Some(ref mut voice) = model.voice {
+        voice.latency_ms = latency_ms as u32;
+      }
       Task::none()
     }
     Message::WebRTC(msg) => {

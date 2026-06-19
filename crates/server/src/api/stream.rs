@@ -20,6 +20,7 @@ use chat_shared::{
     stream::{ClientText, ClientVoice, ServerText},
   },
 };
+use std::time::SystemTime;
 use tokio::sync::mpsc::{self};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
@@ -287,6 +288,7 @@ impl StreamService for StreamServer {
 
     let socket_id = Uuid::new_v4();
     let manager = self.manager.clone();
+    let pong_tx = tx.clone();
     manager.lock().unwrap().add(socket_id, tx);
 
     tokio::spawn(async move {
@@ -339,6 +341,16 @@ impl StreamService for StreamServer {
             .unwrap();
 
             Manager::emit(targets, server_msg.into_proto()).await;
+          }
+          Ok(ClientText::Ping { timestamp }) => {
+            let server_received_at = SystemTime::now()
+              .duration_since(SystemTime::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_micros() as u64;
+            let _ = pong_tx.send(Ok(ServerText::Pong {
+              timestamp,
+              server_received_at,
+            }.into_proto())).await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")

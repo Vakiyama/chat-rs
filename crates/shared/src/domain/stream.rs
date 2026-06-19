@@ -20,6 +20,9 @@ pub enum ClientText {
     content: String,
     text_channel_id: Uuid,
   },
+  Ping {
+    timestamp: u64,
+  },
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +30,10 @@ pub enum ServerText {
   JoinedRoom { from: User },
   LeftRoom { from: User },
   Post(Post),
+  Pong {
+    timestamp: u64,
+    server_received_at: u64,
+  },
 }
 
 pub enum ClientVoice {

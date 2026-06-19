@@ -184,6 +184,7 @@ pub fn update(
 
         Task::none()
       }
+      ServerText::Pong { .. } => Task::none(),
     },
     Message::UserSelectedTextChannel {
       text_channel_id,

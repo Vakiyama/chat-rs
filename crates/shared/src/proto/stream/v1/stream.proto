@@ -61,13 +61,24 @@ message ServerTextMessage {
     JoinedRoom  joined_room = 1;
     LeftRoom    left_room   = 2;
     Post        chat        = 3;
+    Pong        pong        = 4;
   }
 }
 
 message ClientTextMessage {
   oneof payload {
     CreatePostRequest post = 1;
+    Ping        ping        = 2;
   }
+}
+
+message Ping {
+  uint64 timestamp = 1;
+}
+
+message Pong {
+  uint64 timestamp = 1;
+  uint64 server_received_at = 2;
 }
 
 message CreatePostRequest {

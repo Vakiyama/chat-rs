@@ -95,6 +95,9 @@ impl IntoProto<ClientTextMessage> for ClientText {
           content,
         })),
       },
+      ClientText::Ping { timestamp } => ClientTextMessage {
+        payload: Some(client_text_message::Payload::Ping(Ping { timestamp })),
+      },
     }
   }
 }
@@ -126,6 +129,15 @@ impl IntoProto<ServerTextMessage> for ServerText {
       ServerText::LeftRoom { from } => ServerTextMessage {
         payload: Some(server_text_message::Payload::LeftRoom(LeftRoom {
           from: Some(from.into_proto()),
+        })),
+      },
+      ServerText::Pong {
+        timestamp,
+        server_received_at,
+      } => ServerTextMessage {
+        payload: Some(server_text_message::Payload::Pong(Pong {
+          timestamp,
+          server_received_at,
         })),
       },
     }
@@ -241,6 +253,10 @@ impl TryFromProto<ServerTextMessage> for ServerText {
             created_at,
           }))
         }
+        server_text_message::Payload::Pong(pong) => Ok(ServerText::Pong {
+          timestamp: pong.timestamp,
+          server_received_at: pong.server_received_at,
+        }),
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
@@ -258,6 +274,9 @@ impl TryFromProto<ClientTextMessage> for ClientText {
           id: parse_id(chat_message.id)?,
           content: chat_message.content,
           text_channel_id: parse_id(chat_message.text_channel_id)?,
+        }),
+        client_text_message::Payload::Ping(ping) => Ok(ClientText::Ping {
+          timestamp: ping.timestamp,
         }),
       }
     } else {
