@@ -37,4 +37,4 @@ rubato = "0.15"
 iced_aw = "0.14.1"
 indexmap = "2.14.0"
 material-icons = "0.3"
-
+google_material_symbols = "0.2"

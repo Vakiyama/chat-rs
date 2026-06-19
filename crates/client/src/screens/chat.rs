@@ -1,8 +1,7 @@
 use std::str::FromStr;
 
-use crate::audio_processing::call_handler::VoiceHandle;
 use crate::screens::chat::View::NoneSelected;
-use crate::{Element, chat_stream, client, icon};
+use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
 
 use crate::types::async_data::AsyncData;
@@ -11,15 +10,15 @@ use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Local, Utc};
+use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
-use iced::font::Weight;
+use iced::font::Weight::{self, Semibold};
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, scrollable, space, text, text_input};
+use iced::widget::{button, column, operation, scrollable, text, text_input};
 use iced::widget::{container, row};
-use iced::{Border, Font, Length, Pixels, Task, Theme, border, padding};
+use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
-use material_icons::Icon;
 use uuid::Uuid;
 
 // --------------------------------- MODEL ---------------------------------
@@ -433,7 +432,6 @@ pub fn view<'a>(
     ),
     text_chat
   ]
-  .spacing({ SPACE_GRID } as u32)
   .into()
 }
 
@@ -458,41 +456,60 @@ fn view_channels<'a>(
         View::TextChannel(text_channel_view) => text_channel.id == text_channel_view.id,
       };
 
-      let selected_font_style = move |theme: &Theme| -> text::Style {
-        text::Style {
-          color: if is_selected {
-            Some(theme.extended_palette().background.neutral.text)
-          } else {
-            None
-          },
-        }
-      };
+      // let selected_button_style = move |theme: &Theme| -> container::Style {
+      //   container::Style {
+      //     background: Some(theme.extended_palette().background.weak.color.into()),
+      //     text_color: if is_selected {
+      //       Some(theme.extended_palette().background.neutral.text)
+      //     } else {
+      //       None
+      //     },
+      //     ..container::Style::default()
+      //   }
+      // };
 
       button(
         row![
-          icon(Icon::Tag).style(selected_font_style),
+          icon(GoogleMaterialSymbols::Tag).size(20).style(|theme| {
+            text::Style {
+              color: Some(theme.extended_palette().background.weakest.text),
+            }
+          }),
           container(
             text(&text_channel.name)
               .wrapping(text::Wrapping::None)
-              .style(selected_font_style)
+              .font(Font {
+                weight: Weight::Semibold,
+                ..SOURCE_SANS_REGULAR
+              })
           )
         ]
         .spacing((SPACE_GRID) as u32)
         .align_y(Center)
         .clip(true),
       )
-      .style(|theme: &Theme, status| -> button::Style {
+      .style(move |theme: &Theme, status| -> button::Style {
         let palette = theme.extended_palette();
         let background = match status {
-          button::Status::Active => None,
-          button::Status::Hovered => Some(palette.background.stronger.color.into()),
-          button::Status::Pressed => Some(palette.background.strong.color.into()),
+          button::Status::Active => {
+            if is_selected {
+              Some(palette.background.weak.color.into())
+            } else {
+              None
+            }
+          }
+          button::Status::Hovered => Some(palette.background.weak.color.into()),
+          button::Status::Pressed => Some(palette.background.weaker.color.into()),
           button::Status::Disabled => None,
         };
 
         button::Style {
           background,
-          text_color: palette.background.base.text,
+          text_color: if is_selected || matches!(status, button::Status::Hovered) {
+            palette.background.neutral.text
+          } else {
+            palette.background.weakest.text
+          },
           border: Border {
             radius: (SPACE_GRID as u32 / 2).into(),
             ..Default::default()
@@ -521,7 +538,7 @@ fn view_channels<'a>(
       let selected_font_style = move |theme: &Theme| -> text::Style {
         text::Style {
           color: if is_selected {
-            Some(theme.extended_palette().background.neutral.text)
+            Some(theme.extended_palette().success.base.color)
           } else {
             None
           },
@@ -540,10 +557,16 @@ fn view_channels<'a>(
 
       button(
         row![
-          icon(Icon::Mic).style(selected_icon_font_style),
+          icon(GoogleMaterialSymbols::Mic)
+            .size(20)
+            .style(selected_icon_font_style),
           container(
             text(&voice_channel.name)
               .wrapping(text::Wrapping::None)
+              .font(Font {
+                weight: Weight::Semibold,
+                ..SOURCE_SANS_REGULAR
+              })
               .style(selected_font_style)
           )
         ]
@@ -584,24 +607,49 @@ fn view_channels<'a>(
       text(server_name)
         .font(Font {
           weight: Weight::Bold,
-          ..Default::default()
+          ..SOURCE_SANS_REGULAR
         })
-        .size(14)
+        .size(16)
     )
-    .width(Length::Fill)
-    .padding(SPACE_GRID),
+    .center(Length::Fill)
+    .height((SPACE_GRID * 6) as u32 - 2)
+    .width(Length::Fill),
     iced::widget::rule::horizontal(2),
-    iced::widget::space().height(SPACE_GRID as u32),
     column![
-      column(rendered_text)
-        .spacing((SPACE_GRID / 2) as u32)
-        .width(Length::Fill),
-      column(rendered_voice)
-        .spacing((SPACE_GRID / 2) as u32)
-        .width(Length::Fill),
+      column![
+        row![
+          container(
+            text("TEXT CHANNELS")
+              .style(text::default)
+              .size(12)
+              .font(Font {
+                weight: Weight::Semibold,
+                ..SOURCE_SANS_REGULAR
+              })
+          )
+          .padding(SPACE_GRID)
+        ],
+        column(rendered_text).spacing(1).width(Length::Fill),
+      ],
+      column![
+        row![
+          container(
+            text("VOICE CHANNELS")
+              .style(text::default)
+              .size(12)
+              .font(Font {
+                weight: Weight::Semibold,
+                ..SOURCE_SANS_REGULAR
+              })
+          )
+          .padding(SPACE_GRID)
+        ],
+        column(rendered_voice).spacing(1).width(Length::Fill),
+      ]
     ]
     .width(Length::Fill)
-    .spacing((SPACE_GRID) as u32),
+    .padding([SPACE_GRID * 2, SPACE_GRID])
+    .spacing((SPACE_GRID * 2) as u32),
   ])
   .width(Length::Fill)
   .height(Length::Fill);
@@ -626,7 +674,6 @@ fn view_channels<'a>(
         ..container::Style::default()
       }
     })
-    .padding(SPACE_GRID / 2)
     .height(Length::Fill)
     .into()
 }
@@ -668,23 +715,31 @@ fn view_text_chat_window<'a>(
   container(column![
     // top - channel name
     view_text_chat_title(name), // middle:
-    row![view_posts(posts, loading_more)].padding([SPACE_GRID, 0]),
+    row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
     // row: text posts - user list
-    text_input(&format!("Message #{name}"), text_input_string)
-      .id(make_text_input_id(text_channel_id))
-      .on_input(Message::UserChangedChatInput)
-      .on_submit(Message::UserSubmittedChatInput)
-      .style(|theme, status| {
-        let default_style = text_input::default(theme, status);
-        text_input::Style {
-          border: Border {
-            radius: ((SPACE_GRID / 2) as u32).into(),
-            ..default_style.border
-          },
-          ..default_style
-        }
-      })
-      .padding(SPACE_GRID),
+    container(
+      text_input(&format!("Message #{name}"), text_input_string)
+        .id(make_text_input_id(text_channel_id))
+        .on_input(Message::UserChangedChatInput)
+        .on_submit(Message::UserSubmittedChatInput)
+        .style(|theme, status| {
+          let default_style = text_input::default(theme, status);
+          text_input::Style {
+            border: Border {
+              radius: (SPACE_GRID as u32).into(),
+              ..default_style.border
+            },
+            ..default_style
+          }
+        })
+        .padding(SPACE_GRID * 2)
+    )
+    .padding(Padding {
+      top: 0.0,
+      right: (SPACE_GRID * 2).into(),
+      bottom: (SPACE_GRID * 3).into(),
+      left: (SPACE_GRID * 2).into()
+    }),
     // .style(|_theme: &Theme, _status| {
     //   ButtonStyle {
     //     background: Some(iced::Background::Color(Color::from_rgb(0.9, 0.9, 0.9))),
@@ -705,11 +760,32 @@ fn view_text_chat_window<'a>(
 }
 
 fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
-  container(text(format!("#{name}")).size(16))
+  column![
+    container(
+      row![
+        icon(GoogleMaterialSymbols::Tag).size(24).style(|theme| {
+          text::Style {
+            color: Some(theme.extended_palette().background.weakest.text),
+          }
+        }),
+        text(name).size(18).font(Font {
+          weight: Weight::Semibold,
+          ..SOURCE_SANS_REGULAR
+        })
+      ]
+      .align_y(Center)
+      .padding([0, SPACE_GRID * 4])
+      .spacing((SPACE_GRID) as u32)
+    )
     .width(Length::Fill)
-    .style(container::secondary)
-    .padding([SPACE_GRID / 2, SPACE_GRID])
-    .into()
+    .center_y(Length::Fill)
+    .height((SPACE_GRID * 6) as u32 - 2),
+    // .style(container::primary),
+    iced::widget::rule::horizontal(2) // .style(|theme| iced::widget::rule::Style {
+                                      //   ..iced::widget::rule::default(theme)
+                                      // })
+  ]
+  .into()
 }
 
 fn view_posts<'a>(
@@ -775,21 +851,25 @@ fn view_posts<'a>(
 
   let scrollbar = Scrollbar::new().width(4).scroller_width(4);
 
-  scrollable(column::Column::with_children(children).padding(padding::right(SPACE_GRID as u32)))
-    .direction(scrollable::Direction::Vertical(scrollbar))
-    .anchor_bottom()
-    .on_scroll(|viewport| {
-      // distance from the *top* under anchor_bottom == reversed offset
-      const LOAD_THRESHOLD: f32 = 200.0; // start prefetching ~200px early
-      if viewport.absolute_offset_reversed().y <= LOAD_THRESHOLD {
-        Message::UserScrolledToTop
-      } else {
-        Message::None
-      }
-    })
-    .height(Length::Fill)
-    .width(Length::Fill)
-    .into()
+  scrollable(
+    column::Column::with_children(children)
+      .padding(padding::right(SPACE_GRID as u32))
+      .padding([SPACE_GRID, 0]),
+  )
+  .direction(scrollable::Direction::Vertical(scrollbar))
+  .anchor_bottom()
+  .on_scroll(|viewport| {
+    // distance from the *top* under anchor_bottom == reversed offset
+    const LOAD_THRESHOLD: f32 = 200.0; // start prefetching ~200px early
+    if viewport.absolute_offset_reversed().y <= LOAD_THRESHOLD {
+      Message::UserScrolledToTop
+    } else {
+      Message::None
+    }
+  })
+  .height(Length::Fill)
+  .width(Length::Fill)
+  .into()
 }
 
 #[derive(Clone, Copy)]
@@ -902,14 +982,14 @@ fn view_leave_call<'a>(
       })
       .font(Font {
         weight: Weight::Bold,
-        ..Default::default()
+        ..SOURCE_SANS_REGULAR
       }),
     meta,
   ]
   .spacing(2)
   .width(Length::Fill);
 
-  let leave_button = button(icon(Icon::CallEnd))
+  let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(16))
     .on_press(Message::LeaveVoice)
     .style(|theme: &Theme, status| {
       let palette = theme.extended_palette();

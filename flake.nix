@@ -130,6 +130,7 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.protobuf
+              pkgs.cmake
 
               # database
               pkgs.postgresql

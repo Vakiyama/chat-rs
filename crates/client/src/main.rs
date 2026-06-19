@@ -6,11 +6,11 @@ use chat_shared::convert::TryIntoDomain;
 use chat_shared::domain::stream::{ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
 use futures_util::SinkExt;
+use google_material_symbols::GoogleMaterialSymbols as Icon;
 use iced::Theme::CatppuccinFrappe;
 use iced::futures::channel::mpsc::Sender;
 use iced::widget::{Text, container, text};
-use iced::{Element, Font, Subscription, Task, stream};
-use material_icons::{Icon, icon_to_char};
+use iced::{Element, Font, Settings, Subscription, Task, stream};
 use uuid::Uuid;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
@@ -32,20 +32,41 @@ mod types;
 
 const SPACE_GRID: u16 = 8;
 
+pub const SOURCE_SANS_REGULAR: Font = Font::with_name("Source Sans 3");
+
 fn main() -> iced::Result {
   iced::application(new, update, view)
     .theme(CatppuccinFrappe)
-    .font(material_icons::FONT)
+    .font(google_material_symbols::GoogleMaterialSymbols::FONT_BYTES)
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-Regular.ttf"
+    ))
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-Light.ttf"
+    ))
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-Medium.ttf"
+    ))
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-SemiBold.ttf"
+    ))
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-Bold.ttf"
+    ))
+    .font(include_bytes!(
+      "../resources/source_sans/static/SourceSans3-ExtraBold.ttf"
+    ))
+    .default_font(SOURCE_SANS_REGULAR)
     .subscription(subscription)
     .run()
 }
 
 // for icon loading
 
-pub const MATERIAL: Font = Font::with_name("Material Icons");
+pub const MATERIAL: Font = Font::with_name(Icon::FONT_FAMILY); // "Material Symbols Sharp"
 
 pub fn icon<'a>(i: Icon) -> Text<'a> {
-  text(icon_to_char(i).to_string()).font(MATERIAL)
+  text(char::from(i).to_string()).font(MATERIAL)
 }
 
 fn new() -> (model::Model, Task<Message>) {
@@ -403,11 +424,5 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
     .map(Message::Chat),
   };
 
-  container(
-    container(view)
-      .padding(SPACE_GRID)
-      .style(container::rounded_box),
-  )
-  .padding(SPACE_GRID)
-  .into()
+  container(container(view).style(container::rounded_box)).into()
 }
