@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
 use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
@@ -14,11 +15,13 @@ use sonora::{AudioProcessing, Config};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
@@ -210,6 +213,7 @@ pub async fn setup_client() -> anyhow::Result<(
     "mic".into(),
   ));
   let sender = client.add_track(mic_track.clone()).await?;
+
   tokio::spawn(async move {
     let mut buf = vec![0u8; 1500];
     while sender.read(&mut buf).await.is_ok() {}
@@ -270,12 +274,6 @@ pub async fn setup_client() -> anyhow::Result<(
       }
       mixer.remove(src); // track ended (peer left)
     })
-  }));
-
-  client.on_peer_connection_state_change(Box::new(move |new_state| {
-    println!("{new_state:?}");
-
-    Box::pin(async {})
   }));
 
   let offer = client.create_offer(None).await?;

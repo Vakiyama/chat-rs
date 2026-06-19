@@ -15,7 +15,7 @@ use iced::Alignment::Center;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, scrollable, text, text_input};
+use iced::widget::{button, column, operation, scrollable, space, text, text_input};
 use iced::widget::{container, row};
 use iced::{Border, Font, Length, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
@@ -28,7 +28,6 @@ use uuid::Uuid;
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
-  active_voice_channel_id: Option<Uuid>,
   input: String,
 }
 
@@ -87,9 +86,9 @@ pub enum Message {
   ApiReturnedMorePosts(Result<GetPostsResponse, tonic::Status>),
   UserScrolledToTop,
   TypeAhead(String),
+  Init,
   JoinVoice { voice_channel_id: Uuid },
   LeaveVoice,
-  Init,
   None,
 }
 
@@ -99,7 +98,6 @@ pub fn update(
   message: Message,
   user: &User,
   stream: Stream<chat_stream::ChatConnection>,
-  voice: Option<VoiceHandle>,
 ) -> Task<Message> {
   match message {
     Message::UserChangedChatInput(new) => {
@@ -353,20 +351,7 @@ pub fn update(
         operation::move_cursor_to_end(text_input_id),
       ])
     }
-    Message::JoinVoice { voice_channel_id } => {
-      if let Some(voice) = &voice {
-        voice.join(voice_channel_id);
-        model.active_voice_channel_id = Some(voice_channel_id);
-      }
-      Task::none()
-    }
-    Message::LeaveVoice => {
-      if let Some(voice) = &voice {
-        voice.leave();
-        model.active_voice_channel_id = None;
-      }
-      Task::none()
-    }
+    Message::JoinVoice { .. } | Message::LeaveVoice => Task::none(),
   }
 }
 
@@ -376,7 +361,11 @@ fn make_text_input_id(text_channel_id: &Uuid) -> String {
 
 // --------------------------------- VIEW ---------------------------------
 
-pub fn view(model: &Model) -> Element<'_, Message> {
+pub fn view<'a>(
+  model: &'a Model,
+  current_call_id: Option<&'a Uuid>,
+  main_model: &'a crate::model::Model,
+) -> Element<'a, Message> {
   let servers_loaded_message = match &model.servers {
     AsyncData::NotAsked | AsyncData::Loading => Some("Loading servers...".to_string()),
     AsyncData::Done(Ok(_)) => None,
@@ -438,7 +427,8 @@ pub fn view(model: &Model) -> Element<'_, Message> {
       "The Intergalactic Federation",
       &model.view,
       channels,
-      model.active_voice_channel_id
+      current_call_id,
+      main_model
     ),
     text_chat
   ]
@@ -450,7 +440,8 @@ fn view_channels<'a>(
   server_name: &'a str,
   view: &'a View,
   channels: &'a [Channel],
-  active_voice_channel_id: Option<Uuid>,
+  active_voice_channel_id: Option<&'a Uuid>,
+  main_model: &'a crate::model::Model,
 ) -> Element<'a, Message> {
   let (text_channels, voice_channels): (Vec<&Channel>, Vec<&Channel>) =
     channels.iter().partition(|channel| match channel.r#type {
@@ -523,7 +514,7 @@ fn view_channels<'a>(
     .map(|voice_channel| -> Element<'a, Message> {
       let is_selected = match active_voice_channel_id {
         None => false,
-        Some(id) => voice_channel.id == id,
+        Some(id) => &voice_channel.id == id,
       };
 
       let selected_font_style = move |theme: &Theme| -> text::Style {
@@ -618,7 +609,7 @@ fn view_channels<'a>(
     .height(Length::Fill)
     .spacing((SPACE_GRID / 2) as u32);
 
-  if let Some(leave_call) = view_leave_call(active_voice_channel_id, channels) {
+  if let Some(leave_call) = view_leave_call(active_voice_channel_id, channels, main_model) {
     sidebar = sidebar.push(leave_call);
   }
 
@@ -800,36 +791,120 @@ fn view_posts<'a>(
     .into()
 }
 
+#[derive(Clone, Copy)]
+enum Tone {
+  Idle,
+  Pending,
+  Good,
+  Warn,
+  Bad,
+}
+
+impl Tone {
+  fn color(self, theme: &Theme) -> iced::Color {
+    let p = theme.extended_palette();
+    match self {
+      Tone::Idle => p.warning.base.color,
+      Tone::Pending => p.success.weak.color,
+      Tone::Good => p.success.base.color,
+      Tone::Warn => p.warning.base.color,
+      Tone::Bad => p.danger.base.color,
+    }
+  }
+}
+
+/// folds link + media into one displayed status. Media only refines `Live`.
+fn describe_voice(
+  link: &crate::model::LinkState,
+  media: crate::model::MediaHealth,
+) -> (String, Tone, Option<&'static str>) {
+  println!("{:?}{:?}", link, media);
+  use crate::model::{LinkState::*, MediaHealth};
+  match link {
+    Idle => ("Idle...".into(), Tone::Idle, None),
+    Connecting => ("Connecting...".into(), Tone::Pending, None),
+    Reconnecting { attempt } => (format!("Reconnecting... - {attempt}"), Tone::Warn, None),
+    Lost { reason } => (format!("Voice Lost: {reason}"), Tone::Bad, None),
+    Unstable => ("Voice Connected - Unstable".into(), Tone::Warn, None),
+    Live => match media {
+      MediaHealth::TransportDegraded => ("Voice Connected - Unstable".into(), Tone::Warn, None),
+      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, Some("no audio")),
+      MediaHealth::Flowing | MediaHealth::Unknown => ("Voice Connected".into(), Tone::Good, None),
+    },
+  }
+}
+
+fn latency_tone(ms: u32) -> Tone {
+  match ms {
+    0..=150 => Tone::Good,
+    151..=300 => Tone::Warn,
+    _ => Tone::Bad,
+  }
+}
+
 // renders a "voice connected" footer pinned to the bottom of the sidebar.
 // returns None when there's no active call, so the caller can skip pushing it.
 fn view_leave_call<'a>(
-  active_voice_channel_id: Option<Uuid>,
+  active_voice_channel_id: Option<&'a Uuid>,
   channels: &'a [Channel],
+  main_model: &'a crate::model::Model,
 ) -> Option<Element<'a, Message>> {
   let voice_channel_id = active_voice_channel_id?;
 
   let channel_name = channels
     .iter()
-    .find(|channel| channel.id == voice_channel_id)
+    .find(|channel| &channel.id == voice_channel_id)
     .map(|channel| channel.name.as_str())
     .unwrap_or("Voice");
 
+  let voice = main_model.voice.as_ref()?;
+  let (status_text, tone, media_hint) = describe_voice(&voice.link_state, voice.media);
+
+  // secondary line: channel name, then latency + media hint only while connected
+  let connected = matches!(
+    voice.link_state,
+    crate::model::LinkState::Live | crate::model::LinkState::Unstable
+  );
+
+  let mut meta = row![
+    text(channel_name)
+      .size(12)
+      .style(text::secondary)
+      .wrapping(text::Wrapping::None)
+  ]
+  .spacing(6)
+  .align_y(Center);
+
+  if connected && voice.latency_ms > 0 {
+    let lt = latency_tone(voice.latency_ms);
+    meta = meta.push(text("·").size(12).style(text::secondary));
+    meta = meta.push(
+      text(format!("{} ms", voice.latency_ms))
+        .size(12)
+        .style(move |t: &Theme| text::Style {
+          color: Some(lt.color(t)),
+        }),
+    );
+  }
+
+  if let Some(hint) = media_hint {
+    meta = meta.push(text("·").size(12).style(text::secondary));
+    meta = meta.push(text(hint).size(12).style(|t: &Theme| text::Style {
+      color: Some(t.extended_palette().warning.base.color),
+    }));
+  }
+
   let status = column![
-    text("Voice Connected")
+    text(status_text)
       .size(13)
-      .style(|theme: &Theme| {
-        text::Style {
-          color: Some(theme.extended_palette().success.base.color),
-        }
+      .style(move |t: &Theme| text::Style {
+        color: Some(tone.color(t))
       })
       .font(Font {
         weight: Weight::Bold,
         ..Default::default()
       }),
-    text(channel_name)
-      .size(12)
-      .style(text::secondary)
-      .wrapping(text::Wrapping::None),
+    meta,
   ]
   .spacing(2)
   .width(Length::Fill);

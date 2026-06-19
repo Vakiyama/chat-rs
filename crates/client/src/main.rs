@@ -1,11 +1,18 @@
+use std::hash::Hasher;
+use std::sync::Arc;
+use std::time::Duration;
+
 use chat_shared::convert::TryIntoDomain;
 use chat_shared::domain::stream::{ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
+use futures_util::SinkExt;
 use iced::Theme::CatppuccinFrappe;
+use iced::futures::channel::mpsc::Sender;
 use iced::widget::{Text, container, text};
-use iced::{Element, Font, Subscription, Task};
+use iced::{Element, Font, Subscription, Task, stream};
 use material_icons::{Icon, icon_to_char};
 use uuid::Uuid;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
 pub mod audio_processing;
 mod chat_stream;
@@ -14,7 +21,7 @@ pub mod webrtc_stream;
 
 use crate::audio_processing::call_handler::spawn_voice;
 use crate::chat_stream::ChatConnection;
-use crate::model::{Auth, Screen, Stream};
+use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat};
 use crate::webrtc_stream::WebRTCConnection;
 
@@ -66,26 +73,63 @@ fn new() -> (model::Model, Task<Message>) {
   )
 }
 
+struct VoiceSub {
+  call_id: Option<Uuid>,
+  rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Message>>>,
+}
+
+impl std::hash::Hash for VoiceSub {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    // identity is the call, never the receiver
+    self.call_id.hash(state);
+  }
+}
+
 fn subscription(model: &model::Model) -> Subscription<Message> {
   match model.user {
-    Auth::LoggedIn(_) => Subscription::batch([
-      Subscription::run(chat_stream::connect).map(|event| event.into()),
-      Subscription::run(webrtc_stream::connect).map(|event| event.into()),
-      iced::event::listen_with(|event, status, _window| match (event, status) {
-        (
-          iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-            key: iced::keyboard::Key::Character(_),
-            text: Some(text),
-            modifiers,
-            ..
-          }),
-          iced::event::Status::Ignored,
-        ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
-          Some(Message::Chat(chat::Message::TypeAhead(text.into())))
-        }
-        _ => None,
-      }),
-    ]),
+    Auth::LoggedIn(_) => {
+      let voice_call_sub = match &model.voice {
+        Some(call) => Subscription::run_with(
+          VoiceSub {
+            call_id: call.voice_call_id,
+            rx: call.handle.receiver.clone(),
+          },
+          |call| {
+            let rx = call.rx.clone();
+            stream::channel(16, move |mut output: Sender<Message>| async move {
+              let mut rx = rx.lock().await;
+
+              while let Some(event) = rx.recv().await {
+                if output.send(event).await.is_err() {
+                  break;
+                }
+              }
+            })
+          },
+        ),
+        None => Subscription::none(),
+      };
+
+      Subscription::batch([
+        voice_call_sub,
+        Subscription::run(chat_stream::connect).map(|event| event.into()),
+        Subscription::run(webrtc_stream::connect).map(|event| event.into()),
+        iced::event::listen_with(|event, status, _window| match (event, status) {
+          (
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+              key: iced::keyboard::Key::Character(_),
+              text: Some(text),
+              modifiers,
+              ..
+            }),
+            iced::event::Status::Ignored,
+          ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
+            Some(Message::Chat(chat::Message::TypeAhead(text.into())))
+          }
+          _ => None,
+        }),
+      ])
+    }
     Auth::NotLoggedIn => Subscription::none(),
   }
 }
@@ -100,7 +144,21 @@ pub enum Message {
   WebRTC(Box<ServerVoice>),
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
+  VoiceHandlePeerConnectionChanged {
+    state: RTCPeerConnectionState,
+    epoch: u32,
+  },
+  JoinVoiceSuccessful {
+    voice_channel_id: Uuid,
+  },
   None,
+  VoiceGraceExpired {
+    epoch: u32,
+  },
+  VoiceMediaHealth {
+    epoch: u32,
+    health: MediaHealth,
+  },
   LoggedIn(User),
 }
 
@@ -110,14 +168,25 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
       {
-        chat::update(
-          chat_model,
-          msg,
-          user,
-          model.chat_stream.clone(),
-          model.voice.clone(),
-        )
-        .map(Message::Chat)
+        match msg {
+          chat::Message::JoinVoice { voice_channel_id } => {
+            if let Some(voice) = &model.voice {
+              voice.handle.join(voice_channel_id, 1);
+            }
+            Task::none()
+          }
+          chat::Message::LeaveVoice => {
+            if let Some(ref mut voice) = model.voice {
+              voice.handle.leave();
+              voice.voice_call_id = None;
+              voice.link_state = model::LinkState::Idle;
+            }
+            Task::none()
+          }
+          other => {
+            chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+          }
+        }
       } else {
         iced::Task::none()
       }
@@ -178,13 +247,20 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       Task::none()
     }
     Message::WebRTC(msg) => {
-      if let Some(v) = &model.voice {
-        v.signal(*msg);
+      if let Some(voice) = &model.voice {
+        voice.handle.signal(*msg);
       }
       Task::none()
     }
     Message::WebRTCSignalStreamConnected(conn) => {
-      model.voice = Some(spawn_voice(conn));
+      model.voice = Some(VoiceCall {
+        handle: spawn_voice(conn),
+        link_state: model::LinkState::Connecting,
+        media: model::MediaHealth::Unknown,
+        latency_ms: 0,
+        voice_call_id: None,
+        epoch: 1,
+      });
 
       Task::none()
     }
@@ -193,13 +269,132 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       model.webrtc_stream = Stream::Disconnected;
       Task::none()
     }
+    Message::JoinVoiceSuccessful { voice_channel_id } => {
+      if let Some(ref mut voice) = model.voice {
+        voice.voice_call_id = Some(voice_channel_id);
+      };
+      Task::none()
+    }
+    Message::VoiceHandlePeerConnectionChanged {
+      state: rtcpeer_connection_state,
+      epoch,
+    } => {
+      // if we're in a call
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+
+      let Some(voice_call_id) = call.voice_call_id else {
+        return Task::none();
+      };
+
+      if epoch != call.epoch {
+        return Task::none();
+      }
+
+      println!("{rtcpeer_connection_state}");
+      match rtcpeer_connection_state {
+        RTCPeerConnectionState::New | RTCPeerConnectionState::Connecting => {
+          call.link_state = LinkState::Connecting;
+          Task::none()
+        }
+        RTCPeerConnectionState::Connected => {
+          call.link_state = LinkState::Live;
+          Task::none()
+        }
+        RTCPeerConnectionState::Disconnected => {
+          if matches!(call.link_state, LinkState::Live | LinkState::Connecting) {
+            call.link_state = LinkState::Unstable;
+            let epoch = call.epoch;
+            Task::perform(
+              async { tokio::time::sleep(Duration::from_secs(3)).await },
+              move |_| Message::VoiceGraceExpired { epoch },
+            )
+          } else {
+            Task::none()
+          }
+        }
+        RTCPeerConnectionState::Failed => {
+          reconnect(call, voice_call_id, call.epoch);
+          Task::none()
+        }
+        RTCPeerConnectionState::Closed => {
+          if matches!(call.link_state, LinkState::Reconnecting { .. }) {
+            Task::none() // old PC dying during our own reconnect
+          } else {
+            reconnect(call, voice_call_id, 1);
+            Task::none()
+          }
+        }
+        RTCPeerConnectionState::Unspecified => Task::none(),
+      }
+    }
+    Message::VoiceGraceExpired { epoch } => {
+      // if we're in a call
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+
+      let Some(voice_call_id) = call.voice_call_id else {
+        return Task::none();
+      };
+
+      if epoch != call.epoch {
+        return Task::none();
+      }
+
+      if matches!(call.link_state, LinkState::Unstable) {
+        reconnect(call, voice_call_id, 1);
+      };
+
+      Task::none()
+    }
+    Message::VoiceMediaHealth { epoch, health } => {
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+
+      if epoch != call.epoch {
+        return Task::none();
+      }
+
+      call.media = health;
+
+      Task::none()
+    }
   }
+}
+
+fn reconnect(call: &mut VoiceCall, id: Uuid, epoch: u32) {
+  let LinkState::Reconnecting { attempt } = call.link_state else {
+    return;
+  };
+
+  const MAX: u32 = 4;
+  if attempt > MAX {
+    call.link_state = LinkState::Lost {
+      reason: "Too many attempts".into(),
+    };
+    return;
+  }
+  call.epoch += 1;
+  call.link_state = LinkState::Reconnecting { attempt };
+  call.handle.leave();
+  call.handle.join(id, epoch);
 }
 
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
   let view = match &model.screen {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
-    model::Screen::Chat(model) => screens::chat::view(model).map(Message::Chat),
+    model::Screen::Chat(chat_model) => screens::chat::view(
+      chat_model,
+      model
+        .voice
+        .as_ref()
+        .and_then(|voice| voice.voice_call_id.as_ref()),
+      model,
+    )
+    .map(Message::Chat),
   };
 
   container(
