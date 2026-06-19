@@ -191,13 +191,17 @@ impl StreamService for StreamServer {
             description: offer,
             voice_channel_id,
           }) => {
-            // eventually setup rooms, for now, one global room
-            let mut room_manager = ROOM_MANAGER.lock().await;
-
-            let room = room_manager
-              .rooms
-              .entry(voice_channel_id)
-              .or_insert(Room::default().into());
+            // clone out the room Arc and drop the manager lock before awaiting the
+            // handler — handle_offer awaits network I/O, and holding this global lock
+            // across it serializes (and can wedge) signaling for every other call.
+            let room = {
+              let mut room_manager = ROOM_MANAGER.lock().await;
+              room_manager
+                .rooms
+                .entry(voice_channel_id)
+                .or_insert_with(|| Room::default().into())
+                .clone()
+            };
 
             if !room.peers.read().await.contains_key(&request_user_id) {
               match handle_offer(
@@ -227,20 +231,26 @@ impl StreamService for StreamServer {
           }) => {
             println!("received answer from peer {request_user_id}");
 
-            let mut room_manager = ROOM_MANAGER.lock().await;
-            let room = room_manager
-              .rooms
-              .entry(voice_channel_id)
-              .or_insert(Room::default().into());
+            let room = {
+              let mut room_manager = ROOM_MANAGER.lock().await;
+              room_manager
+                .rooms
+                .entry(voice_channel_id)
+                .or_insert_with(|| Room::default().into())
+                .clone()
+            };
 
             let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
           }
           Ok(ClientVoice::LeaveRoom { voice_channel_id }) => {
-            let mut room_manager = ROOM_MANAGER.lock().await;
-            let room = room_manager
-              .rooms
-              .entry(voice_channel_id)
-              .or_insert(Room::default().into());
+            let room = {
+              let mut room_manager = ROOM_MANAGER.lock().await;
+              room_manager
+                .rooms
+                .entry(voice_channel_id)
+                .or_insert_with(|| Room::default().into())
+                .clone()
+            };
 
             let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
               .await
@@ -255,8 +265,16 @@ impl StreamService for StreamServer {
 
       // grpc msg loop ended, remove peer from any rooms, close pc
 
-      for (id, room) in &ROOM_MANAGER.lock().await.rooms {
-        let _ = handle_leave(room.clone(), request_user_id, *id)
+      let rooms: Vec<(Uuid, Arc<Room>)> = {
+        let room_manager = ROOM_MANAGER.lock().await;
+        room_manager
+          .rooms
+          .iter()
+          .map(|(id, room)| (*id, room.clone()))
+          .collect()
+      };
+      for (id, room) in rooms {
+        let _ = handle_leave(room, request_user_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
       }

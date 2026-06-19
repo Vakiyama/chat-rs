@@ -4,13 +4,7 @@ use chat_shared::{
 };
 use std::{
   collections::HashMap,
-  sync::{
-    Arc,
-    atomic::{
-      AtomicBool,
-      Ordering::{self, SeqCst},
-    },
-  },
+  sync::{Arc, Mutex},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -30,18 +24,22 @@ use webrtc::{
 
 pub type PeerId = Uuid;
 
+// per-peer signaling state: an offer is in flight, and/or another reneg is queued.
+// both fields live under one mutex so "queue a follow-up reneg" and "finish + drain
+// the queue" are atomic against each other — two independent atomics race into a lost
+// wakeup where a reneg is queued but its drain check has already passed.
+#[derive(Default)]
+struct NegState {
+  in_flight: bool,
+  pending: bool,
+}
+
 pub struct Participant {
   pub pc: Arc<RTCPeerConnection>,
   relay: RwLock<Option<Arc<TrackLocalStaticRTP>>>,
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
   outbound_senders: RwLock<HashMap<PeerId, Arc<RTCRtpSender>>>,
-  // todo: simultaneous renegs can cause issues, potential solution is an atomic bool below for
-  // queuing renegs when we hit this condition.
-  // defer negotiating when flag is already active:
-
-  // renegotiate becomes: if negotiating is set, set needs_renegotiation and return (the wish is queued, not lost). Otherwise set negotiating, send the offer. In handle_answer, after applying: clear negotiating, and if needs_renegotiation was set, clear it and renegotiate once more — the fresh offer naturally includes all track changes accumulated since, so N queued requests collapse into one round. This is the standard SFU pattern. Two joins in the same instant is rare enough that I'd do fix 1 today, write Race 2 down in a comment at the renegotiate call site, and implement the flag pair when you wire up leave handling (which adds remove_track → more renegotiation triggers → the window widens).
-  negotiating: AtomicBool, // an offer is in flight
-  needs_renegotiation: AtomicBool,
+  neg: Mutex<NegState>,
 }
 
 #[derive(Default)]
@@ -83,26 +81,32 @@ pub async fn handle_offer(
     relay: RwLock::new(None),
     signal_tx: signal_tx.clone(),
     outbound_senders: Default::default(),
-    negotiating: AtomicBool::new(true),
-    needs_renegotiation: AtomicBool::new(false),
+    neg: Mutex::new(NegState {
+      in_flight: true,
+      pending: false,
+    }),
   });
 
   let track_room = room.clone();
+  let me_weak = Arc::downgrade(&participant);
   peer_connection.on_track(Box::new(move |track, _, _| {
     println!("started audio track on peer connection");
     let room = track_room.clone();
+    let me_weak = me_weak.clone();
     Box::pin(async move {
+      // grab our own participant directly via a weak ref, not the room map: on_track
+      // can fire before we're inserted into the room (it only fires once, so a miss is
+      // unrecoverable), and the weak ref breaks the pc -> on_track -> participant -> pc
+      // cycle so leave()'s pc.close() can actually drop the connection.
+      let Some(me_p) = me_weak.upgrade() else {
+        return;
+      };
+
       let relay = Arc::new(TrackLocalStaticRTP::new(
         track.codec().capability,
         format!("audio-{me}"),
         format!("relay-{me}"),
       ));
-
-      // this participant must exist; bail loudly if not
-      let Some(me_p) = room.peers.read().await.get(&me).cloned() else {
-        eprintln!("on_track fired for {me} but they're not in the room");
-        return;
-      };
       *me_p.relay.write().await = Some(relay.clone());
 
       let others: Vec<(PeerId, Arc<Participant>)> = {
@@ -145,7 +149,6 @@ pub async fn handle_offer(
           while sender.read(&mut buf).await.is_ok() {}
         });
 
-        // todo: reneg serialization (negotiating/needs_renegotiation flags)
         if let Err(e) = renegotiate(&peer, voice_channel_id).await {
           eprintln!("renegotiate({peer_id}) error: {e:?}");
         }
@@ -184,7 +187,9 @@ pub async fn handle_offer(
     ))
     .await?;
 
-  participant.negotiating.swap(false, Ordering::SeqCst);
+  // initial answer is on its way to the client; release our negotiation claim. a peer
+  // already in the room may have queued a reneg against us while we were joining.
+  let resume = finish_negotiation(&participant);
 
   // ── deliver existing publishers via one server-initiated renegotiation ──
   let existing: Vec<(PeerId, Arc<Participant>, Arc<TrackLocalStaticRTP>)> = {
@@ -201,45 +206,76 @@ pub async fn handle_offer(
     out
   };
 
-  if !existing.is_empty() {
-    for (publisher_id, publisher, relay) in existing {
-      // add_track after remove_track fails with ErrRTPSenderNewTrackHasIncorrectEnvelope
-      // this setup leaves transceivers for long lived clients in sdp's, not a major issue but will
-      // cost sdp bytes
-      let transceiver = peer_connection
-        .add_transceiver_from_track(
-          relay.clone(),
-          Some(RTCRtpTransceiverInit {
-            direction: RTCRtpTransceiverDirection::Sendonly,
-            send_encodings: vec![],
-          }),
-        )
-        .await?;
-      let sender = transceiver.sender().await;
+  let has_existing = !existing.is_empty();
+  for (_publisher_id, publisher, relay) in existing {
+    // add_track after remove_track fails with ErrRTPSenderNewTrackHasIncorrectEnvelope
+    // this setup leaves transceivers for long lived clients in sdp's, not a major issue but will
+    // cost sdp bytes
+    let transceiver = peer_connection
+      .add_transceiver_from_track(
+        relay.clone(),
+        Some(RTCRtpTransceiverInit {
+          direction: RTCRtpTransceiverDirection::Sendonly,
+          send_encodings: vec![],
+        }),
+      )
+      .await?;
+    let sender = transceiver.sender().await;
 
-      publisher
-        .outbound_senders
-        .write()
-        .await
-        .insert(me, sender.clone());
-      tokio::spawn(async move {
-        let mut buf = vec![0u8; 1500];
-        while sender.read(&mut buf).await.is_ok() {}
-      });
-      let _ = publisher_id; // (or use it in logs)
-    }
+    publisher
+      .outbound_senders
+      .write()
+      .await
+      .insert(me, sender.clone());
+    tokio::spawn(async move {
+      let mut buf = vec![0u8; 1500];
+      while sender.read(&mut buf).await.is_ok() {}
+    });
+  }
+
+  if has_existing || resume {
     renegotiate(&participant, voice_channel_id).await?;
   }
 
   Ok(())
 }
 
+// claim the right to send an offer. if one is already in flight, queue exactly one
+// follow-up and return false — the next offer reflects all accumulated track changes,
+// so any number of queued requests collapse into a single round.
+fn try_begin_negotiation(peer: &Participant) -> bool {
+  let mut s = peer.neg.lock().unwrap();
+  if s.in_flight {
+    s.pending = true;
+    return false;
+  }
+  s.in_flight = true;
+  true
+}
+
+// an offer/answer round finished: drop the in-flight claim and report whether a
+// follow-up reneg was queued while it was in flight.
+fn finish_negotiation(peer: &Participant) -> bool {
+  let mut s = peer.neg.lock().unwrap();
+  s.in_flight = false;
+  std::mem::take(&mut s.pending)
+}
+
 async fn renegotiate(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
-  if peer.negotiating.swap(true, SeqCst) {
-    peer.needs_renegotiation.store(true, SeqCst);
+  if !try_begin_negotiation(peer) {
     return Ok(());
   }
 
+  // on failure, release the claim so a later trigger can retry instead of the peer
+  // wedging with in_flight stuck true forever.
+  if let Err(e) = send_offer(peer, voice_channel_id).await {
+    finish_negotiation(peer);
+    return Err(e);
+  }
+  Ok(())
+}
+
+async fn send_offer(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
   let offer = peer.pc.create_offer(None).await?;
   peer.pc.set_local_description(offer).await?;
   let local = peer
@@ -315,10 +351,11 @@ pub async fn handle_answer(
     .ok_or_else(|| anyhow::anyhow!("received rtc answer for unknown peer"))?;
 
   let result = peer.pc.set_remote_description(answer).await;
-  peer.negotiating.store(false, SeqCst); // clear even on failure, or the PC wedges forever
+  // clear the claim even on failure, or the PC wedges forever
+  let resume = finish_negotiation(&peer);
   result?;
 
-  if peer.needs_renegotiation.swap(false, SeqCst) {
+  if resume {
     renegotiate(&peer, voice_channel_id).await?;
   }
   Ok(())
@@ -440,6 +477,26 @@ mod tests {
     let mut tx = Some(tx);
     client.on_track(Box::new(move |_, _, _| {
       if let Some(tx) = tx.take() {
+        let _ = tx.send(());
+      }
+      Box::pin(async {})
+    }));
+    rx
+  }
+
+  // fires once the pc has received `n` inbound tracks (one per remote publisher)
+  fn on_track_count(
+    client: &Arc<RTCPeerConnection>,
+    n: usize,
+  ) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut tx = Some(tx);
+    let mut seen = 0usize;
+    client.on_track(Box::new(move |_, _, _| {
+      seen += 1;
+      if seen >= n
+        && let Some(tx) = tx.take()
+      {
         let _ = tx.send(());
       }
       Box::pin(async {})
@@ -639,6 +696,63 @@ mod tests {
     answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
 
     tokio::time::timeout(Duration::from_secs(10), b_heard).await??;
+    Ok(())
+  }
+
+  // A and B are in a call hearing each other; C joins publishing. the regression:
+  // C heard A and B, but A and B never heard C because the reneg carrying C's track
+  // was queued and silently dropped. all three must hear all others.
+  #[tokio::test]
+  async fn third_peer_is_heard_by_existing_peers() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+
+    // A joins, publishing immediately; expects to hear B then C
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
+    let a_id = Uuid::new_v4();
+    let a_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&a_client).await?);
+    let a_heard_both = on_track_count(&a_client, 2);
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
+    wait_for_relay(&room, a_id).await?;
+
+    // B joins, publishing immediately; expects to hear A then C
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+    let b_id = Uuid::new_v4();
+    let b_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b_client).await?);
+    let b_heard_both = on_track_count(&b_client, 2);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
+
+    // settle A <-> B
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
+    let offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a, room_id).await?;
+    wait_for_relay(&room, b_id).await?;
+
+    // C joins, publishing immediately; expects to hear A and B
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::channel(8);
+    let c_id = Uuid::new_v4();
+    let c_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&c_client).await?);
+    let c_heard_both = on_track_count(&c_client, 2);
+    join(&c_client, &room, c_id, c_tx, &mut c_rx, &api, room_id).await?;
+
+    // C hears A and B via the post-join reneg (both relays in one offer)
+    let offer_to_c = expect_offer(&mut c_rx).await?;
+    answer_reneg(&c_client, &room, c_id, offer_to_c, room_id).await?;
+
+    // C's media reaching the server must renegotiate BOTH existing peers so they hear C
+    let offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a, room_id).await?;
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
+
+    tokio::time::timeout(Duration::from_secs(10), c_heard_both).await??;
+    tokio::time::timeout(Duration::from_secs(10), a_heard_both).await??;
+    tokio::time::timeout(Duration::from_secs(10), b_heard_both).await??;
     Ok(())
   }
 }
