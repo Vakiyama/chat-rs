@@ -819,7 +819,6 @@ fn describe_voice(
   link: &crate::model::LinkState,
   media: crate::model::MediaHealth,
 ) -> (String, Tone, Option<&'static str>) {
-  println!("{:?}{:?}", link, media);
   use crate::model::{LinkState::*, MediaHealth};
   match link {
     Idle => ("Idle...".into(), Tone::Idle, None),

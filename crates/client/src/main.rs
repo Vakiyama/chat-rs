@@ -299,7 +299,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         return Task::none();
       }
 
-      println!("{rtcpeer_connection_state}");
       match rtcpeer_connection_state {
         RTCPeerConnectionState::New | RTCPeerConnectionState::Connecting => {
           call.link_state = LinkState::Connecting;
