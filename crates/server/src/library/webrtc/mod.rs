@@ -149,7 +149,7 @@ pub async fn handle_offer(
           while sender.read(&mut buf).await.is_ok() {}
         });
 
-        if let Err(e) = renegotiate(&peer, voice_channel_id).await {
+        if let Err(e) = renegotiate(peer.clone(), voice_channel_id).await {
           eprintln!("renegotiate({peer_id}) error: {e:?}");
         }
       }
@@ -234,7 +234,7 @@ pub async fn handle_offer(
   }
 
   if has_existing || resume {
-    renegotiate(&participant, voice_channel_id).await?;
+    renegotiate(participant.clone(), voice_channel_id).await?;
   }
 
   Ok(())
@@ -255,24 +255,56 @@ fn try_begin_negotiation(peer: &Participant) -> bool {
 
 // an offer/answer round finished: drop the in-flight claim and report whether a
 // follow-up reneg was queued while it was in flight.
+//
+// If in_flight is already false (e.g., the timeout fired and reset it), we still
+// check for pending work and drain it — the timeout may have already sent a retry
+// offer, but if the client just answered the old one, we need to process any
+// work that accumulated while we were waiting.
 fn finish_negotiation(peer: &Participant) -> bool {
-  let mut s = peer.neg.lock().unwrap();
-  s.in_flight = false;
-  std::mem::take(&mut s.pending)
+  let resume;
+  {
+    let mut s = peer.neg.lock().unwrap();
+    if s.in_flight {
+      s.in_flight = false;
+    }
+    resume = std::mem::take(&mut s.pending);
+  }
+  if resume {
+    let _ = try_begin_negotiation(peer);
+  }
+  resume
 }
 
-async fn renegotiate(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
-  if !try_begin_negotiation(peer) {
+async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::Result<()> {
+  if !try_begin_negotiation(&peer) {
     return Ok(());
   }
 
-  // on failure, release the claim so a later trigger can retry instead of the peer
-  // wedging with in_flight stuck true forever.
-  if let Err(e) = send_offer(peer, voice_channel_id).await {
-    finish_negotiation(peer);
-    return Err(e);
-  }
-  Ok(())
+  let timeout = tokio::time::Duration::from_secs(3);
+
+  // Spawn a timeout task that resets in_flight if the client doesn't answer.
+  // This prevents the "stuck in_flight" bug where a peer that ignores a
+  // renegotiation offer permanently blocks all subsequent track changes from
+  // being forwarded to it.
+  let timeout_peer = peer.clone();
+  let timeout_channel_id = voice_channel_id;
+  tokio::spawn(async move {
+    tokio::time::sleep(timeout).await;
+    let should_retry = {
+      let mut s = timeout_peer.neg.lock().unwrap();
+      if s.in_flight {
+        s.in_flight = false;
+        true
+      } else {
+        false
+      }
+    };
+    if should_retry {
+      let _ = send_offer(&timeout_peer, timeout_channel_id).await;
+    }
+  });
+
+  send_offer(&peer, voice_channel_id).await
 }
 
 async fn send_offer(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
@@ -322,7 +354,7 @@ pub async fn handle_leave(
       eprintln!("remove_track on {subscriber_id} failed: {e:?}");
       continue;
     }
-    if let Err(e) = renegotiate(&sub, voice_channel_id).await {
+    if let Err(e) = renegotiate(sub.clone(), voice_channel_id).await {
       eprintln!("renegotiate({subscriber_id}) after leave failed: {e:?}");
     }
   }
@@ -356,7 +388,7 @@ pub async fn handle_answer(
   result?;
 
   if resume {
-    renegotiate(&peer, voice_channel_id).await?;
+    renegotiate(peer.clone(), voice_channel_id).await?;
   }
   Ok(())
 }
