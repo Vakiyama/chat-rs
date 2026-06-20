@@ -12,7 +12,7 @@ use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
-use iced::font::Weight::{self, Semibold};
+use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
 use iced::widget::{button, column, operation, scrollable, text, text_input};

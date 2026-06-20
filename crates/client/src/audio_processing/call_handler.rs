@@ -1,6 +1,7 @@
 use crate::model::MediaHealth;
 use crate::webrtc_stream::{WebRTCConnection, setup_client};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -40,6 +41,9 @@ struct ActiveCall {
   _mic: cpal::Stream,
   _out: cpal::Stream,
   stats_task: tokio::task::JoinHandle<()>,
+  mixer: crate::audio_processing::mixer::Mixer,
+  out_rate: u32,
+  started: Arc<Mutex<HashSet<String>>>,
 }
 
 fn inbound_audio(r: &StatsReport) -> (u32, u64) {
@@ -120,7 +124,6 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           if let Some(active) = call.take() {
             active.stats_task.abort(); // stop the poller before tearing down
             let _ = active.pc.close().await;
-            let _ = active.pc.close().await;
 
             let mut room_id = cloned_room_id.lock().await;
 
@@ -133,8 +136,26 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             *room_id = None;
           }
           match setup_client().await {
-            Ok((pc, offer, mic, out)) => {
+            Ok((pc, offer, mic, out, mixer, out_rate)) => {
               let pc = Arc::new(pc);
+              let started = Arc::new(Mutex::new(HashSet::new()));
+              let started_for_track = started.clone();
+              let mixer_for_track = mixer.clone();
+              // Single on_track handler that reads ALL inbound audio tracks
+              // (both initial-answer tracks and renegotiated tracks) through the
+              // same reader. We spawn read_track rather than awaiting it: the
+              // reader runs an infinite read loop, so awaiting it inside the
+              // handler future would block webrtc-rs's track dispatch. Dedup is
+              // owned by read_track against `started`, so we do NOT pre-insert
+              // here (doing so would make read_track's own insert see the id as
+              // already present and bail immediately).
+              pc.on_track(Box::new(move |track, _, _| {
+                let started = started_for_track.clone();
+                let mixer = mixer_for_track.clone();
+                Box::pin(async move {
+                  tokio::spawn(read_track(track, mixer, out_rate, started));
+                })
+              }));
               conn.send(ClientVoice::Offer {
                 description: offer,
                 voice_channel_id,
@@ -162,6 +183,9 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 _mic: mic,
                 _out: out,
                 stats_task,
+                mixer,
+                out_rate,
+                started: started.clone(),
               });
               *cloned_room_id.lock().await = Some(voice_channel_id);
             }
@@ -172,14 +196,22 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           let Some(active) = call.as_ref() else {
             continue;
           };
-          if let Err(e) = apply_signal(&active.pc, &mut conn, *msg).await {
+          if let Err(e) = apply_signal(
+            &active.pc,
+            &mut conn,
+            *msg,
+            &active.mixer,
+            active.started.clone(),
+            active.out_rate,
+          )
+          .await
+          {
             eprintln!("apply signal: {e:?}");
           }
         }
         VoiceCommand::Leave => {
           if let Some(active) = call.take() {
             active.stats_task.abort(); // stop the poller before tearing down
-            let _ = active.pc.close().await;
             let _ = active.pc.close().await;
             let mut room_id = cloned_room_id.lock().await;
 
@@ -203,13 +235,32 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
 }
 
 async fn apply_signal(
-  pc: &RTCPeerConnection,
+  pc: &Arc<RTCPeerConnection>,
   conn: &mut WebRTCConnection,
   msg: ServerVoice,
+  mixer: &crate::audio_processing::mixer::Mixer,
+  started: Arc<Mutex<HashSet<String>>>,
+  out_rate: u32,
 ) -> anyhow::Result<()> {
   match msg {
     ServerVoice::Answer { description, .. } => {
+      let before_receivers = pc.get_receivers().await.len();
       pc.set_remote_description(description).await?;
+      // on_track does NOT fire for tracks already present in the initial answer.
+      // Manually enumerate receivers and start reading from them. Each track gets
+      // its own spawned reader — awaiting here would block this function (and the
+      // entire voice actor loop) on the first track's infinite read loop, so the
+      // second/third participant would never be read.
+      if before_receivers == 0 {
+        for receiver in pc.get_receivers().await.iter() {
+          let tracks = receiver.tracks().await;
+          for track in tracks {
+            if track.codec().capability.mime_type.starts_with("audio/") {
+              tokio::spawn(read_track(track, mixer.clone(), out_rate, started.clone()));
+            }
+          }
+        }
+      }
     }
     ServerVoice::Offer {
       description,
@@ -230,4 +281,64 @@ async fn apply_signal(
     }
   }
   Ok(())
+}
+
+async fn read_track(
+  track: Arc<webrtc::track::track_remote::TrackRemote>,
+  mixer: crate::audio_processing::mixer::Mixer,
+  out_rate: u32,
+  started: Arc<Mutex<HashSet<String>>>,
+) {
+  let id = track.id().to_string();
+  // Single source of dedup. track.id() is stable from SDP parse time, unlike
+  // ssrc() which can be 0 until the first packet. If another reader already owns
+  // this id, bail. The async Mutex makes this check-and-insert atomic across the
+  // enumeration path and the on_track path racing on the same track.
+  if !started.lock().await.insert(id.clone()) {
+    return;
+  }
+
+  let mut out_rs = match crate::audio_processing::resampler::Resampler::new(
+    crate::webrtc_stream::TARGET_RATE,
+    out_rate,
+  ) {
+    Ok(r) => r,
+    Err(e) => {
+      eprintln!("Failed to create resampler for track {id}: {e}");
+      return;
+    }
+  };
+  let mut decoder =
+    match audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono) {
+      Ok(d) => d,
+      Err(e) => {
+        eprintln!("Failed to create decoder for track {id}: {e}");
+        return;
+      }
+    };
+  let mut pcm = vec![0f32; 5760]; // 120ms @ 48k: handles oversized FEC/PLC frames
+
+  // ssrc() may be 0 at spawn time (before the first RTP packet), which would
+  // collide every enumerated track onto mixer slot 0. Resolve the mixer key
+  // lazily from the wire header — the packet always carries the real ssrc.
+  let mut src: Option<u32> = None;
+
+  while let Ok((pkt, _)) = track.read_rtp().await {
+    if pkt.payload.is_empty() {
+      continue;
+    }
+    let s = *src.get_or_insert(pkt.header.ssrc);
+    match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
+      Ok(n) => {
+        let mut at_dev = Vec::new();
+        let _ = out_rs.push(&pcm[..n], &mut at_dev);
+        mixer.push(s, &at_dev);
+      }
+      Err(e) => eprintln!("opus decode error: {e}"),
+    }
+  }
+
+  if let Some(s) = src {
+    mixer.remove(s);
+  }
 }

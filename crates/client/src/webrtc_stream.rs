@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use std::sync::mpsc::Sender;
-
+use crate::audio_processing::mixer::Mixer;
+use crate::audio_processing::resampler::Resampler;
+use crate::client;
 use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
@@ -12,23 +12,18 @@ use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
 use sonora::{AudioProcessing, Config};
+use std::sync::Arc;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-
-use crate::audio_processing::mixer::Mixer;
-use crate::audio_processing::resampler::Resampler;
-use crate::client;
 
 #[derive(Debug, Clone)]
 pub struct WebRTCConnection(mpsc::Sender<ClientVoiceMessage>);
@@ -95,7 +90,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
 // handle messages
 
-const TARGET_RATE: u32 = 48_000;
+pub const TARGET_RATE: u32 = 48_000;
 
 fn pick_config(
   default: cpal::SupportedStreamConfig,
@@ -181,6 +176,8 @@ pub async fn setup_client() -> anyhow::Result<(
   RTCSessionDescription,
   cpal::Stream,
   cpal::Stream,
+  Mixer,
+  u32,
 )> {
   let mut media_engine = MediaEngine::default();
 
@@ -249,33 +246,6 @@ pub async fn setup_client() -> anyhow::Result<(
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
   spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone(), in_rate, out_rate)?; // APM + Opus, owns the middle
 
-  client.on_track(Box::new(move |track, _, _| {
-    let mut out_rs = Resampler::new(TARGET_RATE, out_rate).expect("Failed to create resampler"); // one per peer; stateful, not shared
-    let mixer = mixer.clone();
-    Box::pin(async move {
-      println!("on track for client fired");
-      let src = track.ssrc();
-      let mut decoder =
-        audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
-          .expect("opus decoder");
-      let mut pcm = vec![0f32; 960]; // one 20ms frame at 48k
-      while let Ok((pkt, _)) = track.read_rtp().await {
-        if pkt.payload.is_empty() {
-          continue;
-        } // e.g. padding
-        match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
-          Ok(n) => {
-            let mut at_dev = Vec::new();
-            let _ = out_rs.push(&pcm[..n], &mut at_dev);
-            mixer.push(src, &at_dev);
-          }
-          Err(e) => eprintln!("opus decode error: {e}"),
-        }
-      }
-      mixer.remove(src); // track ended (peer left)
-    })
-  }));
-
   let offer = client.create_offer(None).await?;
   let mut gather = client.gathering_complete_promise().await;
   client.set_local_description(offer).await?;
@@ -285,9 +255,14 @@ pub async fn setup_client() -> anyhow::Result<(
     .await
     .ok_or(anyhow::anyhow!("Client has no local description"))?;
 
-  // connection.send(ClientVoice::Offer(offer));
-
-  Ok((client, offer, cpal_stream_input, cpal_stream_output))
+  Ok((
+    client,
+    offer,
+    cpal_stream_input,
+    cpal_stream_output,
+    mixer,
+    out_rate,
+  ))
 }
 
 fn spawn_audio_processor(

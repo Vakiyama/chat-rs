@@ -10,7 +10,7 @@ use google_material_symbols::GoogleMaterialSymbols as Icon;
 use iced::Theme::CatppuccinFrappe;
 use iced::futures::channel::mpsc::Sender;
 use iced::widget::{Text, container, text};
-use iced::{Element, Font, Settings, Subscription, Task, stream};
+use iced::{Element, Font, Subscription, Task, stream};
 use uuid::Uuid;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
@@ -270,7 +270,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::ChatLatencyUpdated(latency_ms) => {
       if let Some(ref mut voice) = model.voice {
-        voice.latency_ms = latency_ms as u32;
+        voice.latency_ms = latency_ms;
       }
       Task::none()
     }
