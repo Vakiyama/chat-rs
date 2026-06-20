@@ -268,6 +268,7 @@
                 nativeBuildInputs = [
                   pkgs.pkg-config
                   pkgs.protobuf
+                  pkgs.cmake
                 ];
                 depsBuildBuild = [ crossPkgs.stdenv.cc ];
                 buildInputs = [
