@@ -608,42 +608,64 @@ fn view_channels<'a>(
               (
                 presence.user.id,
                 row![
-                  container(
-                    text(presence.user.name.get(0..1).unwrap_or("U"))
+                  row![
+                    container(
+                      text(presence.user.name.get(0..1).unwrap_or("U"))
+                        .font(Font {
+                          weight: Weight::Semibold,
+                          ..SOURCE_SANS_REGULAR
+                        })
+                        .size(14)
+                    )
+                    .style(|theme: &Theme| {
+                      container::Style {
+                        text_color: Some(theme.extended_palette().background.weakest.color),
+                        background: Some(theme.accents().rosewater.into()),
+                        border: Border {
+                          color: if !presence.speaking {
+                            theme.accents().rosewater
+                          } else {
+                            theme.extended_palette().success.strong.color
+                          },
+                          width: 3.0,
+                          radius: border::radius(999),
+                        },
+                        ..container::Style::default()
+                      }
+                    })
+                    .center(Length::Fill)
+                    .width(24)
+                    .height(24),
+                    text(presence.user.name.clone())
                       .font(Font {
                         weight: Weight::Semibold,
                         ..SOURCE_SANS_REGULAR
                       })
                       .size(14)
-                  )
-                  .style(|theme: &Theme| {
-                    container::Style {
-                      text_color: Some(theme.extended_palette().background.weakest.color),
-                      background: Some(theme.accents().rosewater.into()),
-                      border: Border {
-                        color: if !presence.speaking {
-                          theme.accents().rosewater
-                        } else {
-                          theme.extended_palette().success.strong.color
-                        },
-                        width: 3.0,
-                        radius: border::radius(999),
-                      },
-                      ..container::Style::default()
+                  ]
+                  .align_y(Center)
+                  .spacing(SPACE_GRID as u32),
+                  iced::widget::space::horizontal(),
+                  row![
+                    if presence.muted {
+                      let el: Element<'a, Message> = icon(GoogleMaterialSymbols::MicOff).into();
+                      el
+                    } else {
+                      let el: Element<'a, Message> = iced::widget::space().width(16).into();
+                      el
+                    },
+                    if presence.deafened {
+                      let el: Element<'a, Message> = icon(GoogleMaterialSymbols::HeadsetOff).into();
+                      el
+                    } else {
+                      let el: Element<'a, Message> = iced::widget::space().width(16).into();
+                      el
                     }
-                  })
-                  .center(Length::Fill)
-                  .width(24)
-                  .height(24),
-                  text(presence.user.name.clone())
-                    .font(Font {
-                      weight: Weight::Semibold,
-                      ..SOURCE_SANS_REGULAR
-                    })
-                    .size(14)
+                  ]
+                  .spacing(SPACE_GRID as u32)
+                  .align_y(Center)
                 ]
                 .align_y(Center)
-                .spacing(SPACE_GRID as u32)
                 .padding([0, SPACE_GRID * 3])
                 .into(),
               )
@@ -1090,9 +1112,9 @@ fn view_leave_call<'a>(
 
   let deafen_button = voice_toggle_button(
     if voice.deafened {
-      GoogleMaterialSymbols::VolumeOff
+      GoogleMaterialSymbols::HeadsetOff
     } else {
-      GoogleMaterialSymbols::VolumeUp
+      GoogleMaterialSymbols::HeadsetMic
     },
     voice.deafened,
     Message::ToggleDeafen,
@@ -1111,7 +1133,12 @@ fn view_leave_call<'a>(
 
       button::Style {
         background,
-        text_color: palette.danger.base.color,
+        text_color: match status {
+          button::Status::Active => palette.danger.base.color,
+          button::Status::Hovered => palette.background.base.text,
+          button::Status::Pressed => todo!(),
+          button::Status::Disabled => todo!(),
+        },
         border: Border {
           radius: (SPACE_GRID as u32 / 2).into(),
           ..Default::default()
@@ -1120,21 +1147,17 @@ fn view_leave_call<'a>(
       }
     });
 
-  let panel = container(
-    row![status, mute_button, deafen_button, leave_button]
-      .align_y(Center)
-      .spacing(SPACE_GRID as u32),
-  )
-  .width(Length::Fill)
-  .padding(SPACE_GRID)
-  .style(|theme: &Theme| {
-    let palette = theme.extended_palette();
-    container::Style {
-      background: Some(palette.background.weak.color.into()),
-      border: border::rounded(2),
-      ..container::Style::default()
-    }
-  });
+  let panel = container(row![status, mute_button, deafen_button, leave_button].align_y(Center))
+    .width(Length::Fill)
+    .padding(SPACE_GRID)
+    .style(|theme: &Theme| {
+      let palette = theme.extended_palette();
+      container::Style {
+        background: Some(palette.background.weak.color.into()),
+        border: border::rounded(2),
+        ..container::Style::default()
+      }
+    });
 
   Some(panel.into())
 }
