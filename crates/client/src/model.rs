@@ -44,6 +44,9 @@ pub struct VoiceCall {
   pub voice_call_id: Option<Uuid>,
   pub epoch: u32,
   pub presence_snapshot: Vec<DisplayVoiceUser>,
+  // local mic/playback toggles. Deafen implies mute. Persist across calls.
+  pub muted: bool,
+  pub deafened: bool,
 }
 
 impl std::hash::Hash for VoiceCall {

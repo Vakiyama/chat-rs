@@ -96,6 +96,20 @@ impl IntoProto<ClientVoiceMessage> for ClientVoice {
           server_id: server_id.into(),
         })
       }
+      ClientVoice::SetMuted {
+        muted,
+        voice_channel_id,
+      } => client_voice_message::Payload::SetMuted(SetMuted {
+        muted,
+        voice_channel_id: voice_channel_id.into(),
+      }),
+      ClientVoice::SetDeafened {
+        deafened,
+        voice_channel_id,
+      } => client_voice_message::Payload::SetDeafened(SetDeafened {
+        deafened,
+        voice_channel_id: voice_channel_id.into(),
+      }),
     };
 
     ClientVoiceMessage {
@@ -214,6 +228,14 @@ impl TryFromProto<ClientVoiceMessage> for ClientVoice {
             server_id: parse_id(subscribe.server_id)?,
           })
         }
+        client_voice_message::Payload::SetMuted(set_muted) => Ok(ClientVoice::SetMuted {
+          muted: set_muted.muted,
+          voice_channel_id: parse_id(set_muted.voice_channel_id)?,
+        }),
+        client_voice_message::Payload::SetDeafened(set_deafened) => Ok(ClientVoice::SetDeafened {
+          deafened: set_deafened.deafened,
+          voice_channel_id: parse_id(set_deafened.voice_channel_id)?,
+        }),
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))

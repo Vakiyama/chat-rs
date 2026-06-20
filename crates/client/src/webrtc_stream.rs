@@ -175,6 +175,8 @@ fn spawn_speaker(
 pub async fn setup_client(
   voice_channel_id: Uuid,
   conn: WebRTCConnection,
+  muted: Arc<std::sync::atomic::AtomicBool>,
+  deafened: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<(
   RTCPeerConnection,
   RTCSessionDescription,
@@ -244,7 +246,7 @@ pub async fn setup_client(
   let in_rate = in_cfg.sample_rate();
   let out_rate = out_cfg.sample_rate();
 
-  let mixer = Mixer::new(out_rate); // jitter buffer sized in device-rate samples
+  let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
 
   let cpal_stream_input = spawn_mic(cap_tx, in_cfg, in_dev)?; // capture only
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
@@ -256,6 +258,8 @@ pub async fn setup_client(
     out_rate,
     voice_channel_id,
     conn,
+    muted,
+    deafened,
   )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
@@ -277,6 +281,7 @@ pub async fn setup_client(
   ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_audio_processor(
   mut cap_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
   mut rnd_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
@@ -285,6 +290,8 @@ fn spawn_audio_processor(
   out_rate: SampleRate,
   voice_channel_id: Uuid,
   mut conn: WebRTCConnection,
+  muted: Arc<std::sync::atomic::AtomicBool>,
+  deafened: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -380,9 +387,15 @@ fn spawn_audio_processor(
             }
 
 
+            // mic is gated while muted or deafened (deafen implies mute): we stop
+            // publishing audio and report not-speaking regardless of input level.
+            let gated = muted.load(std::sync::atomic::Ordering::Relaxed)
+              || deafened.load(std::sync::atomic::Ordering::Relaxed);
+
             // after process_capture_f32 produces `clean`:
             let rms = (clean.iter().map(|s| s*s).sum::<f32>() / clean.len() as f32).sqrt();
-            if rms > VAD_THRESHOLD { speaking = true; hang = VAD_HANGOVER; }
+            if gated { speaking = false; hang = 0; }
+            else if rms > VAD_THRESHOLD { speaking = true; hang = VAD_HANGOVER; }
             else if hang > 0 { hang -= 1; } else { speaking = false; }
 
             if speaking != last_sent {
@@ -401,15 +414,19 @@ fn spawn_audio_processor(
             // }
 
             if pcm_20ms.len() >= 960 {
-              match encoder.encode_float(&pcm_20ms[..960], &mut out) {
-                Ok(n) => {
-                  let _ = track.write_sample(&Sample {
-                    data: bytes::Bytes::copy_from_slice(&out[..n]),
-                    duration: std::time::Duration::from_millis(20),
-                    ..Default::default()
-                  }).await;
+              // while gated we still drain the accumulator (so it can't grow
+              // unbounded) but publish nothing to the track.
+              if !gated {
+                match encoder.encode_float(&pcm_20ms[..960], &mut out) {
+                  Ok(n) => {
+                    let _ = track.write_sample(&Sample {
+                      data: bytes::Bytes::copy_from_slice(&out[..n]),
+                      duration: std::time::Duration::from_millis(20),
+                      ..Default::default()
+                    }).await;
+                  }
+                  Err(e) => eprintln!("opus encode error {e}"),
                 }
-                Err(e) => eprintln!("opus encode error {e}"),
               }
               pcm_20ms.clear();
             }

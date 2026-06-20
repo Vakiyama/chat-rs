@@ -59,6 +59,14 @@ pub enum ClientVoice {
   SubscribeServer {
     server_id: Uuid,
   },
+  SetMuted {
+    muted: bool,
+    voice_channel_id: Uuid,
+  },
+  SetDeafened {
+    deafened: bool,
+    voice_channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]

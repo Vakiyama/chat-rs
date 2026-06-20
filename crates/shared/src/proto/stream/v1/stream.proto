@@ -35,11 +35,23 @@ message ClientVoiceMessage {
     LeaveRoom leave_room = 3;
     Speaking speaking = 4;
     SubscribeServer subscribe_server = 5;
+    SetMuted set_muted = 6;
+    SetDeafened set_deafened = 7;
   }
 }
 
 message Speaking {
   bool speaking = 1;
+  string voice_channel_id = 2;
+}
+
+message SetMuted {
+  bool muted = 1;
+  string voice_channel_id = 2;
+}
+
+message SetDeafened {
+  bool deafened = 1;
   string voice_channel_id = 2;
 }
 

@@ -44,8 +44,9 @@ use crate::{
   library::{
     database,
     webrtc::{
-      Room, broadcast_presence, handle_answer, handle_leave, handle_offer, membership_snapshot,
-      register_presence_subscriber, unregister_presence_subscriber,
+      Room, broadcast_presence, broadcast_server_presence, handle_answer, handle_leave,
+      handle_offer, membership_snapshot, register_presence_subscriber,
+      unregister_presence_subscriber,
     },
   },
 };
@@ -287,6 +288,44 @@ impl StreamService for StreamServer {
             let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
               .await
               .map_err(|err| println!("Error handling leave: {err}"));
+          }
+          Ok(ClientVoice::SetMuted {
+            muted,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            {
+              let peers = room.peers.read().await;
+              let Some(peer) = peers.get(&request_user_id) else {
+                continue;
+              };
+              peer
+                .muted
+                .store(muted, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+            broadcast_server_presence(room.clone()).await;
+          }
+          Ok(ClientVoice::SetDeafened {
+            deafened,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            {
+              let peers = room.peers.read().await;
+              let Some(peer) = peers.get(&request_user_id) else {
+                continue;
+              };
+              peer
+                .deafened
+                .store(deafened, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+            broadcast_server_presence(room.clone()).await;
           }
           Ok(ClientVoice::SubscribeServer { server_id }) => {
             // register this connection's interest in the server, then dump a

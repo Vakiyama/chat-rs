@@ -224,6 +224,25 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             }
             Task::none()
           }
+          chat::Message::ToggleMute => {
+            if let Some(ref mut voice) = model.voice {
+              // an explicit mute toggle never changes deafen state.
+              voice.muted = !voice.muted;
+              voice.handle.set_muted(voice.muted);
+            }
+            Task::none()
+          }
+          chat::Message::ToggleDeafen => {
+            if let Some(ref mut voice) = model.voice {
+              // deafen implies mute: deafening forces mute on, undeafening clears
+              // both. The actor mirrors these onto the audio pipeline + server.
+              voice.deafened = !voice.deafened;
+              voice.muted = voice.deafened;
+              voice.handle.set_deafened(voice.deafened);
+              voice.handle.set_muted(voice.muted);
+            }
+            Task::none()
+          }
           other => {
             chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
           }
@@ -322,6 +341,8 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         voice_call_id: None,
         epoch: 1,
         presence_snapshot: vec![],
+        muted: false,
+        deafened: false,
       };
 
       // (re)subscribe to the active server's call presence so a fresh or

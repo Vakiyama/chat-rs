@@ -95,6 +95,10 @@ pub enum Message {
   // Intercepted in the top-level update to (re)subscribe voice-call presence for
   // the active server. Not handled inside chat::update.
   ActiveServerChanged { server_id: Uuid },
+  // Mute/deafen toggles, also intercepted by the top-level update (they need the
+  // voice handle). Not handled inside chat::update.
+  ToggleMute,
+  ToggleDeafen,
   None,
 }
 
@@ -365,11 +369,13 @@ pub fn update(
         operation::move_cursor_to_end(text_input_id),
       ])
     }
-    // JoinVoice / LeaveVoice / ActiveServerChanged are all intercepted by the
-    // top-level update (they need the voice handle), so they're no-ops here.
-    Message::JoinVoice { .. } | Message::LeaveVoice | Message::ActiveServerChanged { .. } => {
-      Task::none()
-    }
+    // These are all intercepted by the top-level update (they need the voice
+    // handle), so they're no-ops here.
+    Message::JoinVoice { .. }
+    | Message::LeaveVoice
+    | Message::ActiveServerChanged { .. }
+    | Message::ToggleMute
+    | Message::ToggleDeafen => Task::none(),
   }
 }
 
@@ -1072,6 +1078,26 @@ fn view_leave_call<'a>(
   .spacing(2)
   .width(Length::Fill);
 
+  let mute_button = voice_toggle_button(
+    if voice.muted {
+      GoogleMaterialSymbols::MicOff
+    } else {
+      GoogleMaterialSymbols::Mic
+    },
+    voice.muted,
+    Message::ToggleMute,
+  );
+
+  let deafen_button = voice_toggle_button(
+    if voice.deafened {
+      GoogleMaterialSymbols::VolumeOff
+    } else {
+      GoogleMaterialSymbols::VolumeUp
+    },
+    voice.deafened,
+    Message::ToggleDeafen,
+  );
+
   let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(16))
     .on_press(Message::LeaveVoice)
     .style(|theme: &Theme, status| {
@@ -1095,7 +1121,7 @@ fn view_leave_call<'a>(
     });
 
   let panel = container(
-    row![status, leave_button]
+    row![status, mute_button, deafen_button, leave_button]
       .align_y(Center)
       .spacing(SPACE_GRID as u32),
   )
@@ -1111,4 +1137,39 @@ fn view_leave_call<'a>(
   });
 
   Some(panel.into())
+}
+
+// A small icon toggle for the in-call controls (mute / deafen). When `active`
+// (i.e. engaged: muted or deafened) it reads as danger; otherwise it's subtle.
+fn voice_toggle_button<'a>(
+  symbol: GoogleMaterialSymbols,
+  active: bool,
+  on_press: Message,
+) -> Element<'a, Message> {
+  button(icon(symbol).size(16))
+    .on_press(on_press)
+    .style(move |theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let text_color = if active {
+        palette.warning.base.color
+      } else {
+        palette.background.neutral.text
+      };
+      let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+          Some(palette.background.weakest.color.into())
+        }
+        _ => None,
+      };
+      button::Style {
+        background,
+        text_color,
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    })
+    .into()
 }

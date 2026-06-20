@@ -5,6 +5,7 @@ use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use iced::Task;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -17,6 +18,8 @@ pub enum VoiceCommand {
   Leave,
   Signal(Box<ServerVoice>),
   SubscribeServer { server_id: Uuid },
+  SetMuted(bool),
+  SetDeafened(bool),
 }
 
 pub struct VoiceHandle {
@@ -41,6 +44,12 @@ impl VoiceHandle {
     let _ = self
       .sender
       .send(VoiceCommand::SubscribeServer { server_id });
+  }
+  pub fn set_muted(&self, muted: bool) {
+    let _ = self.sender.send(VoiceCommand::SetMuted(muted));
+  }
+  pub fn set_deafened(&self, deafened: bool) {
+    let _ = self.sender.send(VoiceCommand::SetDeafened(deafened));
   }
 }
 
@@ -121,6 +130,12 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
 
   let room_id = Arc::new(Mutex::new(None));
   let cloned_room_id = room_id.clone();
+
+  // mute/deafen persist across calls (like Discord); the audio pipeline reads these
+  // atomics live, and we re-announce them to the server on each join.
+  let muted = Arc::new(AtomicBool::new(false));
+  let deafened = Arc::new(AtomicBool::new(false));
+
   tokio::spawn(async move {
     let mut call: Option<ActiveCall> = None; // None = not in a call
     while let Some(cmd) = rx.recv().await {
@@ -143,7 +158,14 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
 
             *room_id = None;
           }
-          match setup_client(voice_channel_id, conn.clone()).await {
+          match setup_client(
+            voice_channel_id,
+            conn.clone(),
+            muted.clone(),
+            deafened.clone(),
+          )
+          .await
+          {
             Ok((pc, offer, mic, out, mixer, out_rate)) => {
               let pc = Arc::new(pc);
               let started = Arc::new(Mutex::new(HashSet::new()));
@@ -196,6 +218,21 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 started: started.clone(),
               });
               *cloned_room_id.lock().await = Some(voice_channel_id);
+
+              // the server's participant starts un-muted/un-deafened, so re-announce
+              // any persisted local state for this fresh join.
+              if muted.load(Ordering::Relaxed) {
+                conn.send(ClientVoice::SetMuted {
+                  muted: true,
+                  voice_channel_id,
+                });
+              }
+              if deafened.load(Ordering::Relaxed) {
+                conn.send(ClientVoice::SetDeafened {
+                  deafened: true,
+                  voice_channel_id,
+                });
+              }
             }
             Err(e) => eprintln!("voice join failed: {e:?}"),
           }
@@ -219,6 +256,26 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
         }
         VoiceCommand::SubscribeServer { server_id } => {
           conn.send(ClientVoice::SubscribeServer { server_id });
+        }
+        VoiceCommand::SetMuted(value) => {
+          // the audio pipeline reads this live; only announce to the server when
+          // we're actually in a call.
+          muted.store(value, Ordering::Relaxed);
+          if let Some(voice_channel_id) = *cloned_room_id.lock().await {
+            conn.send(ClientVoice::SetMuted {
+              muted: value,
+              voice_channel_id,
+            });
+          }
+        }
+        VoiceCommand::SetDeafened(value) => {
+          deafened.store(value, Ordering::Relaxed);
+          if let Some(voice_channel_id) = *cloned_room_id.lock().await {
+            conn.send(ClientVoice::SetDeafened {
+              deafened: value,
+              voice_channel_id,
+            });
+          }
         }
         VoiceCommand::Leave => {
           if let Some(active) = call.take() {
