@@ -34,11 +34,15 @@ impl IntoProto<ServerVoiceMessage> for ServerVoice {
         description: serde_json::to_string(&description).unwrap(),
         voice_channel_id: voice_channel_id.into(),
       }),
-      ServerVoice::PresenceSnapshot { peers } => {
-        server_voice_message::Payload::Snapshot(proto::PresenceSnapshot {
-          peers: peers.into_iter().map(|peer| peer.into_proto()).collect(),
-        })
-      }
+      ServerVoice::PresenceSnapshot {
+        voice_channel_id,
+        server_id,
+        peers,
+      } => server_voice_message::Payload::Snapshot(proto::PresenceSnapshot {
+        peers: peers.into_iter().map(|peer| peer.into_proto()).collect(),
+        voice_channel_id: voice_channel_id.into(),
+        server_id: server_id.into(),
+      }),
     };
 
     ServerVoiceMessage {
@@ -87,6 +91,11 @@ impl IntoProto<ClientVoiceMessage> for ClientVoice {
         speaking,
         voice_channel_id: voice_channel_id.into(),
       }),
+      ClientVoice::SubscribeServer { server_id } => {
+        client_voice_message::Payload::SubscribeServer(SubscribeServer {
+          server_id: server_id.into(),
+        })
+      }
     };
 
     ClientVoiceMessage {
@@ -200,6 +209,11 @@ impl TryFromProto<ClientVoiceMessage> for ClientVoice {
           speaking: speaking.speaking,
           voice_channel_id: parse_id(speaking.voice_channel_id)?,
         }),
+        client_voice_message::Payload::SubscribeServer(subscribe) => {
+          Ok(ClientVoice::SubscribeServer {
+            server_id: parse_id(subscribe.server_id)?,
+          })
+        }
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
@@ -227,6 +241,8 @@ impl TryFromProto<ServerVoiceMessage> for ServerVoice {
         }),
         server_voice_message::Payload::Snapshot(presence_snapshot) => {
           Ok(ServerVoice::PresenceSnapshot {
+            voice_channel_id: parse_id(presence_snapshot.voice_channel_id)?,
+            server_id: parse_id(presence_snapshot.server_id)?,
             peers: presence_snapshot
               .peers
               .into_iter()

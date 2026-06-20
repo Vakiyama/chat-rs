@@ -2,6 +2,7 @@ use crate::audio_processing::call_handler::VoiceHandle;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use chat_shared::domain::stream::{DisplayVoiceUser, User};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{chat_stream, webrtc_stream};
@@ -57,6 +58,8 @@ pub struct Model {
   pub chat_stream: Stream<chat_stream::ChatConnection>,
   pub webrtc_stream: Stream<webrtc_stream::WebRTCConnection>,
   pub voice: Option<VoiceCall>,
+  pub active_server_id: Option<Uuid>,
+  pub room_presence: HashMap<Uuid, Vec<DisplayVoiceUser>>,
 }
 
 pub enum Screen {
@@ -72,6 +75,8 @@ impl Default for Model {
       chat_stream: Stream::Disconnected,
       webrtc_stream: Stream::Disconnected,
       voice: None,
+      active_server_id: None,
+      room_presence: HashMap::new(),
     }
   }
 }

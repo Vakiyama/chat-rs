@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::colors::AccentsExt;
 use crate::screens::chat::View::NoneSelected;
 use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
@@ -8,16 +9,19 @@ use crate::types::async_data::AsyncData;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
-use chat_shared::domain::stream::{ClientText, ServerText, User};
+use chat_shared::domain::stream::{ClientText, DisplayVoiceUser, ServerText, User};
 use chrono::{Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
+use iced::advanced::Widget;
+use iced::border::Radius;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
 use iced::widget::{button, column, operation, scrollable, text, text_input};
 use iced::widget::{container, row};
 use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
+use iced_aw::style::colors::BLACK;
 use indexmap::IndexMap;
 use uuid::Uuid;
 
@@ -88,6 +92,9 @@ pub enum Message {
   Init,
   JoinVoice { voice_channel_id: Uuid },
   LeaveVoice,
+  // Intercepted in the top-level update to (re)subscribe voice-call presence for
+  // the active server. Not handled inside chat::update.
+  ActiveServerChanged { server_id: Uuid },
   None,
 }
 
@@ -236,19 +243,26 @@ pub fn update(
         && !res.servers.is_empty()
       {
         let global_server = res.servers[0].clone();
+        let server_id = global_server.id;
 
         let text_channel = global_server
           .channels
           .into_iter()
           .find(|channel| channel.r#type == ChannelType::Text);
 
+        // tell the top-level update which server's call presence to watch
+        let subscribe = Task::done(Message::ActiveServerChanged { server_id });
+
         if let Some(text_channel) = text_channel {
-          Task::done(Message::UserSelectedTextChannel {
-            text_channel_id: text_channel.id,
-            name: text_channel.name,
-          })
+          Task::batch([
+            subscribe,
+            Task::done(Message::UserSelectedTextChannel {
+              text_channel_id: text_channel.id,
+              name: text_channel.name,
+            }),
+          ])
         } else {
-          Task::none()
+          subscribe
         }
       } else {
         Task::none()
@@ -351,7 +365,11 @@ pub fn update(
         operation::move_cursor_to_end(text_input_id),
       ])
     }
-    Message::JoinVoice { .. } | Message::LeaveVoice => Task::none(),
+    // JoinVoice / LeaveVoice / ActiveServerChanged are all intercepted by the
+    // top-level update (they need the voice handle), so they're no-ops here.
+    Message::JoinVoice { .. } | Message::LeaveVoice | Message::ActiveServerChanged { .. } => {
+      Task::none()
+    }
   }
 }
 
@@ -555,7 +573,7 @@ fn view_channels<'a>(
         }
       };
 
-      button(
+      button(column![
         row![
           icon(GoogleMaterialSymbols::Mic)
             .size(20)
@@ -573,7 +591,72 @@ fn view_channels<'a>(
         .spacing((SPACE_GRID) as u32)
         .align_y(Center)
         .clip(true),
-      )
+        column::Column::with_children({
+          main_model
+            .room_presence
+            .get(&voice_channel.id)
+            .map(|users| users.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .map(|presence| -> (Uuid, Element<'a, Message>) {
+              (
+                presence.user.id,
+                row![
+                  container(
+                    text(presence.user.name.get(0..1).unwrap_or("U"))
+                      .font(Font {
+                        weight: Weight::Semibold,
+                        ..SOURCE_SANS_REGULAR
+                      })
+                      .size(14)
+                  )
+                  .style(|theme: &Theme| {
+                    container::Style {
+                      text_color: Some(theme.extended_palette().background.weakest.color),
+                      background: Some(theme.accents().rosewater.into()),
+                      border: Border {
+                        color: if !presence.speaking {
+                          theme.accents().rosewater
+                        } else {
+                          theme.extended_palette().success.strong.color
+                        },
+                        width: 3.0,
+                        radius: border::radius(999),
+                      },
+                      ..container::Style::default()
+                    }
+                  })
+                  .center(Length::Fill)
+                  .width(24)
+                  .height(24),
+                  text(presence.user.name.clone())
+                    .font(Font {
+                      weight: Weight::Semibold,
+                      ..SOURCE_SANS_REGULAR
+                    })
+                    .size(14)
+                ]
+                .align_y(Center)
+                .spacing(SPACE_GRID as u32)
+                .padding([0, SPACE_GRID * 3])
+                .into(),
+              )
+            })
+        })
+        .spacing(1)
+        .padding([
+          if main_model
+            .room_presence
+            .get(&voice_channel.id)
+            .is_some_and(|presence| !presence.is_empty())
+          {
+            SPACE_GRID / 2
+          } else {
+            0
+          },
+          0
+        ]),
+      ])
       .style(|theme: &Theme, status| -> button::Style {
         let palette = theme.extended_palette();
         let background = match status {

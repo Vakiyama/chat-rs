@@ -16,6 +16,7 @@ pub enum VoiceCommand {
   Join { voice_channel_id: Uuid, epoch: u32 },
   Leave,
   Signal(Box<ServerVoice>),
+  SubscribeServer { server_id: Uuid },
 }
 
 pub struct VoiceHandle {
@@ -35,6 +36,11 @@ impl VoiceHandle {
   }
   pub fn signal(&self, message: ServerVoice) {
     let _ = self.sender.send(VoiceCommand::Signal(message.into()));
+  }
+  pub fn subscribe_server(&self, server_id: Uuid) {
+    let _ = self
+      .sender
+      .send(VoiceCommand::SubscribeServer { server_id });
   }
 }
 
@@ -211,6 +217,9 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             eprintln!("apply signal: {e:?}");
           }
         }
+        VoiceCommand::SubscribeServer { server_id } => {
+          conn.send(ClientVoice::SubscribeServer { server_id });
+        }
         VoiceCommand::Leave => {
           if let Some(active) = call.take() {
             active.stats_task.abort(); // stop the poller before tearing down
@@ -243,7 +252,7 @@ async fn apply_signal(
   mixer: &crate::audio_processing::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   out_rate: u32,
-) -> anyhow::Result<Task<Message>> {
+) -> anyhow::Result<()> {
   match msg {
     ServerVoice::Answer { description, .. } => {
       let before_receivers = pc.get_receivers().await.len();
@@ -263,7 +272,6 @@ async fn apply_signal(
           }
         }
       }
-      Ok(Task::none())
     }
     ServerVoice::Offer {
       description,
@@ -281,15 +289,14 @@ async fn apply_signal(
         description: local,
         voice_channel_id,
       });
-      Ok(Task::none())
     }
-    ServerVoice::PresenceSnapshot { peers } => {
-      Ok(Task::done(crate::Message::ServerSentPresenceSnapshot {
-        peers,
-      }))
-    }
+    ServerVoice::PresenceSnapshot {
+      voice_channel_id,
+      peers,
+      ..
+    } => (),
   }
-  // Ok(())
+  Ok(())
 }
 
 async fn read_track(

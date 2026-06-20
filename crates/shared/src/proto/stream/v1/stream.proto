@@ -31,9 +31,10 @@ message LeaveRoom {
 message ClientVoiceMessage {
   oneof payload {
     SessionDescriptionWithId offer = 1;
-    SessionDescriptionWithId answer = 2; 
+    SessionDescriptionWithId answer = 2;
     LeaveRoom leave_room = 3;
     Speaking speaking = 4;
+    SubscribeServer subscribe_server = 5;
   }
 }
 
@@ -42,8 +43,17 @@ message Speaking {
   string voice_channel_id = 2;
 }
 
+// Watch all voice-call presence for a single server. The server replies with a
+// PresenceSnapshot per active room in that server, and keeps pushing membership
+// snapshots as calls in that server change.
+message SubscribeServer {
+  string server_id = 1;
+}
+
 message PresenceSnapshot {
-  repeated DisplayVoiceUser peers = 1; 
+  repeated DisplayVoiceUser peers = 1;
+  string voice_channel_id = 2;
+  string server_id = 3;
 }
 
 message DisplayVoiceUser {

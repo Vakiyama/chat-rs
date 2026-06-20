@@ -56,6 +56,9 @@ pub enum ClientVoice {
     speaking: bool,
     voice_channel_id: Uuid,
   },
+  SubscribeServer {
+    server_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,8 @@ pub enum ServerVoice {
     voice_channel_id: Uuid,
   },
   PresenceSnapshot {
+    voice_channel_id: Uuid,
+    server_id: Uuid,
     peers: Vec<DisplayVoiceUser>,
   },
 }

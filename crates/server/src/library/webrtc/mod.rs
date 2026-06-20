@@ -56,6 +56,57 @@ pub struct Participant {
 #[derive(Default)]
 pub struct Room {
   pub peers: RwLock<HashMap<PeerId, Arc<Participant>>>,
+  // identity of the room, copied onto every presence snapshot so server-wide
+  // subscribers can bucket presence per channel/server. Defaults to nil (tests
+  // construct rooms via Room::default()); production rooms are built with Room::new.
+  pub voice_channel_id: Uuid,
+  pub server_id: Uuid,
+}
+
+impl Room {
+  pub fn new(voice_channel_id: Uuid, server_id: Uuid) -> Self {
+    Room {
+      peers: Default::default(),
+      voice_channel_id,
+      server_id,
+    }
+  }
+}
+
+// A voice-stream connection watching one server's call presence. `user_id` lets a
+// server-wide broadcast skip a subscriber who is themselves a participant in the
+// room that changed — that participant already gets the richer in-call snapshot
+// (which carries speaking state), so the membership-only snapshot must not clobber it.
+struct PresenceSubscriber {
+  user_id: Uuid,
+  server_id: Uuid,
+  tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+}
+
+// conn_id -> subscriber. Keyed per connection (not per user) so a user with two
+// clients open each get their own snapshots, and so cleanup is unambiguous on
+// stream teardown.
+static PRESENCE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<Uuid, PresenceSubscriber>>> =
+  std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn register_presence_subscriber(
+  conn_id: Uuid,
+  user_id: Uuid,
+  server_id: Uuid,
+  tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+) {
+  PRESENCE_REGISTRY.lock().unwrap().insert(
+    conn_id,
+    PresenceSubscriber {
+      user_id,
+      server_id,
+      tx,
+    },
+  );
+}
+
+pub fn unregister_presence_subscriber(conn_id: &Uuid) {
+  PRESENCE_REGISTRY.lock().unwrap().remove(conn_id);
 }
 
 pub async fn handle_offer(
@@ -260,6 +311,7 @@ pub async fn handle_offer(
   }
 
   broadcast_presence(room.clone()).await;
+  broadcast_server_presence(room.clone()).await;
 
   Ok(())
 }
@@ -406,12 +458,17 @@ pub async fn handle_leave(
   }
 
   broadcast_presence(room.clone()).await;
+  broadcast_server_presence(room.clone()).await;
 
   Ok(())
 }
 
+// In-call presence: the rich snapshot (includes live speaking state) sent to the
+// peers actually in the call. Triggered on join/leave/speaking changes.
 pub async fn broadcast_presence(room: Arc<Room>) {
   let msg = ServerVoice::PresenceSnapshot {
+    voice_channel_id: room.voice_channel_id,
+    server_id: room.server_id,
     peers: room
       .peers
       .read()
@@ -450,6 +507,61 @@ pub async fn broadcast_presence(room: Arc<Room>) {
   // snapshots peers.
   let result: Result<Vec<_>, _> = results.into_iter().collect();
   let _ = result.map_err(|e| eprintln!("Error sending presence snapshot: {e}"));
+}
+
+// Membership-only snapshot (speaking forced false) of a room — what users who are
+// NOT in the call see. Empty `peers` is how a server-wide subscriber learns a call
+// emptied out and should be cleared.
+pub async fn membership_snapshot(room: &Room) -> ServerVoiceMessage {
+  ServerVoice::PresenceSnapshot {
+    voice_channel_id: room.voice_channel_id,
+    server_id: room.server_id,
+    peers: room
+      .peers
+      .read()
+      .await
+      .values()
+      .map(|peer| DisplayVoiceUser {
+        user: peer.user.clone(),
+        muted: peer.muted.load(std::sync::atomic::Ordering::Relaxed),
+        deafened: peer.deafened.load(std::sync::atomic::Ordering::Relaxed),
+        speaking: false,
+      })
+      .collect(),
+  }
+  .into_proto()
+}
+
+// Server-wide presence: push a room's membership snapshot to every connection
+// watching that room's server, except participants already in the room (they get
+// the richer in-call snapshot via broadcast_presence). Triggered on join/leave.
+pub async fn broadcast_server_presence(room: Arc<Room>) {
+  let in_room: std::collections::HashSet<Uuid> =
+    room.peers.read().await.keys().copied().collect();
+
+  let txs: Vec<_> = {
+    let registry = PRESENCE_REGISTRY.lock().unwrap();
+    registry
+      .values()
+      .filter(|sub| sub.server_id == room.server_id && !in_room.contains(&sub.user_id))
+      .map(|sub| sub.tx.clone())
+      .collect()
+  };
+
+  if txs.is_empty() {
+    return;
+  }
+
+  let proto = membership_snapshot(&room).await;
+
+  let results = join_all(txs.into_iter().map(|tx| {
+    let proto = proto.clone();
+    async move { tx.send(Ok(proto)).await }
+  }))
+  .await;
+
+  let result: Result<Vec<_>, _> = results.into_iter().collect();
+  let _ = result.map_err(|e| eprintln!("Error sending server presence snapshot: {e}"));
 }
 
 pub async fn handle_answer(
@@ -526,17 +638,26 @@ mod tests {
     Ok(msg.try_into_domain()?)
   }
 
+  // Presence snapshots are broadcast on the same signal channel and can arrive at
+  // any point between negotiation messages, so the negotiation-focused helpers skip
+  // them rather than treating them as an unexpected frame.
   async fn expect_answer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
-    match recv_signal(rx).await? {
-      ServerVoice::Answer { description, .. } => Ok(description),
-      other => anyhow::bail!("expected Answer, got {other:?}"),
+    loop {
+      match recv_signal(rx).await? {
+        ServerVoice::Answer { description, .. } => return Ok(description),
+        ServerVoice::PresenceSnapshot { .. } => continue,
+        other => anyhow::bail!("expected Answer, got {other:?}"),
+      }
     }
   }
 
   async fn expect_offer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
-    match recv_signal(rx).await? {
-      ServerVoice::Offer { description, .. } => Ok(description),
-      other => anyhow::bail!("expected Offer, got {other:?}"),
+    loop {
+      match recv_signal(rx).await? {
+        ServerVoice::Offer { description, .. } => return Ok(description),
+        ServerVoice::PresenceSnapshot { .. } => continue,
+        other => anyhow::bail!("expected Offer, got {other:?}"),
+      }
     }
   }
 

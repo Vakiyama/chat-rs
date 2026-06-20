@@ -16,6 +16,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
 pub mod audio_processing;
 mod chat_stream;
+pub mod colors;
 pub mod config;
 pub mod webrtc_stream;
 
@@ -165,6 +166,7 @@ pub enum Message {
   ChatLatencyUpdated(u32),
   WebRTC(Box<ServerVoice>),
   ServerSentPresenceSnapshot {
+    voice_channel_id: Uuid,
     peers: Vec<DisplayVoiceUser>,
   },
   WebRTCSignalStreamConnected(WebRTCConnection),
@@ -210,6 +212,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
               voice.handle.leave();
               voice.voice_call_id = None;
               voice.link_state = model::LinkState::Idle;
+            }
+            Task::none()
+          }
+          chat::Message::ActiveServerChanged { server_id } => {
+            // remember the active server (so we can re-subscribe on reconnect) and
+            // subscribe now if the voice stream is already up.
+            model.active_server_id = Some(server_id);
+            if let Some(voice) = &model.voice {
+              voice.handle.subscribe_server(server_id);
             }
             Task::none()
           }
@@ -284,12 +295,26 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::WebRTC(msg) => {
       if let Some(voice) = &model.voice {
-        voice.handle.signal(*msg);
+        match *msg {
+          ServerVoice::PresenceSnapshot {
+            voice_channel_id,
+            server_id: _,
+            peers,
+          } => Task::done(Message::ServerSentPresenceSnapshot {
+            voice_channel_id,
+            peers,
+          }),
+          _ => {
+            voice.handle.signal(*msg);
+            Task::none()
+          }
+        }
+      } else {
+        Task::none()
       }
-      Task::none()
     }
     Message::WebRTCSignalStreamConnected(conn) => {
-      model.voice = Some(VoiceCall {
+      let voice = VoiceCall {
         handle: spawn_voice(conn),
         link_state: model::LinkState::Connecting,
         media: model::MediaHealth::Unknown,
@@ -297,7 +322,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         voice_call_id: None,
         epoch: 1,
         presence_snapshot: vec![],
-      });
+      };
+
+      // (re)subscribe to the active server's call presence so a fresh or
+      // reconnected voice stream immediately receives a snapshot of all rooms.
+      if let Some(server_id) = model.active_server_id {
+        voice.handle.subscribe_server(server_id);
+      }
+
+      model.voice = Some(voice);
 
       Task::none()
     }
@@ -398,11 +431,19 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 
       Task::none()
     }
-    Message::ServerSentPresenceSnapshot { peers } => {
-      let Some(ref mut call) = model.voice else {
-        return Task::none();
-      };
-      call.presence_snapshot = peers;
+    Message::ServerSentPresenceSnapshot {
+      voice_channel_id,
+      peers,
+    } => {
+      model.room_presence.insert(voice_channel_id, peers.clone());
+
+      // keep the existing in-call presence in sync when the snapshot is for the
+      // call we're actually in (that one carries live speaking state).
+      if let Some(ref mut call) = model.voice
+        && call.voice_call_id == Some(voice_channel_id)
+      {
+        call.presence_snapshot = peers;
+      }
 
       Task::none()
     }
