@@ -338,6 +338,12 @@ async fn read_track(
     }
   }
 
+  // Release the dedup key so this track id can be read again. Without this the set
+  // leaks an entry per track for the lifetime of the call, and — because the server's
+  // relay id is tied to the publisher — a peer that rejoins would be treated as
+  // "already started" and never read again.
+  started.lock().await.remove(&id);
+
   if let Some(s) = src {
     mixer.remove(s);
   }

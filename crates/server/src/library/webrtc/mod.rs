@@ -109,9 +109,14 @@ pub async fn handle_offer(
         return;
       };
 
+      // Unique track id per join. Clients dedup inbound tracks by track id; a peer that
+      // leaves and rejoins keeps the same PeerId, so a peer-stable id ("audio-{me}")
+      // collides with the id a staying client already has cached from the previous
+      // session, and the rejoiner's audio is silently dropped until that client also
+      // rejoins. A fresh id every time keeps the rejoiner distinct.
       let relay = Arc::new(TrackLocalStaticRTP::new(
         track.codec().capability,
-        format!("audio-{me}"),
+        format!("audio-{me}-{}", Uuid::new_v4()),
         format!("relay-{me}"),
       ));
       *me_p.relay.write().await = Some(relay.clone());
@@ -930,6 +935,58 @@ mod tests {
 
     tokio::time::timeout(Duration::from_secs(10), b2_hears_a).await??;
     tokio::time::timeout(Duration::from_secs(10), a_hears_rejoin).await??;
+    Ok(())
+  }
+
+  async fn relay_id(room: &Arc<Room>, id: PeerId) -> Option<String> {
+    use webrtc::track::track_local::TrackLocal;
+    let peers = room.peers.read().await;
+    let p = peers.get(&id)?;
+    let relay = p.relay.read().await;
+    relay.as_ref().map(|r| r.id().to_string())
+  }
+
+  // A staying client dedups inbound tracks by track id, so a rejoining peer (same
+  // PeerId) MUST get a fresh relay track id — otherwise the staying client treats the
+  // rejoiner's audio as already-handled and drops it. Guards the per-join unique id.
+  #[tokio::test]
+  async fn rejoining_peer_gets_a_fresh_relay_track_id() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+
+    // A is present so B's on_track has someone to wire a relay toward.
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
+    let a_id = Uuid::new_v4();
+    let a_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&a_client).await?);
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
+    wait_for_relay(&room, a_id).await?;
+
+    // B joins and publishes; capture its relay id.
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+    let b_id = Uuid::new_v4();
+    let b_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b_client).await?);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
+    wait_for_relay(&room, b_id).await?;
+    let first_id = relay_id(&room, b_id).await.expect("B relay after first join");
+
+    // B leaves and rejoins under the same PeerId.
+    handle_leave(room.clone(), b_id, room_id).await?;
+    let (b2_tx, mut b2_rx) = tokio::sync::mpsc::channel(8);
+    let b2_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b2_client).await?);
+    join(&b2_client, &room, b_id, b2_tx, &mut b2_rx, &api, room_id).await?;
+    wait_for_relay(&room, b_id).await?;
+    let second_id = relay_id(&room, b_id).await.expect("B relay after rejoin");
+
+    assert!(first_id.starts_with(&format!("audio-{b_id}")));
+    assert!(second_id.starts_with(&format!("audio-{b_id}")));
+    assert_ne!(
+      first_id, second_id,
+      "rejoining peer must get a distinct relay track id"
+    );
     Ok(())
   }
 }
