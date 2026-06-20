@@ -19,6 +19,7 @@ message ServerVoiceMessage {
   oneof payload {
     SessionDescriptionWithId offer = 1;
     SessionDescriptionWithId answer = 2;
+    PresenceSnapshot snapshot    = 3;
   }
 }
 
@@ -26,12 +27,30 @@ message LeaveRoom {
   string voice_channel_id = 1;
 }
 
+
 message ClientVoiceMessage {
   oneof payload {
     SessionDescriptionWithId offer = 1;
     SessionDescriptionWithId answer = 2; 
     LeaveRoom leave_room = 3;
+    Speaking speaking = 4;
   }
+}
+
+message Speaking {
+  bool speaking = 1;
+  string voice_channel_id = 2;
+}
+
+message PresenceSnapshot {
+  repeated DisplayVoiceUser peers = 1; 
+}
+
+message DisplayVoiceUser {
+  DisplayUser user = 1;
+  bool muted = 2;
+  bool deafened = 3;
+  bool speaking = 4;
 }
 
 // Text streams:
@@ -58,10 +77,10 @@ message LeftRoom {
 
 message ServerTextMessage {
   oneof payload {
-    JoinedRoom  joined_room = 1;
-    LeftRoom    left_room   = 2;
-    Post        chat        = 3;
-    Pong        pong        = 4;
+    JoinedRoom       joined_room = 1;
+    LeftRoom         left_room   = 2;
+    Post             chat        = 3;
+    Pong             pong        = 4;
   }
 }
 

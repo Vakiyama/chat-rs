@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chat_shared::convert::TryIntoDomain;
-use chat_shared::domain::stream::{ServerVoice, User};
+use chat_shared::domain::stream::{DisplayVoiceUser, ServerVoice, User};
 use chat_shared::domain::user::MeReturn;
 use futures_util::SinkExt;
 use google_material_symbols::GoogleMaterialSymbols as Icon;
@@ -164,6 +164,9 @@ pub enum Message {
   ChatStreamDisconnected,
   ChatLatencyUpdated(u32),
   WebRTC(Box<ServerVoice>),
+  ServerSentPresenceSnapshot {
+    peers: Vec<DisplayVoiceUser>,
+  },
   WebRTCSignalStreamConnected(WebRTCConnection),
   WebRTCSignalStreamDisconnected,
   VoiceHandlePeerConnectionChanged {
@@ -293,6 +296,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         latency_ms: 0,
         voice_call_id: None,
         epoch: 1,
+        presence_snapshot: vec![],
       });
 
       Task::none()
@@ -391,6 +395,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
 
       call.media = health;
+
+      Task::none()
+    }
+    Message::ServerSentPresenceSnapshot { peers } => {
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+      call.presence_snapshot = peers;
 
       Task::none()
     }

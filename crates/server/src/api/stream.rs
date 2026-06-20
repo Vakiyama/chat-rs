@@ -17,7 +17,7 @@ use chat_shared::{
   },
   domain::{
     post::Post,
-    stream::{ClientText, ClientVoice, ServerText},
+    stream::{ClientText, ClientVoice, ServerText, User},
   },
 };
 use std::time::SystemTime;
@@ -43,10 +43,11 @@ use crate::{
   entities,
   library::{
     database,
-    webrtc::{Room, handle_answer, handle_leave, handle_offer},
+    webrtc::{Room, broadcast_presence, handle_answer, handle_leave, handle_offer},
   },
 };
 
+// todo: add text_channel_id rooms to manager
 #[derive(Default)]
 struct Manager {
   sockets: HashMap<Uuid, mpsc::Sender<Result<ServerTextMessage, tonic::Status>>>,
@@ -78,26 +79,22 @@ impl Manager {
   //   sender.send(Ok(message)).await
   // }
 
-  fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
-    self
-      .sockets
-      .iter()
-      .filter_map(|(id, sender)| {
-        if id != from {
-          Some(sender.clone())
-        } else {
-          None
-        }
-      })
-      .collect()
-  }
+  // fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
+  //   self
+  //     .sockets
+  //     .iter()
+  //     .filter_map(|(id, sender)| {
+  //       if id != from {
+  //         Some(sender.clone())
+  //       } else {
+  //         None
+  //       }
+  //     })
+  //     .collect()
+  // }
 
   fn targets_with_self(&self) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
-    self
-      .sockets
-      .iter()
-      .map(|(_, sender)| sender.clone())
-      .collect()
+    self.sockets.values().cloned().collect()
   }
   /// broadcasts to all passed in targets
   async fn emit(
@@ -138,6 +135,13 @@ impl StreamService for StreamServer {
     let Some(request_user_id) = request_user_id else {
       return Err(tonic::Status::unauthenticated("Unauthenitcated"));
     };
+
+    let db = database::get().await;
+    let user = entities::user::Entity::find_by_id(request_user_id)
+      .one(db)
+      .await
+      .unwrap()
+      .unwrap();
 
     let mut inner_stream = request.into_inner();
 
@@ -187,13 +191,37 @@ impl StreamService for StreamServer {
           .await;
 
         match msg {
+          Ok(ClientVoice::Speaking {
+            speaking,
+            voice_channel_id,
+          }) => {
+            let room = {
+              let mut room_manager = ROOM_MANAGER.lock().await;
+              room_manager
+                .rooms
+                .entry(voice_channel_id)
+                .or_insert_with(|| Room::default().into())
+                .clone()
+            };
+
+            {
+              let mut peers = room.peers.write().await;
+
+              let Some(peer) = peers.get_mut(&request_user_id) else {
+                continue;
+              };
+
+              peer
+                .speaking
+                .store(speaking, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+          }
           Ok(ClientVoice::Offer {
             description: offer,
             voice_channel_id,
           }) => {
-            // clone out the room Arc and drop the manager lock before awaiting the
-            // handler — handle_offer awaits network I/O, and holding this global lock
-            // across it serializes (and can wedge) signaling for every other call.
             let room = {
               let mut room_manager = ROOM_MANAGER.lock().await;
               room_manager
@@ -211,12 +239,15 @@ impl StreamService for StreamServer {
                 tx.clone(),
                 api,
                 voice_channel_id,
+                User {
+                  id: request_user_id,
+                  name: user.username.clone(),
+                },
               )
               .await
               {
                 Ok(()) => {
                   println!("Success handling session description offer from client");
-                  // let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
                 }
                 // todo; tear down clients if err
                 Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
@@ -274,7 +305,7 @@ impl StreamService for StreamServer {
           .collect()
       };
       for (id, room) in rooms {
-        let _ = handle_leave(room, request_user_id, id)
+        let _ = handle_leave(room.clone(), request_user_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
       }
@@ -308,6 +339,7 @@ impl StreamService for StreamServer {
     let manager = self.manager.clone();
     let pong_tx = tx.clone();
     manager.lock().unwrap().add(socket_id, tx);
+    let manager = manager.clone();
 
     tokio::spawn(async move {
       while let Some(msg) = inner_stream.next().await {
@@ -365,10 +397,15 @@ impl StreamService for StreamServer {
               .duration_since(SystemTime::UNIX_EPOCH)
               .unwrap_or_default()
               .as_micros() as u64;
-            let _ = pong_tx.send(Ok(ServerText::Pong {
-              timestamp,
-              server_received_at,
-            }.into_proto())).await;
+            let _ = pong_tx
+              .send(Ok(
+                ServerText::Pong {
+                  timestamp,
+                  server_received_at,
+                }
+                .into_proto(),
+              ))
+              .await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
@@ -376,6 +413,8 @@ impl StreamService for StreamServer {
           }
         }
       }
+
+      manager.lock().unwrap().remove(&socket_id);
     });
 
     let output_stream = ReceiverStream::new(rx);

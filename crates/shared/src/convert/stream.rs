@@ -9,7 +9,7 @@ pub mod proto {
 
 use crate::{
   convert::{self, IntoProto, TryFromProto, TryIntoDomain},
-  domain::{post::Post, stream::*},
+  domain::{self, post::Post, stream::*},
 };
 use proto::*;
 use tonic::Status;
@@ -34,10 +34,26 @@ impl IntoProto<ServerVoiceMessage> for ServerVoice {
         description: serde_json::to_string(&description).unwrap(),
         voice_channel_id: voice_channel_id.into(),
       }),
+      ServerVoice::PresenceSnapshot { peers } => {
+        server_voice_message::Payload::Snapshot(proto::PresenceSnapshot {
+          peers: peers.into_iter().map(|peer| peer.into_proto()).collect(),
+        })
+      }
     };
 
     ServerVoiceMessage {
       payload: Some(payload),
+    }
+  }
+}
+
+impl IntoProto<proto::DisplayVoiceUser> for domain::stream::DisplayVoiceUser {
+  fn into_proto(self) -> proto::DisplayVoiceUser {
+    proto::DisplayVoiceUser {
+      user: Some(self.user.into_proto()),
+      muted: self.muted,
+      deafened: self.deafened,
+      speaking: self.speaking,
     }
   }
 }
@@ -64,6 +80,13 @@ impl IntoProto<ClientVoiceMessage> for ClientVoice {
           voice_channel_id: voice_channel_id.into(),
         })
       }
+      ClientVoice::Speaking {
+        speaking,
+        voice_channel_id,
+      } => client_voice_message::Payload::Speaking(proto::Speaking {
+        speaking,
+        voice_channel_id: voice_channel_id.into(),
+      }),
     };
 
     ClientVoiceMessage {
@@ -173,6 +196,10 @@ impl TryFromProto<ClientVoiceMessage> for ClientVoice {
         client_voice_message::Payload::LeaveRoom(leave_room) => Ok(ClientVoice::LeaveRoom {
           voice_channel_id: parse_id(leave_room.voice_channel_id)?,
         }),
+        client_voice_message::Payload::Speaking(speaking) => Ok(ClientVoice::Speaking {
+          speaking: speaking.speaking,
+          voice_channel_id: parse_id(speaking.voice_channel_id)?,
+        }),
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
@@ -198,10 +225,38 @@ impl TryFromProto<ServerVoiceMessage> for ServerVoice {
             .map_err(|_e| tonic::Status::invalid_argument("invalid rtc_session_description."))?,
           voice_channel_id: parse_id(session_description.voice_channel_id)?,
         }),
+        server_voice_message::Payload::Snapshot(presence_snapshot) => {
+          Ok(ServerVoice::PresenceSnapshot {
+            peers: presence_snapshot
+              .peers
+              .into_iter()
+              .map(|peer| peer.try_into_domain())
+              .collect::<Result<Vec<domain::stream::DisplayVoiceUser>, Status>>()?,
+          })
+        }
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
     }
+  }
+}
+
+impl TryFromProto<proto::DisplayVoiceUser> for domain::stream::DisplayVoiceUser {
+  type Error = Status;
+
+  fn try_from_proto(proto: proto::DisplayVoiceUser) -> Result<Self, Self::Error> {
+    let Some(user) = proto.user else {
+      return Err(Status::invalid_argument("Missing user field"));
+    };
+
+    let user_domain = user.try_into_domain()?;
+
+    Ok(domain::stream::DisplayVoiceUser {
+      user: user_domain,
+      muted: proto.muted,
+      deafened: proto.deafened,
+      speaking: proto.speaking,
+    })
   }
 }
 

@@ -13,6 +13,7 @@ use iced::task::{Never, Sipper, sipper};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
 use sonora::{AudioProcessing, Config};
 use std::sync::Arc;
+use uuid::Uuid;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
@@ -171,7 +172,10 @@ fn spawn_speaker(
   Ok(stream)
 }
 
-pub async fn setup_client() -> anyhow::Result<(
+pub async fn setup_client(
+  voice_channel_id: Uuid,
+  conn: WebRTCConnection,
+) -> anyhow::Result<(
   RTCPeerConnection,
   RTCSessionDescription,
   cpal::Stream,
@@ -244,7 +248,15 @@ pub async fn setup_client() -> anyhow::Result<(
 
   let cpal_stream_input = spawn_mic(cap_tx, in_cfg, in_dev)?; // capture only
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
-  spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone(), in_rate, out_rate)?; // APM + Opus, owns the middle
+  spawn_audio_processor(
+    cap_rx,
+    rnd_rx,
+    mic_track.clone(),
+    in_rate,
+    out_rate,
+    voice_channel_id,
+    conn,
+  )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
   let mut gather = client.gathering_complete_promise().await;
@@ -271,6 +283,8 @@ fn spawn_audio_processor(
   track: Arc<TrackLocalStaticSample>,
   in_rate: SampleRate,
   out_rate: SampleRate,
+  voice_channel_id: Uuid,
+  mut conn: WebRTCConnection,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -308,6 +322,13 @@ fn spawn_audio_processor(
     // let mut gate_hang = 0u32;
     // const GATE_THRESHOLD: f32 = 0.01; // tune by ear
     // const GATE_HANGOVER: u32 = 30;
+
+    // state above the loop:
+    let mut speaking = false;
+    let mut hang = 0u32;
+    let mut last_sent = false;
+    const VAD_THRESHOLD: f32 = 0.01; // tune by ear, post-NS so it can be low
+    const VAD_HANGOVER: u32 = 25; // ~25 * 10ms = 250ms tail, avoids word-gap flicker
 
     loop {
       tokio::select! {
@@ -356,6 +377,17 @@ fn spawn_audio_processor(
 
                     pcm_20ms.extend_from_slice(&frame);   // raw > silence
                 }
+            }
+
+
+            // after process_capture_f32 produces `clean`:
+            let rms = (clean.iter().map(|s| s*s).sum::<f32>() / clean.len() as f32).sqrt();
+            if rms > VAD_THRESHOLD { speaking = true; hang = VAD_HANGOVER; }
+            else if hang > 0 { hang -= 1; } else { speaking = false; }
+
+            if speaking != last_sent {
+                conn.send(ClientVoice::Speaking{speaking, voice_channel_id});   // delta only, on transition
+                last_sent = speaking;
             }
 
             // let rms = (clean.iter().map(|s| s * s).sum::<f32>() / clean.len() as f32).sqrt();

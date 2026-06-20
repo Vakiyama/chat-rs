@@ -1,6 +1,8 @@
+use crate::Message;
 use crate::model::MediaHealth;
 use crate::webrtc_stream::{WebRTCConnection, setup_client};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
+use iced::Task;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,7 +137,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
 
             *room_id = None;
           }
-          match setup_client().await {
+          match setup_client(voice_channel_id, conn.clone()).await {
             Ok((pc, offer, mic, out, mixer, out_rate)) => {
               let pc = Arc::new(pc);
               let started = Arc::new(Mutex::new(HashSet::new()));
@@ -241,7 +243,7 @@ async fn apply_signal(
   mixer: &crate::audio_processing::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   out_rate: u32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Task<Message>> {
   match msg {
     ServerVoice::Answer { description, .. } => {
       let before_receivers = pc.get_receivers().await.len();
@@ -261,6 +263,7 @@ async fn apply_signal(
           }
         }
       }
+      Ok(Task::none())
     }
     ServerVoice::Offer {
       description,
@@ -278,9 +281,15 @@ async fn apply_signal(
         description: local,
         voice_channel_id,
       });
+      Ok(Task::none())
+    }
+    ServerVoice::PresenceSnapshot { peers } => {
+      Ok(Task::done(crate::Message::ServerSentPresenceSnapshot {
+        peers,
+      }))
     }
   }
-  Ok(())
+  // Ok(())
 }
 
 async fn read_track(

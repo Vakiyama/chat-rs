@@ -1,10 +1,11 @@
 use chat_shared::{
   convert::{IntoProto, stream::proto::ServerVoiceMessage},
-  domain::stream::ServerVoice,
+  domain::stream::{DisplayVoiceUser, ServerVoice, User},
 };
+use futures_util::future::join_all;
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, atomic::AtomicBool},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -43,9 +44,13 @@ struct NegState {
 pub struct Participant {
   pub pc: Arc<RTCPeerConnection>,
   relay: RwLock<Option<Arc<TrackLocalStaticRTP>>>,
-  signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
+  pub signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
   outbound_senders: RwLock<HashMap<PeerId, Arc<RTCRtpSender>>>,
   neg: Mutex<NegState>,
+  pub user: User,
+  pub speaking: AtomicBool,
+  pub muted: AtomicBool,
+  pub deafened: AtomicBool,
 }
 
 #[derive(Default)]
@@ -60,6 +65,7 @@ pub async fn handle_offer(
   signal_tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
   api: &API,
   voice_channel_id: Uuid,
+  user: User,
 ) -> anyhow::Result<()> {
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
@@ -92,6 +98,10 @@ pub async fn handle_offer(
       pending: false,
       generation: 0,
     }),
+    user,
+    speaking: false.into(),
+    muted: false.into(),
+    deafened: false.into(),
   });
 
   let track_room = room.clone();
@@ -249,6 +259,8 @@ pub async fn handle_offer(
     renegotiate(participant.clone(), voice_channel_id).await?;
   }
 
+  broadcast_presence(room.clone()).await;
+
   Ok(())
 }
 
@@ -393,7 +405,51 @@ pub async fn handle_leave(
     p.outbound_senders.write().await.remove(&me);
   }
 
+  broadcast_presence(room.clone()).await;
+
   Ok(())
+}
+
+pub async fn broadcast_presence(room: Arc<Room>) {
+  let msg = ServerVoice::PresenceSnapshot {
+    peers: room
+      .peers
+      .read()
+      .await
+      .clone()
+      .into_iter()
+      .map(|peer| {
+        let peer = peer.1;
+        DisplayVoiceUser {
+          user: peer.user.clone(),
+          muted: peer.muted.load(std::sync::atomic::Ordering::Relaxed),
+          deafened: peer.deafened.load(std::sync::atomic::Ordering::Relaxed),
+          speaking: peer.speaking.load(std::sync::atomic::Ordering::Relaxed),
+        }
+      })
+      .collect(),
+  };
+
+  let proto = msg.into_proto();
+
+  let txs: Vec<_> = room
+    .peers
+    .read()
+    .await
+    .values()
+    .map(|p| p.signal_tx.clone())
+    .collect();
+
+  let results = join_all(txs.into_iter().map(|tx| {
+    let proto = proto.clone();
+    async move { tx.send(Ok(proto)).await }
+  }))
+  .await;
+
+  // todo: we could use this as an opportunity to heal the call and remove failed presence
+  // snapshots peers.
+  let result: Result<Vec<_>, _> = results.into_iter().collect();
+  let _ = result.map_err(|e| eprintln!("Error sending presence snapshot: {e}"));
 }
 
 pub async fn handle_answer(
@@ -426,6 +482,7 @@ mod tests {
   use std::{sync::Arc, time::Duration};
 
   use chat_shared::convert::stream::proto::ServerVoiceMessage;
+  use chat_shared::domain::stream::User;
   use chat_shared::{convert::TryIntoDomain, domain::stream::ServerVoice};
   use uuid::Uuid;
   use webrtc::{
@@ -504,6 +561,10 @@ mod tests {
       tx,
       api,
       voice_channel_id,
+      User {
+        id: Uuid::new_v4(),
+        name: "test".into(),
+      },
     )
     .await?;
     let answer = expect_answer(rx).await?;
@@ -970,7 +1031,9 @@ mod tests {
     start_fake_mic(make_fake_mic(&b_client).await?);
     join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
     wait_for_relay(&room, b_id).await?;
-    let first_id = relay_id(&room, b_id).await.expect("B relay after first join");
+    let first_id = relay_id(&room, b_id)
+      .await
+      .expect("B relay after first join");
 
     // B leaves and rejoins under the same PeerId.
     handle_leave(room.clone(), b_id, room_id).await?;

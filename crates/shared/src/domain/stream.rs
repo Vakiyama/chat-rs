@@ -27,8 +27,12 @@ pub enum ClientText {
 
 #[derive(Clone, Debug)]
 pub enum ServerText {
-  JoinedRoom { from: User },
-  LeftRoom { from: User },
+  JoinedRoom {
+    from: User,
+  },
+  LeftRoom {
+    from: User,
+  },
   Post(Post),
   Pong {
     timestamp: u64,
@@ -48,6 +52,10 @@ pub enum ClientVoice {
   LeaveRoom {
     voice_channel_id: Uuid,
   },
+  Speaking {
+    speaking: bool,
+    voice_channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]
@@ -60,4 +68,20 @@ pub enum ServerVoice {
     description: RTCSessionDescription,
     voice_channel_id: Uuid,
   },
+  PresenceSnapshot {
+    peers: Vec<DisplayVoiceUser>,
+  },
+}
+
+#[derive(Clone, Debug)]
+pub struct Speaking {
+  pub speaking: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DisplayVoiceUser {
+  pub user: User,
+  pub muted: bool,
+  pub deafened: bool,
+  pub speaking: bool,
 }

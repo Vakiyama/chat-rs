@@ -1,7 +1,7 @@
 use crate::audio_processing::call_handler::VoiceHandle;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
-use chat_shared::domain::stream::User;
+use chat_shared::domain::stream::{DisplayVoiceUser, User};
 use uuid::Uuid;
 
 use crate::{chat_stream, webrtc_stream};
@@ -42,6 +42,7 @@ pub struct VoiceCall {
   pub handle: VoiceHandle,
   pub voice_call_id: Option<Uuid>,
   pub epoch: u32,
+  pub presence_snapshot: Vec<DisplayVoiceUser>,
 }
 
 impl std::hash::Hash for VoiceCall {
