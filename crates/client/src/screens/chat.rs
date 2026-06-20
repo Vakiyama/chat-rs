@@ -1136,8 +1136,8 @@ fn view_leave_call<'a>(
         text_color: match status {
           button::Status::Active => palette.danger.base.color,
           button::Status::Hovered => palette.background.base.text,
-          button::Status::Pressed => todo!(),
-          button::Status::Disabled => todo!(),
+          button::Status::Pressed => palette.danger.base.color,
+          button::Status::Disabled => palette.danger.base.color,
         },
         border: Border {
           radius: (SPACE_GRID as u32 / 2).into(),
