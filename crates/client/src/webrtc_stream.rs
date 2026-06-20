@@ -1,5 +1,6 @@
-use std::sync::Arc;
-
+use crate::audio_processing::mixer::Mixer;
+use crate::audio_processing::resampler::Resampler;
+use crate::client;
 use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
@@ -11,6 +12,8 @@ use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
 use sonora::{AudioProcessing, Config};
+use std::sync::Arc;
+use uuid::Uuid;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
@@ -22,10 +25,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-
-use crate::audio_processing::mixer::Mixer;
-use crate::audio_processing::resampler::Resampler;
-use crate::client;
 
 #[derive(Debug, Clone)]
 pub struct WebRTCConnection(mpsc::Sender<ClientVoiceMessage>);
@@ -92,7 +91,7 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
 // handle messages
 
-const TARGET_RATE: u32 = 48_000;
+pub const TARGET_RATE: u32 = 48_000;
 
 fn pick_config(
   default: cpal::SupportedStreamConfig,
@@ -173,11 +172,18 @@ fn spawn_speaker(
   Ok(stream)
 }
 
-pub async fn setup_client() -> anyhow::Result<(
+pub async fn setup_client(
+  voice_channel_id: Uuid,
+  conn: WebRTCConnection,
+  muted: Arc<std::sync::atomic::AtomicBool>,
+  deafened: Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<(
   RTCPeerConnection,
   RTCSessionDescription,
   cpal::Stream,
   cpal::Stream,
+  Mixer,
+  u32,
 )> {
   let mut media_engine = MediaEngine::default();
 
@@ -210,6 +216,7 @@ pub async fn setup_client() -> anyhow::Result<(
     "mic".into(),
   ));
   let sender = client.add_track(mic_track.clone()).await?;
+
   tokio::spawn(async move {
     let mut buf = vec![0u8; 1500];
     while sender.read(&mut buf).await.is_ok() {}
@@ -239,44 +246,21 @@ pub async fn setup_client() -> anyhow::Result<(
   let in_rate = in_cfg.sample_rate();
   let out_rate = out_cfg.sample_rate();
 
-  let mixer = Mixer::new(out_rate); // jitter buffer sized in device-rate samples
+  let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
 
   let cpal_stream_input = spawn_mic(cap_tx, in_cfg, in_dev)?; // capture only
   let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
-  spawn_audio_processor(cap_rx, rnd_rx, mic_track.clone(), in_rate, out_rate)?; // APM + Opus, owns the middle
-
-  client.on_track(Box::new(move |track, _, _| {
-    let mut out_rs = Resampler::new(TARGET_RATE, out_rate).expect("Failed to create resampler"); // one per peer; stateful, not shared
-    let mixer = mixer.clone();
-    Box::pin(async move {
-      println!("on track for client fired");
-      let src = track.ssrc();
-      let mut decoder =
-        audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
-          .expect("opus decoder");
-      let mut pcm = vec![0f32; 960]; // one 20ms frame at 48k
-      while let Ok((pkt, _)) = track.read_rtp().await {
-        if pkt.payload.is_empty() {
-          continue;
-        } // e.g. padding
-        match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
-          Ok(n) => {
-            let mut at_dev = Vec::new();
-            let _ = out_rs.push(&pcm[..n], &mut at_dev);
-            mixer.push(src, &at_dev);
-          }
-          Err(e) => eprintln!("opus decode error: {e}"),
-        }
-      }
-      mixer.remove(src); // track ended (peer left)
-    })
-  }));
-
-  client.on_peer_connection_state_change(Box::new(move |new_state| {
-    println!("{new_state:?}");
-
-    Box::pin(async {})
-  }));
+  spawn_audio_processor(
+    cap_rx,
+    rnd_rx,
+    mic_track.clone(),
+    in_rate,
+    out_rate,
+    voice_channel_id,
+    conn,
+    muted,
+    deafened,
+  )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
   let mut gather = client.gathering_complete_promise().await;
@@ -287,17 +271,27 @@ pub async fn setup_client() -> anyhow::Result<(
     .await
     .ok_or(anyhow::anyhow!("Client has no local description"))?;
 
-  // connection.send(ClientVoice::Offer(offer));
-
-  Ok((client, offer, cpal_stream_input, cpal_stream_output))
+  Ok((
+    client,
+    offer,
+    cpal_stream_input,
+    cpal_stream_output,
+    mixer,
+    out_rate,
+  ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_audio_processor(
   mut cap_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
   mut rnd_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
   track: Arc<TrackLocalStaticSample>,
   in_rate: SampleRate,
   out_rate: SampleRate,
+  voice_channel_id: Uuid,
+  mut conn: WebRTCConnection,
+  muted: Arc<std::sync::atomic::AtomicBool>,
+  deafened: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -335,6 +329,13 @@ fn spawn_audio_processor(
     // let mut gate_hang = 0u32;
     // const GATE_THRESHOLD: f32 = 0.01; // tune by ear
     // const GATE_HANGOVER: u32 = 30;
+
+    // state above the loop:
+    let mut speaking = false;
+    let mut hang = 0u32;
+    let mut last_sent = false;
+    const VAD_THRESHOLD: f32 = 0.01; // tune by ear, post-NS so it can be low
+    const VAD_HANGOVER: u32 = 25; // ~25 * 10ms = 250ms tail, avoids word-gap flicker
 
     loop {
       tokio::select! {
@@ -385,6 +386,23 @@ fn spawn_audio_processor(
                 }
             }
 
+
+            // mic is gated while muted or deafened (deafen implies mute): we stop
+            // publishing audio and report not-speaking regardless of input level.
+            let gated = muted.load(std::sync::atomic::Ordering::Relaxed)
+              || deafened.load(std::sync::atomic::Ordering::Relaxed);
+
+            // after process_capture_f32 produces `clean`:
+            let rms = (clean.iter().map(|s| s*s).sum::<f32>() / clean.len() as f32).sqrt();
+            if gated { speaking = false; hang = 0; }
+            else if rms > VAD_THRESHOLD { speaking = true; hang = VAD_HANGOVER; }
+            else if hang > 0 { hang -= 1; } else { speaking = false; }
+
+            if speaking != last_sent {
+                conn.send(ClientVoice::Speaking{speaking, voice_channel_id});   // delta only, on transition
+                last_sent = speaking;
+            }
+
             // let rms = (clean.iter().map(|s| s * s).sum::<f32>() / clean.len() as f32).sqrt();
 
             // if rms > GATE_THRESHOLD {
@@ -396,15 +414,19 @@ fn spawn_audio_processor(
             // }
 
             if pcm_20ms.len() >= 960 {
-              match encoder.encode_float(&pcm_20ms[..960], &mut out) {
-                Ok(n) => {
-                  let _ = track.write_sample(&Sample {
-                    data: bytes::Bytes::copy_from_slice(&out[..n]),
-                    duration: std::time::Duration::from_millis(20),
-                    ..Default::default()
-                  }).await;
+              // while gated we still drain the accumulator (so it can't grow
+              // unbounded) but publish nothing to the track.
+              if !gated {
+                match encoder.encode_float(&pcm_20ms[..960], &mut out) {
+                  Ok(n) => {
+                    let _ = track.write_sample(&Sample {
+                      data: bytes::Bytes::copy_from_slice(&out[..n]),
+                      duration: std::time::Duration::from_millis(20),
+                      ..Default::default()
+                    }).await;
+                  }
+                  Err(e) => eprintln!("opus encode error {e}"),
                 }
-                Err(e) => eprintln!("opus encode error {e}"),
               }
               pcm_20ms.clear();
             }

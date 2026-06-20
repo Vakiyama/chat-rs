@@ -1,6 +1,9 @@
 use std::{
   collections::{HashMap, VecDeque},
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+  },
 };
 
 #[derive(Default)]
@@ -15,16 +18,20 @@ pub struct Mixer {
   sources: Arc<Mutex<HashMap<u32, Source>>>,
   target: usize,
   max: usize,
+  // when set, output is silenced (queues still drain so we don't resume from a
+  // stale backlog on undeafen). Shared with the voice actor.
+  deafened: Arc<AtomicBool>,
 }
 
 // we have multiple incoming audio tracks from peers in a voice call,
 // we'd like to mix them all into a single output track and play that
 impl Mixer {
-  pub fn new(sample_rate: u32) -> Self {
+  pub fn new(sample_rate: u32, deafened: Arc<AtomicBool>) -> Self {
     Self {
       sources: Default::default(),
       target: sample_rate as usize * 40 / 1000, // 40ms prebuffer
       max: sample_rate as usize * 200 / 1000,   // 200ms
+      deafened,
     }
   }
 
@@ -49,9 +56,17 @@ impl Mixer {
 
   pub fn mix_mono(&self, out: &mut [f32]) {
     let mut sources = self.sources.lock().unwrap();
+    // silence playback while deafened, but keep advancing the queues below so a
+    // long-deafened call doesn't dump a buffered backlog the instant it's undone.
+    let gain = if self.deafened.load(Ordering::Relaxed) {
+      0.0
+    } else {
+      1.0
+    };
 
     for sample in out.iter_mut() {
-      *sample = sources
+      *sample = gain
+        * sources
         .values_mut()
         .map(|source| {
           if !source.primed {

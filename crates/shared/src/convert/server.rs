@@ -43,7 +43,6 @@ impl IntoProto<ChannelProto> for Channel {
 impl IntoProto<i32> for ChannelType {
   fn into_proto(self) -> i32 {
     match self {
-      ChannelType::Unspecified => ChannelTypeProto::MethodTypeUnspecified as i32,
       ChannelType::Text => ChannelTypeProto::Text as i32,
       ChannelType::Voice => ChannelTypeProto::Voice as i32,
     }

@@ -51,6 +51,7 @@
               pkgs.openssl
               pkgs.alsa-lib
               pkgs.libopus
+              pkgs.cmake
             ];
           };
 
@@ -132,6 +133,7 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.protobuf
+              pkgs.cmake
 
               # database
               pkgs.postgresql
@@ -269,6 +271,7 @@
                 nativeBuildInputs = [
                   pkgs.pkg-config
                   pkgs.protobuf
+                  pkgs.cmake
                 ];
                 depsBuildBuild = [ crossPkgs.stdenv.cc ];
                 buildInputs = [

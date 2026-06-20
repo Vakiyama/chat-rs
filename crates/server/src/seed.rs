@@ -97,13 +97,13 @@ pub async fn seed() {
       entities::voice_channel::Model {
         id: uuid::Uuid::new_v4(),
         server_id: server.id.into(),
-        name: "mess-hall".into(),
+        name: "Augmentation Chambers".into(),
       }
       .into_active_model(),
       entities::voice_channel::Model {
         id: uuid::Uuid::new_v4(),
         server_id: server.id.into(),
-        name: "forge".into(),
+        name: "Academy Network".into(),
       }
       .into_active_model(),
     ])

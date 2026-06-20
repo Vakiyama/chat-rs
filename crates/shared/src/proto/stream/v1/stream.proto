@@ -10,22 +10,69 @@ service StreamService {
 
 // Voice Streams:
 
-message SessionDescription {
-  string RTCSessionDescription = 1;
+message SessionDescriptionWithId {
+  string description = 1;
+  string voice_channel_id = 2;
 }
 
 message ServerVoiceMessage {
   oneof payload {
-    SessionDescription offer = 1;
-    SessionDescription answer = 2;
+    SessionDescriptionWithId offer = 1;
+    SessionDescriptionWithId answer = 2;
+    PresenceSnapshot snapshot    = 3;
   }
 }
 
+message LeaveRoom {
+  string voice_channel_id = 1;
+}
+
+
 message ClientVoiceMessage {
   oneof payload {
-    SessionDescription offer = 1;
-    SessionDescription answer = 2; 
+    SessionDescriptionWithId offer = 1;
+    SessionDescriptionWithId answer = 2;
+    LeaveRoom leave_room = 3;
+    Speaking speaking = 4;
+    SubscribeServer subscribe_server = 5;
+    SetMuted set_muted = 6;
+    SetDeafened set_deafened = 7;
   }
+}
+
+message Speaking {
+  bool speaking = 1;
+  string voice_channel_id = 2;
+}
+
+message SetMuted {
+  bool muted = 1;
+  string voice_channel_id = 2;
+}
+
+message SetDeafened {
+  bool deafened = 1;
+  string voice_channel_id = 2;
+}
+
+// Watch all voice-call presence for a single server. The server replies with a
+// PresenceSnapshot per active room in that server, and keeps pushing membership
+// snapshots as calls in that server change.
+message SubscribeServer {
+  string server_id = 1;
+}
+
+message PresenceSnapshot {
+  repeated DisplayVoiceUser peers = 1;
+  string voice_channel_id = 2;
+  string server_id = 3;
+}
+
+message DisplayVoiceUser {
+  DisplayUser user = 1;
+  bool muted = 2;
+  bool deafened = 3;
+  bool speaking = 4;
 }
 
 // Text streams:
@@ -52,16 +99,27 @@ message LeftRoom {
 
 message ServerTextMessage {
   oneof payload {
-    JoinedRoom  joined_room = 1;
-    LeftRoom    left_room   = 2;
-    Post        chat        = 3;
+    JoinedRoom       joined_room = 1;
+    LeftRoom         left_room   = 2;
+    Post             chat        = 3;
+    Pong             pong        = 4;
   }
 }
 
 message ClientTextMessage {
   oneof payload {
     CreatePostRequest post = 1;
+    Ping        ping        = 2;
   }
+}
+
+message Ping {
+  uint64 timestamp = 1;
+}
+
+message Pong {
+  uint64 timestamp = 1;
+  uint64 server_received_at = 2;
 }
 
 message CreatePostRequest {

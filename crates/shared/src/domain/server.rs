@@ -9,7 +9,6 @@ pub struct Channel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChannelType {
-  Unspecified,
   Text,
   Voice,
 }

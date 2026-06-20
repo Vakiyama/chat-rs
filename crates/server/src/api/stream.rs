@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{Arc, Mutex, OnceLock},
+  sync::{Arc, Mutex},
 };
 
 use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
@@ -17,9 +17,10 @@ use chat_shared::{
   },
   domain::{
     post::Post,
-    stream::{ClientText, ClientVoice, ServerText},
+    stream::{ClientText, ClientVoice, ServerText, User},
   },
 };
+use std::time::SystemTime;
 use tokio::sync::mpsc::{self};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
@@ -42,10 +43,15 @@ use crate::{
   entities,
   library::{
     database,
-    webrtc::{Room, handle_answer, handle_leave, handle_offer},
+    webrtc::{
+      Room, broadcast_presence, broadcast_server_presence, handle_answer, handle_leave,
+      handle_offer, membership_snapshot, register_presence_subscriber,
+      unregister_presence_subscriber,
+    },
   },
 };
 
+// todo: add text_channel_id rooms to manager
 #[derive(Default)]
 struct Manager {
   sockets: HashMap<Uuid, mpsc::Sender<Result<ServerTextMessage, tonic::Status>>>,
@@ -77,26 +83,22 @@ impl Manager {
   //   sender.send(Ok(message)).await
   // }
 
-  fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
-    self
-      .sockets
-      .iter()
-      .filter_map(|(id, sender)| {
-        if id != from {
-          Some(sender.clone())
-        } else {
-          None
-        }
-      })
-      .collect()
-  }
+  // fn targets(&self, from: &Uuid) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
+  //   self
+  //     .sockets
+  //     .iter()
+  //     .filter_map(|(id, sender)| {
+  //       if id != from {
+  //         Some(sender.clone())
+  //       } else {
+  //         None
+  //       }
+  //     })
+  //     .collect()
+  // }
 
   fn targets_with_self(&self) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
-    self
-      .sockets
-      .iter()
-      .map(|(_, sender)| sender.clone())
-      .collect()
+    self.sockets.values().cloned().collect()
   }
   /// broadcasts to all passed in targets
   async fn emit(
@@ -111,7 +113,38 @@ impl Manager {
 
 // temporary room singleton
 
-static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
+// static GLOBAL_ROOM: OnceLock<Arc<Room>> = OnceLock::new();
+
+#[derive(Default)]
+struct VoiceRoomManager {
+  rooms: HashMap<Uuid, Arc<Room>>,
+}
+
+static ROOM_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<VoiceRoomManager>> =
+  std::sync::LazyLock::new(|| tokio::sync::Mutex::new(VoiceRoomManager::default()));
+
+// Fetch the room for a voice channel, creating it (with its server_id resolved from
+// the DB) on first use. The lock is held across the DB lookup so two concurrent
+// joiners can't each create a separate Room for the same channel.
+async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
+  let mut room_manager = ROOM_MANAGER.lock().await;
+  if let Some(room) = room_manager.rooms.get(&voice_channel_id) {
+    return room.clone();
+  }
+
+  let db = database::get().await;
+  let server_id = entities::voice_channel::Entity::find_by_id(voice_channel_id)
+    .one(db)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|vc| vc.server_id)
+    .unwrap_or_default();
+
+  let room: Arc<Room> = Room::new(voice_channel_id, server_id).into();
+  room_manager.rooms.insert(voice_channel_id, room.clone());
+  room
+}
 
 static WEBRTC_API: OnceCell<API> = OnceCell::const_new();
 
@@ -130,17 +163,19 @@ impl StreamService for StreamServer {
       return Err(tonic::Status::unauthenticated("Unauthenitcated"));
     };
 
-    // eventually setup rooms, for now, one global room
-    let room = GLOBAL_ROOM.get_or_init(|| {
-      Room {
-        peers: HashMap::new().into(),
-      }
-      .into()
-    });
+    let db = database::get().await;
+    let user = entities::user::Entity::find_by_id(request_user_id)
+      .one(db)
+      .await
+      .unwrap()
+      .unwrap();
 
     let mut inner_stream = request.into_inner();
 
     let (tx, rx) = mpsc::channel::<Result<ServerVoiceMessage, tonic::Status>>(128);
+
+    // identifies this voice-stream connection in the server-wide presence registry
+    let voice_conn_id = Uuid::new_v4();
 
     tokio::spawn(async move {
       while let Some(msg) = inner_stream.next().await {
@@ -186,12 +221,49 @@ impl StreamService for StreamServer {
           .await;
 
         match msg {
-          Ok(ClientVoice::Offer(desc)) => {
+          Ok(ClientVoice::Speaking {
+            speaking,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            {
+              let mut peers = room.peers.write().await;
+
+              let Some(peer) = peers.get_mut(&request_user_id) else {
+                continue;
+              };
+
+              peer
+                .speaking
+                .store(speaking, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+          }
+          Ok(ClientVoice::Offer {
+            description: offer,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
             if !room.peers.read().await.contains_key(&request_user_id) {
-              match handle_offer(desc, room.clone(), request_user_id, tx.clone(), api).await {
+              match handle_offer(
+                offer,
+                room.clone(),
+                request_user_id,
+                tx.clone(),
+                api,
+                voice_channel_id,
+                User {
+                  id: request_user_id,
+                  name: user.username.clone(),
+                },
+              )
+              .await
+              {
                 Ok(()) => {
                   println!("Success handling session description offer from client");
-                  // let _ = tx.send(Ok(ServerVoice::Answer(answer).into_proto())).await;
                 }
                 // todo; tear down clients if err
                 Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
@@ -200,9 +272,86 @@ impl StreamService for StreamServer {
               eprintln!("User offer rejected; already in room.");
             }
           }
-          Ok(ClientVoice::Answer(answer)) => {
+          Ok(ClientVoice::Answer {
+            description: answer,
+            voice_channel_id,
+          }) => {
             println!("received answer from peer {request_user_id}");
-            let _ = handle_answer(room.clone(), request_user_id, answer).await;
+
+            let room = get_or_create_room(voice_channel_id).await;
+
+            let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
+          }
+          Ok(ClientVoice::LeaveRoom { voice_channel_id }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
+              .await
+              .map_err(|err| println!("Error handling leave: {err}"));
+          }
+          Ok(ClientVoice::SetMuted {
+            muted,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            {
+              let peers = room.peers.read().await;
+              let Some(peer) = peers.get(&request_user_id) else {
+                continue;
+              };
+              peer
+                .muted
+                .store(muted, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+            broadcast_server_presence(room.clone()).await;
+          }
+          Ok(ClientVoice::SetDeafened {
+            deafened,
+            voice_channel_id,
+          }) => {
+            let room = get_or_create_room(voice_channel_id).await;
+
+            {
+              let peers = room.peers.read().await;
+              let Some(peer) = peers.get(&request_user_id) else {
+                continue;
+              };
+              peer
+                .deafened
+                .store(deafened, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            broadcast_presence(room.clone()).await;
+            broadcast_server_presence(room.clone()).await;
+          }
+          Ok(ClientVoice::SubscribeServer { server_id }) => {
+            // register this connection's interest in the server, then dump a
+            // snapshot of every active call in it so the client loads current
+            // presence immediately.
+            register_presence_subscriber(voice_conn_id, request_user_id, server_id, tx.clone());
+
+            let rooms: Vec<Arc<Room>> = {
+              let room_manager = ROOM_MANAGER.lock().await;
+              room_manager.rooms.values().cloned().collect()
+            };
+
+            for room in rooms {
+              if room.server_id != server_id {
+                continue;
+              }
+              {
+                let peers = room.peers.read().await;
+                // skip empty rooms, and rooms we're in (we get the richer in-call
+                // snapshot there, which the membership snapshot would clobber).
+                if peers.is_empty() || peers.contains_key(&request_user_id) {
+                  continue;
+                }
+              }
+              let _ = tx.send(Ok(membership_snapshot(&room).await)).await;
+            }
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
@@ -211,10 +360,23 @@ impl StreamService for StreamServer {
         }
       }
 
-      // grpc msg loop ended, remove peer from room, close pc
-      let _ = handle_leave(room.clone(), request_user_id)
-        .await
-        .map_err(|err| println!("Error handling leave: {err}"));
+      // grpc msg loop ended, remove peer from any rooms, close pc
+
+      unregister_presence_subscriber(&voice_conn_id);
+
+      let rooms: Vec<(Uuid, Arc<Room>)> = {
+        let room_manager = ROOM_MANAGER.lock().await;
+        room_manager
+          .rooms
+          .iter()
+          .map(|(id, room)| (*id, room.clone()))
+          .collect()
+      };
+      for (id, room) in rooms {
+        let _ = handle_leave(room.clone(), request_user_id, id)
+          .await
+          .map_err(|err| println!("Error handling leave: {err}"));
+      }
     });
 
     let output_stream = ReceiverStream::new(rx);
@@ -243,7 +405,9 @@ impl StreamService for StreamServer {
 
     let socket_id = Uuid::new_v4();
     let manager = self.manager.clone();
+    let pong_tx = tx.clone();
     manager.lock().unwrap().add(socket_id, tx);
+    let manager = manager.clone();
 
     tokio::spawn(async move {
       while let Some(msg) = inner_stream.next().await {
@@ -255,49 +419,61 @@ impl StreamService for StreamServer {
             content,
             text_channel_id,
           }) => {
-            // handler: atm, we only deal with chat message relaying and ignore others
             let targets = manager.lock().unwrap().targets_with_self();
 
-            if let Some(user_id) = request_user_id {
-              let server_msg = ServerText::Post(Post {
-                id,
-                author_name: user.username.clone(),
-                content: content.clone(),
-                created_at: chrono::Utc::now(),
-              });
+            let server_msg = ServerText::Post(Post {
+              id,
+              author_name: user.username.clone(),
+              content: content.clone(),
+              created_at: chrono::Utc::now(),
+            });
 
-              let channel = entities::channel::Entity::find()
-                .filter(
-                  entities::channel::COLUMN
-                    .text_channel_id
-                    .eq(text_channel_id),
-                )
-                .one(db)
-                .await
-                .unwrap();
-
-              let channel_id = channel.unwrap().id;
-
-              entities::post::Entity::insert(
-                entities::post::Model {
-                  id: uuid::Uuid::new_v4(),
-                  content,
-                  channel_id: Some(channel_id),
-                  author_id: Some(user.id),
-                  created_at: chrono::Utc::now(),
-                }
-                .into_active_model(),
+            let channel = entities::channel::Entity::find()
+              .filter(
+                entities::channel::COLUMN
+                  .text_channel_id
+                  .eq(text_channel_id),
               )
-              .exec(db)
+              .one(db)
               .await
-              .map_err(|err| {
-                eprintln!("error inserting post: {err}");
-                tonic::Status::internal("Error occurred inserting post.")
-              })
               .unwrap();
 
-              Manager::emit(targets, server_msg.into_proto()).await;
-            };
+            let channel_id = channel.unwrap().id;
+
+            entities::post::Entity::insert(
+              entities::post::Model {
+                id: uuid::Uuid::new_v4(),
+                content,
+                channel_id: Some(channel_id),
+                author_id: Some(user.id),
+                created_at: chrono::Utc::now(),
+              }
+              .into_active_model(),
+            )
+            .exec(db)
+            .await
+            .map_err(|err| {
+              eprintln!("error inserting post: {err}");
+              tonic::Status::internal("Error occurred inserting post.")
+            })
+            .unwrap();
+
+            Manager::emit(targets, server_msg.into_proto()).await;
+          }
+          Ok(ClientText::Ping { timestamp }) => {
+            let server_received_at = SystemTime::now()
+              .duration_since(SystemTime::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_micros() as u64;
+            let _ = pong_tx
+              .send(Ok(
+                ServerText::Pong {
+                  timestamp,
+                  server_received_at,
+                }
+                .into_proto(),
+              ))
+              .await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
@@ -305,6 +481,8 @@ impl StreamService for StreamServer {
           }
         }
       }
+
+      manager.lock().unwrap().remove(&socket_id);
     });
 
     let output_stream = ReceiverStream::new(rx);
