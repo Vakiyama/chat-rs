@@ -643,7 +643,7 @@ fn view_channels<'a>(
               )
             })
         })
-        .spacing(1)
+        .spacing(SPACE_GRID as u32)
         .padding([
           if main_model
             .room_presence
