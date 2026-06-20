@@ -25,13 +25,19 @@ use webrtc::{
 pub type PeerId = Uuid;
 
 // per-peer signaling state: an offer is in flight, and/or another reneg is queued.
-// both fields live under one mutex so "queue a follow-up reneg" and "finish + drain
+// all fields live under one mutex so "queue a follow-up reneg" and "finish + drain
 // the queue" are atomic against each other — two independent atomics race into a lost
 // wakeup where a reneg is queued but its drain check has already passed.
+//
+// `gen` increments every time a fresh offer goes in flight. The renegotiation timeout
+// task captures the gen of the offer it guards and only acts if that exact negotiation
+// is still in flight — otherwise a timeout from an already-answered round would fire
+// 3s later and clobber a newer, unrelated round (offer glare).
 #[derive(Default)]
 struct NegState {
   in_flight: bool,
   pending: bool,
+  generation: u64,
 }
 
 pub struct Participant {
@@ -84,6 +90,7 @@ pub async fn handle_offer(
     neg: Mutex::new(NegState {
       in_flight: true,
       pending: false,
+      generation: 0,
     }),
   });
 
@@ -241,70 +248,86 @@ pub async fn handle_offer(
 }
 
 // claim the right to send an offer. if one is already in flight, queue exactly one
-// follow-up and return false — the next offer reflects all accumulated track changes,
-// so any number of queued requests collapse into a single round.
-fn try_begin_negotiation(peer: &Participant) -> bool {
+// follow-up and return None — the next offer reflects all accumulated track changes,
+// so any number of queued requests collapse into a single round. On a successful
+// claim, returns Some(gen) identifying this negotiation so its timeout can tell
+// whether it is still the round in flight.
+fn try_begin_negotiation(peer: &Participant) -> Option<u64> {
   let mut s = peer.neg.lock().unwrap();
   if s.in_flight {
     s.pending = true;
-    return false;
+    return None;
   }
   s.in_flight = true;
-  true
+  s.generation = s.generation.wrapping_add(1);
+  Some(s.generation)
 }
 
-// an offer/answer round finished: drop the in-flight claim and report whether a
+// an offer/answer round finished: release the in-flight claim and report whether a
 // follow-up reneg was queued while it was in flight.
 //
-// If in_flight is already false (e.g., the timeout fired and reset it), we still
-// check for pending work and drain it — the timeout may have already sent a retry
-// offer, but if the client just answered the old one, we need to process any
-// work that accumulated while we were waiting.
+// This only releases — it must NOT re-claim. The caller drains queued work by calling
+// renegotiate() (which re-claims cleanly and spawns its own timeout). If this re-claimed
+// itself, renegotiate() would then see in_flight already set, queue `pending`, and send
+// nothing — wedging the peer with a queued change that never goes out, which silently
+// kills audio in both directions after a join/leave burst.
 fn finish_negotiation(peer: &Participant) -> bool {
-  let resume;
-  {
-    let mut s = peer.neg.lock().unwrap();
-    if s.in_flight {
-      s.in_flight = false;
-    }
-    resume = std::mem::take(&mut s.pending);
-  }
-  if resume {
-    let _ = try_begin_negotiation(peer);
-  }
-  resume
+  let mut s = peer.neg.lock().unwrap();
+  s.in_flight = false;
+  std::mem::take(&mut s.pending)
 }
 
 async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::Result<()> {
-  if !try_begin_negotiation(&peer) {
+  let Some(generation) = try_begin_negotiation(&peer) else {
     return Ok(());
-  }
+  };
 
+  // Spawn a watchdog that resends the offer if the client never answers, otherwise a
+  // peer that drops a renegotiation offer would permanently block all subsequent track
+  // changes from reaching it. The watchdog owns the in-flight claim until the answer
+  // arrives (handle_answer clears in_flight) or we exhaust our retries. It only acts on
+  // the generation it started with, so once a newer negotiation supersedes this one the
+  // watchdog exits instead of clobbering it with a stale duplicate offer (glare).
   let timeout = tokio::time::Duration::from_secs(3);
-
-  // Spawn a timeout task that resets in_flight if the client doesn't answer.
-  // This prevents the "stuck in_flight" bug where a peer that ignores a
-  // renegotiation offer permanently blocks all subsequent track changes from
-  // being forwarded to it.
-  let timeout_peer = peer.clone();
-  let timeout_channel_id = voice_channel_id;
+  const MAX_RESENDS: u32 = 3;
+  let watchdog_peer = peer.clone();
+  let watchdog_channel_id = voice_channel_id;
   tokio::spawn(async move {
-    tokio::time::sleep(timeout).await;
-    let should_retry = {
-      let mut s = timeout_peer.neg.lock().unwrap();
-      if s.in_flight {
-        s.in_flight = false;
-        true
-      } else {
-        false
+    let mut generation = generation;
+    for _ in 0..MAX_RESENDS {
+      tokio::time::sleep(timeout).await;
+      {
+        let mut s = watchdog_peer.neg.lock().unwrap();
+        // answered (in_flight cleared) or superseded by a newer round → stop.
+        if !s.in_flight || s.generation != generation {
+          return;
+        }
+        // still unanswered: resend under a fresh generation so a late answer to the
+        // previous offer can't be mistaken for an answer to this resend.
+        s.generation = s.generation.wrapping_add(1);
+        s.pending = false;
+        generation = s.generation;
       }
-    };
-    if should_retry {
-      let _ = send_offer(&timeout_peer, timeout_channel_id).await;
+      if let Err(e) = send_offer(&watchdog_peer, watchdog_channel_id).await {
+        eprintln!("renegotiate resend failed: {e:?}");
+        finish_negotiation(&watchdog_peer);
+        return;
+      }
+    }
+    // gave up: release the claim so a future track change can start a fresh round
+    // instead of the peer wedging with in_flight stuck true forever.
+    let mut s = watchdog_peer.neg.lock().unwrap();
+    if s.in_flight && s.generation == generation {
+      s.in_flight = false;
     }
   });
 
-  send_offer(&peer, voice_channel_id).await
+  if let Err(e) = send_offer(&peer, voice_channel_id).await {
+    // release the claim so a later trigger can retry instead of wedging forever.
+    finish_negotiation(&peer);
+    return Err(e);
+  }
+  Ok(())
 }
 
 async fn send_offer(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Result<()> {
@@ -417,7 +440,7 @@ mod tests {
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
   };
 
-  use crate::library::webrtc::{PeerId, Room, handle_answer, handle_offer};
+  use crate::library::webrtc::{PeerId, Room, handle_answer, handle_leave, handle_offer};
 
   type SignalRx = tokio::sync::mpsc::Receiver<Result<ServerVoiceMessage, tonic::Status>>;
 
@@ -785,6 +808,128 @@ mod tests {
     tokio::time::timeout(Duration::from_secs(10), c_heard_both).await??;
     tokio::time::timeout(Duration::from_secs(10), a_heard_both).await??;
     tokio::time::timeout(Duration::from_secs(10), b_heard_both).await??;
+    Ok(())
+  }
+
+  // Regression for the finish_negotiation double-claim wedge: a track change that
+  // arrives while a peer already has an offer in flight is queued as `pending`. When the
+  // in-flight offer is answered, the queued change MUST be drained into a fresh offer.
+  // The bug had finish_negotiation re-claim the in-flight slot itself, so the caller's
+  // renegotiate() saw in_flight==true, re-queued pending, and sent nothing — leaving the
+  // peer permanently unable to hear the queued publisher (audio dead in both directions
+  // after a join/leave burst). Here A holds C's offer while D's track queues behind it;
+  // A must still end up hearing both C and D.
+  #[tokio::test]
+  async fn queued_renegotiation_is_drained_after_answer() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+
+    // A and B join and settle into hearing each other.
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
+    let a_id = Uuid::new_v4();
+    let a_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&a_client).await?);
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
+    wait_for_relay(&room, a_id).await?;
+
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+    let b_id = Uuid::new_v4();
+    let b_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b_client).await?);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
+
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
+    let offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a, room_id).await?;
+    wait_for_relay(&room, b_id).await?;
+
+    // From here, A must hear two more distinct publishers: C and D.
+    let a_heard_cd = on_track_count(&a_client, 2);
+
+    // C joins and publishes; A's reneg offer for C arrives but we deliberately DO NOT
+    // answer it yet, so A's negotiation stays in flight.
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::channel(8);
+    let c_id = Uuid::new_v4();
+    let c_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&c_client).await?);
+    join(&c_client, &room, c_id, c_tx, &mut c_rx, &api, room_id).await?;
+    let held_offer_for_c = expect_offer(&mut a_rx).await?; // A.in_flight == true now
+
+    // D joins and publishes while A's offer is still in flight: D's track is queued as
+    // `pending` on A rather than sent immediately.
+    let (d_tx, mut d_rx) = tokio::sync::mpsc::channel(8);
+    let d_id = Uuid::new_v4();
+    let d_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&d_client).await?);
+    join(&d_client, &room, d_id, d_tx, &mut d_rx, &api, room_id).await?;
+    // ensure D's media has reached the server and queued its reneg against A
+    wait_for_relay(&room, d_id).await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Now answer C's offer. Draining the answer must flush D's queued track into a new
+    // offer — on the buggy code this offer was never produced and the next expect_offer
+    // would hang until timeout.
+    answer_reneg(&a_client, &room, a_id, held_offer_for_c, room_id).await?;
+    let offer_for_d = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_for_d, room_id).await?;
+
+    tokio::time::timeout(Duration::from_secs(10), a_heard_cd).await??;
+    Ok(())
+  }
+
+  // End-to-end leave + rejoin: A and B hear each other, B leaves, then B rejoins on a
+  // fresh peer connection. Both directions must be re-established — B hears A again and
+  // A hears the rejoined B again.
+  #[tokio::test]
+  async fn leave_then_rejoin_restores_both_directions() -> anyhow::Result<()> {
+    let room_id = uuid::Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+
+    // A joins, publishing.
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
+    let a_id = Uuid::new_v4();
+    let a_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&a_client).await?);
+    join(&a_client, &room, a_id, a_tx, &mut a_rx, &api, room_id).await?;
+    wait_for_relay(&room, a_id).await?;
+
+    // B joins, publishing; settle A <-> B.
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+    let b_id = Uuid::new_v4();
+    let b_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b_client).await?);
+    join(&b_client, &room, b_id, b_tx, &mut b_rx, &api, room_id).await?;
+    let offer_to_b = expect_offer(&mut b_rx).await?;
+    answer_reneg(&b_client, &room, b_id, offer_to_b, room_id).await?;
+    let offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, offer_to_a, room_id).await?;
+
+    // B leaves: A is renegotiated to drop B's track and must answer to stay healthy.
+    handle_leave(room.clone(), b_id, room_id).await?;
+    let drop_offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, drop_offer_to_a, room_id).await?;
+
+    // B rejoins on a brand-new peer connection (the client builds a fresh pc per join).
+    let a_hears_rejoin = on_track_latch(&a_client);
+    let (b2_tx, mut b2_rx) = tokio::sync::mpsc::channel(8);
+    let b2_client = make_client_pc().await?;
+    start_fake_mic(make_fake_mic(&b2_client).await?);
+    let b2_hears_a = on_track_latch(&b2_client);
+    join(&b2_client, &room, b_id, b2_tx, &mut b2_rx, &api, room_id).await?;
+
+    // B hears A again via the post-join reneg carrying A's relay.
+    let offer_to_b2 = expect_offer(&mut b2_rx).await?;
+    answer_reneg(&b2_client, &room, b_id, offer_to_b2, room_id).await?;
+
+    // B's media reaching the server renegotiates A so A hears the rejoined B.
+    let rejoin_offer_to_a = expect_offer(&mut a_rx).await?;
+    answer_reneg(&a_client, &room, a_id, rejoin_offer_to_a, room_id).await?;
+
+    tokio::time::timeout(Duration::from_secs(10), b2_hears_a).await??;
+    tokio::time::timeout(Duration::from_secs(10), a_hears_rejoin).await??;
     Ok(())
   }
 }

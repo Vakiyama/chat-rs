@@ -51,6 +51,7 @@
               pkgs.openssl
               pkgs.alsa-lib
               pkgs.libopus
+              pkgs.cmake
             ];
           };
 

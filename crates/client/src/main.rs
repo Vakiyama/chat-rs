@@ -192,8 +192,13 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       {
         match msg {
           chat::Message::JoinVoice { voice_channel_id } => {
-            if let Some(voice) = &model.voice {
-              voice.handle.join(voice_channel_id, 1);
+            if let Some(voice) = &mut model.voice {
+              // bump and drive the join on the model's current epoch so the new pc's
+              // state callbacks aren't filtered out by a stale epoch left behind by an
+              // earlier auto-reconnect.
+              voice.epoch += 1;
+              voice.link_state = model::LinkState::Connecting;
+              voice.handle.join(voice_channel_id, voice.epoch);
             }
             Task::none()
           }
@@ -342,14 +347,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           }
         }
         RTCPeerConnectionState::Failed => {
-          reconnect(call, voice_call_id, call.epoch);
+          reconnect(call, voice_call_id);
           Task::none()
         }
         RTCPeerConnectionState::Closed => {
           if matches!(call.link_state, LinkState::Reconnecting { .. }) {
             Task::none() // old PC dying during our own reconnect
           } else {
-            reconnect(call, voice_call_id, 1);
+            reconnect(call, voice_call_id);
             Task::none()
           }
         }
@@ -371,7 +376,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
 
       if matches!(call.link_state, LinkState::Unstable) {
-        reconnect(call, voice_call_id, 1);
+        reconnect(call, voice_call_id);
       };
 
       Task::none()
@@ -392,9 +397,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
   }
 }
 
-fn reconnect(call: &mut VoiceCall, id: Uuid, epoch: u32) {
-  let LinkState::Reconnecting { attempt } = call.link_state else {
-    return;
+fn reconnect(call: &mut VoiceCall, id: Uuid) {
+  // Only recover a call that is actually live or already mid-recovery. Idle (the user
+  // deliberately left) and Lost (we already gave up) must never silently rejoin — note
+  // our own pc.close() during a manual leave emits Closed, which routes here.
+  let attempt = match call.link_state {
+    LinkState::Reconnecting { attempt } => attempt + 1,
+    LinkState::Live | LinkState::Connecting | LinkState::Unstable => 1,
+    LinkState::Idle | LinkState::Lost { .. } => return,
   };
 
   const MAX: u32 = 4;
@@ -404,10 +414,14 @@ fn reconnect(call: &mut VoiceCall, id: Uuid, epoch: u32) {
     };
     return;
   }
+  // Bump the epoch BEFORE rejoining and drive the new connection on that same epoch, so
+  // late callbacks from the dying pc are filtered out while the fresh pc's callbacks
+  // (which carry call.epoch) are accepted. Passing a stale epoch here would make the
+  // model ignore every state change from the reconnected call.
   call.epoch += 1;
   call.link_state = LinkState::Reconnecting { attempt };
   call.handle.leave();
-  call.handle.join(id, epoch);
+  call.handle.join(id, call.epoch);
 }
 
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
