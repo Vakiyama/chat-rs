@@ -98,22 +98,3 @@ impl AudioCues {
     self.track.set_volume(db, Tween::default());
   }
 }
-
-// --- Iced wiring sketch ------------------------------------------------------
-//
-// struct ChatApp { cues: AudioCues, /* ... */ }
-//
-// In your update():
-//   match message {
-//       Message::JoinedCall      => self.cues.play(Cue::Join),
-//       Message::LeftCall        => self.cues.play(Cue::Leave),
-//       Message::ToggledMute(on) => self.cues.play(if on { Cue::Mute } else { Cue::Unmute }),
-//       Message::ToggledDeafen(on)=> self.cues.play(if on { Cue::Deafen } else { Cue::Undeafen }),
-//       Message::PeerJoined(_)   => self.cues.play(Cue::PeerJoin),
-//       Message::PeerLeft(_)     => self.cues.play(Cue::PeerLeave),
-//       Message::CueVolume(v)    => self.cues.set_volume(v),
-//       // ...
-//   }
-//
-// Build cues once (e.g. in your app's `new`); if `AudioCues::new()` fails
-// (no audio device), keep it as Option and skip cues rather than refusing to start.
