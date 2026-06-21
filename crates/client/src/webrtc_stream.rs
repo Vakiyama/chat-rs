@@ -242,7 +242,6 @@ pub async fn setup_client(
     out_dev.default_output_config()?,
     out_dev.supported_output_configs()?,
   )?;
-  println!("in cfg: {in_cfg:?}  out cfg: {out_cfg:?}");
   let in_rate = in_cfg.sample_rate();
   let out_rate = out_cfg.sample_rate();
 

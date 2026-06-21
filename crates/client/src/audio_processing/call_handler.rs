@@ -1,8 +1,6 @@
-use crate::Message;
 use crate::model::MediaHealth;
 use crate::webrtc_stream::{WebRTCConnection, setup_client};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
-use iced::Task;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -347,11 +345,7 @@ async fn apply_signal(
         voice_channel_id,
       });
     }
-    ServerVoice::PresenceSnapshot {
-      voice_channel_id,
-      peers,
-      ..
-    } => (),
+    ServerVoice::PresenceSnapshot { .. } => (),
   }
   Ok(())
 }

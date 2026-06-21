@@ -51,3 +51,35 @@ impl AccentsExt for Theme {
     }
   }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Neutrals {
+  pub crust: Color,
+  pub mantle: Color,
+  pub base: Color,
+  pub surface0: Color,
+  pub surface1: Color,
+  pub surface2: Color,
+}
+
+pub const FRAPPE_NEUTRALS: Neutrals = Neutrals {
+  crust: Color::from_rgb8(0x23, 0x26, 0x34),
+  mantle: Color::from_rgb8(0x29, 0x2c, 0x3c),
+  base: Color::from_rgb8(0x30, 0x34, 0x46),
+  surface0: Color::from_rgb8(0x41, 0x45, 0x59),
+  surface1: Color::from_rgb8(0x51, 0x57, 0x6d),
+  surface2: Color::from_rgb8(0x62, 0x68, 0x80),
+};
+
+pub trait NeutralsExt {
+  fn neutrals(&self) -> Neutrals;
+}
+
+impl NeutralsExt for Theme {
+  fn neutrals(&self) -> Neutrals {
+    match self {
+      Theme::CatppuccinFrappe => FRAPPE_NEUTRALS,
+      _ => FRAPPE_NEUTRALS,
+    }
+  }
+}
