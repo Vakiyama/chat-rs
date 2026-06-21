@@ -1,9 +1,11 @@
 use crate::model::MediaHealth;
-use crate::webrtc_stream::{WebRTCConnection, setup_client};
+use crate::webrtc_stream::{
+  CallSetup, CaptureEvent, WebRTCConnection, build_mic, build_speaker, setup_client,
+};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -18,6 +20,9 @@ pub enum VoiceCommand {
   SubscribeServer { server_id: Uuid },
   SetMuted(bool),
   SetDeafened(bool),
+  SetNoiseGate(f32),
+  SetInputDevice(Option<String>),
+  SetOutputDevice(Option<String>),
 }
 
 pub struct VoiceHandle {
@@ -49,16 +54,30 @@ impl VoiceHandle {
   pub fn set_deafened(&self, deafened: bool) {
     let _ = self.sender.send(VoiceCommand::SetDeafened(deafened));
   }
+  pub fn set_noise_gate(&self, threshold: f32) {
+    let _ = self.sender.send(VoiceCommand::SetNoiseGate(threshold));
+  }
+  pub fn set_input_device(&self, name: Option<String>) {
+    let _ = self.sender.send(VoiceCommand::SetInputDevice(name));
+  }
+  pub fn set_output_device(&self, name: Option<String>) {
+    let _ = self.sender.send(VoiceCommand::SetOutputDevice(name));
+  }
 }
 
 struct ActiveCall {
   pc: Arc<RTCPeerConnection>,
-  _mic: cpal::Stream,
-  _out: cpal::Stream,
+  // held so the device keeps running; reassigned (old dropped) on a live swap.
+  mic: cpal::Stream,
+  speaker: cpal::Stream,
   stats_task: tokio::task::JoinHandle<()>,
   mixer: crate::audio_processing::mixer::Mixer,
+  in_rate: u32,
   out_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
+  // kept so a live device swap can feed the running audio path without a rejoin.
+  cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
+  rnd_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
 }
 
 fn inbound_audio(r: &StatsReport) -> (u32, u64) {
@@ -134,8 +153,17 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
   let muted = Arc::new(AtomicBool::new(false));
   let deafened = Arc::new(AtomicBool::new(false));
 
+  // Persisted voice settings. The gate threshold is shared (read live by the
+  // audio processor); device choices are owned by the actor and read at join
+  // time, updated live by Set*Device. Loading here means saved settings take
+  // effect the moment voice connects, before the settings screen is ever opened.
+  let settings = crate::voice_settings::VoiceSettings::load();
+  let gate_threshold = Arc::new(AtomicU32::new(settings.gate_threshold.to_bits()));
+
   tokio::spawn(async move {
     let mut call: Option<ActiveCall> = None; // None = not in a call
+    let mut input_name: Option<String> = settings.input_device;
+    let mut output_name: Option<String> = settings.output_device;
     while let Some(cmd) = rx.recv().await {
       match cmd {
         VoiceCommand::Join {
@@ -161,10 +189,23 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             conn.clone(),
             muted.clone(),
             deafened.clone(),
+            gate_threshold.clone(),
+            input_name.clone(),
+            output_name.clone(),
           )
           .await
           {
-            Ok((pc, offer, mic, out, mixer, out_rate)) => {
+            Ok(CallSetup {
+              pc,
+              offer,
+              mic,
+              speaker,
+              mixer,
+              in_rate,
+              out_rate,
+              cap_tx,
+              rnd_tx,
+            }) => {
               let pc = Arc::new(pc);
               let started = Arc::new(Mutex::new(HashSet::new()));
               let started_for_track = started.clone();
@@ -208,12 +249,15 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               let stats_task = spawn_stats_poller(pc.clone(), epoch, outbound_tx.clone());
               call = Some(ActiveCall {
                 pc,
-                _mic: mic,
-                _out: out,
+                mic,
+                speaker,
                 stats_task,
                 mixer,
+                in_rate,
                 out_rate,
                 started: started.clone(),
+                cap_tx,
+                rnd_tx,
               });
               *cloned_room_id.lock().await = Some(voice_channel_id);
 
@@ -273,6 +317,56 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               deafened: value,
               voice_channel_id,
             });
+          }
+        }
+        VoiceCommand::SetNoiseGate(threshold) => {
+          // the audio processor reads this atomic live, so this takes effect
+          // mid-call without touching the pipeline.
+          gate_threshold.store(threshold.to_bits(), Ordering::Relaxed);
+        }
+        VoiceCommand::SetInputDevice(name) => {
+          // remember for the next join, and hot-swap the mic if a call is live.
+          input_name = name;
+          if let Some(active) = call.as_mut() {
+            match build_mic(active.cap_tx.clone(), input_name.as_deref()) {
+              Ok((stream, rate)) => {
+                // tell the processor to rebuild its resampler if the new device
+                // runs at a different rate, then drop the old mic stream.
+                if rate != active.in_rate {
+                  let _ = active.cap_tx.send(CaptureEvent::Rate(rate));
+                  active.in_rate = rate;
+                }
+                active.mic = stream;
+              }
+              Err(e) => eprintln!("input device switch failed: {e:?}"),
+            }
+          }
+        }
+        VoiceCommand::SetOutputDevice(name) => {
+          // remember for the next join, and hot-swap the speaker if a call is live.
+          output_name = name;
+          // A seamless swap is only possible when the new device shares the
+          // call's fixed output rate (mixer + per-peer resamplers are sized to
+          // it). On a rate mismatch, fall back to a full rebuild via main's
+          // epoch-aware rejoin path (brief audio blip).
+          let mut rejoin_for: Option<Uuid> = None;
+          if let Some(active) = call.as_mut() {
+            match build_speaker(active.mixer.clone(), active.rnd_tx.clone(), output_name.as_deref()) {
+              Ok((stream, rate)) if rate == active.out_rate => {
+                active.speaker = stream; // drop old speaker
+              }
+              Ok((stream, _rate)) => {
+                drop(stream);
+                rejoin_for = *cloned_room_id.lock().await;
+              }
+              Err(e) => eprintln!("output device switch failed: {e:?}"),
+            }
+          }
+          if let Some(voice_channel_id) = rejoin_for {
+            eprintln!("output device rate differs from call; rebuilding audio path");
+            let _ = outbound_tx
+              .send(crate::Message::VoiceRejoinForSettings { voice_channel_id })
+              .await;
           }
         }
         VoiceCommand::Leave => {

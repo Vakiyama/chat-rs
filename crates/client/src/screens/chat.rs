@@ -1104,7 +1104,7 @@ fn describe_voice(
     Unstable => ("Voice Connected - Unstable".into(), Tone::Warn, None),
     Live => match media {
       MediaHealth::TransportDegraded => ("Voice Connected - Unstable".into(), Tone::Warn, None),
-      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, Some("no audio")),
+      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, None),
       MediaHealth::Flowing | MediaHealth::Unknown => ("Voice Connected".into(), Tone::Good, None),
     },
   }
