@@ -222,10 +222,18 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::Settings(msg) => match msg {
       // back to chat (close button / Esc). The chat model was dropped on the way
       // in, so rebuild it and re-init like a fresh login does.
-      settings::Message::Close => {
-        model.screen = Screen::Chat(Default::default());
-        iced::Task::done(Message::Chat(chat::Message::Init))
-      }
+      settings::Message::Close => match model.stashed_chat.take() {
+        // restore the chat model we stashed on the way in — instant, no reload.
+        Some(chat_model) => {
+          model.screen = Screen::Chat(chat_model);
+          iced::Task::none()
+        }
+        // no stash (e.g. we opened straight into settings): build + init fresh.
+        None => {
+          model.screen = Screen::Chat(Default::default());
+          iced::Task::done(Message::Chat(chat::Message::Init))
+        }
+      },
       settings::Message::LogOut => {
         // tear down voice + streams (subscriptions gate on LoggedIn, so they
         // stop once user flips to NotLoggedIn) and return to the auth screen.
@@ -234,6 +242,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         model.chat_stream = Stream::Disconnected;
         model.active_server_id = None;
         model.room_presence.clear();
+        model.stashed_chat = None;
         model.user = Auth::NotLoggedIn;
         model.screen = Screen::Auth(auth::Model::new());
         Task::future(async {
@@ -266,9 +275,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
     },
     Message::Chat(msg) => {
-      if let Auth::LoggedIn(user) = &model.user
-        && let Screen::Chat(chat_model) = &mut model.screen
-      {
+      if let Auth::LoggedIn(user) = &model.user {
         match msg {
           chat::Message::JoinVoice { voice_channel_id } => {
             if let Some(voice) = &mut model.voice {
@@ -331,11 +338,26 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::GoToSettings => {
-            model.screen = Screen::Settings(Default::default());
+            // stash the live chat model so returning from settings is instant.
+            // (chat_model isn't borrowed in this arm, so replacing screen is fine.)
+            let prev = std::mem::replace(&mut model.screen, Screen::Settings(Default::default()));
+            if let Screen::Chat(chat_model) = prev {
+              model.stashed_chat = Some(chat_model);
+            }
             Task::none()
           }
           other => {
-            chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+            // apply to whichever chat model is live: the on-screen one, or the
+            // stashed one while we're in settings (so it stays current).
+            let chat_model = match &mut model.screen {
+              Screen::Chat(chat_model) => Some(chat_model),
+              _ => model.stashed_chat.as_mut(),
+            };
+            if let Some(chat_model) = chat_model {
+              chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+            } else {
+              iced::Task::none()
+            }
           }
         }
       } else {

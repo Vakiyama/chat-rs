@@ -790,6 +790,34 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
                                                // login screen
   };
 
+  // mute/deafen persist across calls, so they live in the always-present user
+  // controller (Discord-style) rather than only inside the active-call panel.
+  let (muted, deafened) = model
+    .voice
+    .as_ref()
+    .map(|voice| (voice.muted, voice.deafened))
+    .unwrap_or((false, false));
+
+  let mute_button = voice_toggle_button(
+    if muted {
+      GoogleMaterialSymbols::MicOff
+    } else {
+      GoogleMaterialSymbols::Mic
+    },
+    muted,
+    Message::ToggleMute,
+  );
+
+  let deafen_button = voice_toggle_button(
+    if deafened {
+      GoogleMaterialSymbols::HeadsetOff
+    } else {
+      GoogleMaterialSymbols::HeadsetMic
+    },
+    deafened,
+    Message::ToggleDeafen,
+  );
+
   container(
     row![
       container(
@@ -835,6 +863,8 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
       ]
       .spacing(0),
       space::horizontal(),
+      mute_button,
+      deafen_button,
       button(icon(GoogleMaterialSymbols::Settings).size(20))
         .on_press(Message::GoToSettings)
         .style(move |theme: &Theme, status| {
@@ -1185,26 +1215,8 @@ fn view_call_controller<'a>(
   .spacing(2)
   .width(Length::Fill);
 
-  let mute_button = voice_toggle_button(
-    if voice.muted {
-      GoogleMaterialSymbols::MicOff
-    } else {
-      GoogleMaterialSymbols::Mic
-    },
-    voice.muted,
-    Message::ToggleMute,
-  );
-
-  let deafen_button = voice_toggle_button(
-    if voice.deafened {
-      GoogleMaterialSymbols::HeadsetOff
-    } else {
-      GoogleMaterialSymbols::HeadsetMic
-    },
-    voice.deafened,
-    Message::ToggleDeafen,
-  );
-
+  // mute/deafen now live in the user controller; the call panel keeps the
+  // status readout and the leave button.
   let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(20))
     .on_press(Message::LeaveVoice)
     .style(|theme: &Theme, status| {
@@ -1232,7 +1244,7 @@ fn view_call_controller<'a>(
       }
     });
 
-  let panel = container(row![status, mute_button, deafen_button, leave_button].align_y(Center))
+  let panel = container(row![status, leave_button].align_y(Center))
     .width(Length::Fill)
     .padding(SPACE_GRID)
     .style(|theme: &Theme| {
