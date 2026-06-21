@@ -21,6 +21,7 @@ pub mod config;
 pub mod webrtc_stream;
 
 use crate::audio_processing::call_handler::spawn_voice;
+use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat};
@@ -212,6 +213,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
               voice.handle.leave();
               voice.voice_call_id = None;
               voice.link_state = model::LinkState::Idle;
+              if let Some(ref mut cues) = model.audio_cues {
+                cues.play(Cue::Leave);
+              };
             }
             Task::none()
           }
@@ -229,6 +233,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
               // an explicit mute toggle never changes deafen state.
               voice.muted = !voice.muted;
               voice.handle.set_muted(voice.muted);
+              if let Some(ref mut cues) = model.audio_cues {
+                cues.play(if voice.muted { Cue::Mute } else { Cue::Unmute });
+              };
             }
             Task::none()
           }
@@ -240,6 +247,13 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
               voice.muted = voice.deafened;
               voice.handle.set_deafened(voice.deafened);
               voice.handle.set_muted(voice.muted);
+              if let Some(ref mut cues) = model.audio_cues {
+                cues.play(if voice.deafened {
+                  Cue::Deafen
+                } else {
+                  Cue::Undeafen
+                });
+              };
             }
             Task::none()
           }
@@ -363,6 +377,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::JoinVoiceSuccessful { voice_channel_id } => {
       if let Some(ref mut voice) = model.voice {
         voice.voice_call_id = Some(voice_channel_id);
+        if let Some(ref mut cues) = model.audio_cues {
+          cues.play(Cue::Join);
+        };
       };
       Task::none()
     }
@@ -463,6 +480,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       if let Some(ref mut call) = model.voice
         && call.voice_call_id == Some(voice_channel_id)
       {
+        if let Some(ref mut cues) = model.audio_cues {
+          if call.presence_snapshot.len() > peers.len() {
+            cues.play(Cue::PeerLeave);
+          } else if call.presence_snapshot.len() < peers.len() {
+            cues.play(Cue::PeerJoin);
+          }
+        }
+
         call.presence_snapshot = peers;
       }
 
