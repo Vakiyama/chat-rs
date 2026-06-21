@@ -1,4 +1,4 @@
-use crate::audio_processing::call_handler::VoiceHandle;
+use crate::audio_processing::{call_handler::VoiceHandle, cues::AudioCues};
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use chat_shared::domain::stream::{DisplayVoiceUser, User};
@@ -63,6 +63,7 @@ pub struct Model {
   pub voice: Option<VoiceCall>,
   pub active_server_id: Option<Uuid>,
   pub room_presence: HashMap<Uuid, Vec<DisplayVoiceUser>>,
+  pub audio_cues: Option<AudioCues>,
 }
 
 pub enum Screen {
@@ -80,6 +81,13 @@ impl Default for Model {
       voice: None,
       active_server_id: None,
       room_presence: HashMap::new(),
+      audio_cues: AudioCues::new()
+        .map(|mut cues| {
+          cues.set_volume(0.1);
+          cues
+        })
+        .map_err(|err| eprintln!("Warning: audio cues failed to initialize: {err:?}"))
+        .ok(),
     }
   }
 }
