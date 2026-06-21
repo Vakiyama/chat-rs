@@ -94,6 +94,7 @@ pub enum Message {
   // voice handle). Not handled inside chat::update.
   ToggleMute,
   ToggleDeafen,
+  GoToSettings,
   None,
 }
 
@@ -370,7 +371,8 @@ pub fn update(
     | Message::LeaveVoice
     | Message::ActiveServerChanged { .. }
     | Message::ToggleMute
-    | Message::ToggleDeafen => Task::none(),
+    | Message::ToggleDeafen
+    | Message::GoToSettings => Task::none(),
   }
 }
 
@@ -834,7 +836,7 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
       .spacing(0),
       space::horizontal(),
       button(icon(GoogleMaterialSymbols::Settings).size(20))
-        .on_press(Message::None)
+        .on_press(Message::GoToSettings)
         .style(move |theme: &Theme, status| {
           let palette = theme.extended_palette();
           let text_color = palette.background.weakest.text;

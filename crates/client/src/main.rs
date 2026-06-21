@@ -24,7 +24,7 @@ use crate::audio_processing::call_handler::spawn_voice;
 use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
-use crate::screens::{auth, chat};
+use crate::screens::{auth, chat, settings};
 use crate::webrtc_stream::WebRTCConnection;
 
 mod client;
@@ -161,6 +161,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
 pub enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
+  Settings(settings::Message),
   Loaded(Option<MeReturn>),
   ChatStreamConnected(ChatConnection),
   ChatStreamDisconnected,
@@ -192,6 +193,15 @@ pub enum Message {
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
   match message {
+    Message::Settings(msg) => {
+      if let Auth::LoggedIn(_user) = &model.user
+        && let Screen::Settings(settings_model) = &mut model.screen
+      {
+        settings::update(settings_model, msg).map(Message::Settings)
+      } else {
+        iced::Task::none()
+      }
+    }
     Message::Chat(msg) => {
       if let Auth::LoggedIn(user) = &model.user
         && let Screen::Chat(chat_model) = &mut model.screen
@@ -257,6 +267,10 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             }
             Task::none()
           }
+          chat::Message::GoToSettings => {
+            model.screen = Screen::Settings(Default::default());
+            Task::none()
+          }
           other => {
             chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
           }
@@ -301,13 +315,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::None => iced::Task::none(),
     Message::Loaded(me_return) => match me_return {
       Some(response) => {
-        model.screen = Screen::Chat(Default::default());
+        // model.screen = Screen::Chat(Default::default());
+        model.screen = Screen::Settings(Default::default());
         model.user = Auth::LoggedIn(User {
           id: response.user_id,
           name: response.username.clone(),
         });
 
-        iced::Task::done(Message::Chat(chat::Message::Init))
+        //iced::Task::done(Message::Chat(chat::Message::Init))
+        Task::none()
       }
       None => Task::none(),
     },
@@ -535,6 +551,9 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
       model,
     )
     .map(Message::Chat),
+    model::Screen::Settings(settings_model) => {
+      screens::settings::view(settings_model).map(Message::Settings)
+    }
   };
 
   container(container(view).style(container::rounded_box)).into()

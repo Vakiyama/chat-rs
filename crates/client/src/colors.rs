@@ -83,3 +83,35 @@ impl NeutralsExt for Theme {
     }
   }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Text {
+  pub text: Color, // primary text
+  pub subtext1: Color,
+  pub subtext0: Color, // secondary text
+  pub overlay2: Color,
+  pub overlay1: Color, // placeholders / muted
+  pub overlay0: Color, // disabled / faintest
+}
+
+pub const FRAPPE_TEXT: Text = Text {
+  text: Color::from_rgb8(0xc6, 0xd0, 0xf5),
+  subtext1: Color::from_rgb8(0xb5, 0xbf, 0xe2),
+  subtext0: Color::from_rgb8(0xa5, 0xad, 0xce),
+  overlay2: Color::from_rgb8(0x94, 0x9c, 0xbb),
+  overlay1: Color::from_rgb8(0x83, 0x8b, 0xa7),
+  overlay0: Color::from_rgb8(0x73, 0x79, 0x94),
+};
+
+pub trait TextExt {
+  fn text(&self) -> Text;
+}
+
+impl TextExt for Theme {
+  fn text(&self) -> Text {
+    match self {
+      Theme::CatppuccinFrappe => FRAPPE_TEXT,
+      _ => FRAPPE_TEXT,
+    }
+  }
+}
