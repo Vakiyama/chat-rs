@@ -210,7 +210,7 @@ pub fn view<'a>(model: &'a Model) -> Element<'a, Message> {
       })
       .width(Length::FillPortion(7))
       .height(Length::Fill)
-      .padding([SPACE_GRID * 6, SPACE_GRID])
+      .padding([SPACE_GRID * 6, SPACE_GRID * 4])
   ]
   .width(Length::Fill)
   .height(Length::Fill);
@@ -257,25 +257,26 @@ fn view_close_button<'a>() -> Element<'a, Message> {
 
 fn view_voice_settings<'a>(model: &'a Model) -> Element<'a, Message> {
   column![
-    text("Voice Settings")
-      .size(24)
-      .font(Font {
-        weight: Weight::Bold,
-        ..SOURCE_SANS_REGULAR
-      }),
+    text("Voice Settings").size(24).font(Font {
+      weight: Weight::Bold,
+      ..SOURCE_SANS_REGULAR
+    }),
     view_noise_gate(model),
-    view_device_picker(
-      "Input Device",
-      &model.input_devices,
-      model.input_device.clone(),
-      Message::InputDeviceSelected,
-    ),
-    view_device_picker(
-      "Output Device",
-      &model.output_devices,
-      model.output_device.clone(),
-      Message::OutputDeviceSelected,
-    ),
+    column![
+      view_device_picker(
+        "Input Device",
+        &model.input_devices,
+        model.input_device.clone(),
+        Message::InputDeviceSelected,
+      ),
+      view_device_picker(
+        "Output Device",
+        &model.output_devices,
+        model.output_device.clone(),
+        Message::OutputDeviceSelected,
+      )
+    ]
+    .spacing((SPACE_GRID * 2) as u32),
   ]
   .spacing((SPACE_GRID * 3) as u32)
   .into()
@@ -350,6 +351,10 @@ fn view_device_picker<'a>(
     }),
     pick_list(options, selected, on_select)
       .placeholder("System default")
+      .style(|theme, status| pick_list::Style {
+        border: Border::default().rounded((SPACE_GRID / 2) as u32),
+        ..pick_list::default(theme, status)
+      })
       .width(Length::Fill),
   ]
   .spacing(SPACE_GRID as u32)
