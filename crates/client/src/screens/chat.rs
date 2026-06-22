@@ -1130,12 +1130,33 @@ impl Tone {
 }
 
 /// folds link + media into one displayed status. Media only refines `Live`.
+/// `input_ok`/`output_ok` flag a dead mic/speaker: the user joined, but that
+/// direction is silent until they fix it. A dead device wins over the normal
+/// "Voice Connected" line because it's the most actionable thing on screen.
 fn describe_voice(
   link: &crate::model::LinkState,
   media: crate::model::MediaHealth,
-) -> (String, Tone, Option<&'static str>) {
+  input_ok: bool,
+  output_ok: bool,
+  mic_receiving: bool,
+) -> (String, Tone, Option<String>) {
   use crate::model::{LinkState::*, MediaHealth};
-  match link {
+
+  // a dead device is only meaningful once we're actually in the call. The mic
+  // counts as down either when its device failed to open (`!input_ok`) or when
+  // it opened but no frames are arriving (`!mic_receiving`) — unplugged, muted
+  // at the OS, or broken. Same warning for both: the user knows the context.
+  let connected = matches!(link, Live | Unstable);
+  let mic_down = !input_ok || !mic_receiving;
+  let speaker_down = !output_ok;
+  let device_hint: Option<String> = match (connected, mic_down, speaker_down) {
+    (true, true, true) => Some("No mic or speaker — check Settings".into()),
+    (true, true, false) => Some("No mic — others can't hear you".into()),
+    (true, false, true) => Some("No speaker — you can't hear others".into()),
+    _ => None,
+  };
+
+  let (status, tone, media_hint): (String, Tone, Option<String>) = match link {
     Idle => ("Idle...".into(), Tone::Idle, None),
     Connecting => ("Connecting...".into(), Tone::Pending, None),
     Reconnecting { attempt } => (format!("Reconnecting... - {attempt}"), Tone::Warn, None),
@@ -1143,9 +1164,16 @@ fn describe_voice(
     Unstable => ("Voice Connected - Unstable".into(), Tone::Warn, None),
     Live => match media {
       MediaHealth::TransportDegraded => ("Voice Connected - Unstable".into(), Tone::Warn, None),
-      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, None),
-      MediaHealth::Flowing | MediaHealth::Unknown => ("Voice Connected".into(), Tone::Good, None),
+      MediaHealth::NoAudio | MediaHealth::Flowing | MediaHealth::Unknown => {
+        ("Voice Connected".into(), Tone::Good, None)
+      }
     },
+  };
+
+  // a dead device downgrades the tone and replaces the hint with the fix-it text.
+  match device_hint {
+    Some(hint) => (status, Tone::Warn, Some(hint)),
+    None => (status, tone, media_hint),
   }
 }
 
@@ -1173,7 +1201,13 @@ fn view_call_controller<'a>(
     .unwrap_or("Voice");
 
   let voice = main_model.voice.as_ref()?;
-  let (status_text, tone, media_hint) = describe_voice(&voice.link_state, voice.media);
+  let (status_text, tone, media_hint) = describe_voice(
+    &voice.link_state,
+    voice.media,
+    voice.input_ok,
+    voice.output_ok,
+    voice.mic_receiving,
+  );
 
   // secondary line: channel name, then latency + media hint only while connected
   let connected = matches!(
@@ -1200,13 +1234,6 @@ fn view_call_controller<'a>(
           color: Some(lt.color(t)),
         }),
     );
-  }
-
-  if let Some(hint) = media_hint {
-    meta = meta.push(text("·").size(12).style(text::secondary));
-    meta = meta.push(text(hint).size(12).style(|t: &Theme| text::Style {
-      color: Some(t.extended_palette().warning.base.color),
-    }));
   }
 
   let status = column![
@@ -1253,7 +1280,39 @@ fn view_call_controller<'a>(
       }
     });
 
-  let panel = container(row![status, leave_button].align_y(Center))
+  // device warnings get their own full-width line below the status/leave row so
+  // they have room to wrap instead of being crammed into the single-line meta
+  // row next to the channel name, latency, and leave button.
+  let mut body =
+    column![row![status, leave_button].align_y(Center)].spacing(u32::from(SPACE_GRID) / 2);
+  if let Some(hint) = media_hint {
+    body = body.push(
+      container(
+        row![
+          icon(GoogleMaterialSymbols::Warning).size(14),
+          text(hint)
+            .size(12)
+            .wrapping(text::Wrapping::Word)
+            .width(Length::Fill),
+        ]
+        .spacing(6)
+        .align_y(Center),
+      )
+      .width(Length::Fill)
+      .padding([SPACE_GRID / 2, SPACE_GRID])
+      .style(|theme: &Theme| {
+        let warning = theme.extended_palette().warning;
+        container::Style {
+          background: Some(warning.weak.color.into()),
+          text_color: Some(warning.weak.text),
+          border: border::rounded(2),
+          ..container::Style::default()
+        }
+      }),
+    );
+  }
+
+  let panel = container(body)
     .width(Length::Fill)
     .padding(SPACE_GRID)
     .style(|theme: &Theme| {

@@ -41,4 +41,10 @@ indexmap = "2.14.0"
 material-icons = "0.3"
 google_material_symbols = "0.2"
 kira = "0.12.1"
+# kira binds its cpal backend to the default output device. To route audio cues
+# to the user's *chosen* device we hand kira a cpal::Device — but it speaks
+# cpal 0.17 internally, a different crate version than our 0.18. Pull 0.17 in
+# under an alias so the Device type we construct matches kira's (Cargo unifies
+# it with kira's own copy).
+cpal_kira = { package = "cpal", version = "0.17.3" }
 iced_selection = "0.5.0"

@@ -5,7 +5,7 @@ use crate::webrtc_stream::{
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -68,8 +68,10 @@ impl VoiceHandle {
 struct ActiveCall {
   pc: Arc<RTCPeerConnection>,
   // held so the device keeps running; reassigned (old dropped) on a live swap.
-  mic: cpal::Stream,
-  speaker: cpal::Stream,
+  // `None` means that device failed to open — the call runs without it until the
+  // user fixes/switches the device.
+  mic: Option<cpal::Stream>,
+  speaker: Option<cpal::Stream>,
   stats_task: tokio::task::JoinHandle<()>,
   mixer: crate::audio_processing::mixer::Mixer,
   in_rate: u32,
@@ -78,6 +80,9 @@ struct ActiveCall {
   // kept so a live device swap can feed the running audio path without a rejoin.
   cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
   rnd_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+  // the model's epoch for this call, so live device-swap health reports can be
+  // filtered against a stale call the same way join/connection callbacks are.
+  epoch: u32,
 }
 
 fn inbound_audio(r: &StatsReport) -> (u32, u64) {
@@ -97,6 +102,7 @@ pub fn spawn_stats_poller(
   pc: Arc<RTCPeerConnection>,
   epoch: u32,
   tx: tokio::sync::mpsc::Sender<crate::Message>,
+  capture_signal_frames: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -106,10 +112,35 @@ pub fn spawn_stats_poller(
     let mut flat_audio = 0u32;
     let mut last_emitted: Option<MediaHealth> = None;
 
+    // mic liveness: `capture_signal_frames` only counts capture buffers that
+    // carried real signal (peak above a digital-silence floor), so this catches
+    // both a dead callback (no frames) AND a device that fires callbacks but
+    // delivers pure silence (unplugged / OS-muted / wrong input). We require the
+    // counter to stay flat for several consecutive ticks before flagging, so a
+    // normal speech pause on a hardware-gated mic doesn't trip it; a real mic's
+    // noise floor advances the counter every tick. Recovers immediately once
+    // signal returns. Seeded to `true` so the healthy default isn't re-announced.
+    let mut prev_signal_frames: Option<u64> = None;
+    let mut silent_ticks = 0u32;
+    const SILENT_TICKS_LIMIT: u32 = 3; // ~6s of digital silence before flagging
+    let mut last_emitted_receiving: Option<bool> = Some(true);
+
     loop {
       tick.tick().await;
       if pc.connection_state() == RTCPeerConnectionState::Closed {
         break;
+      }
+
+      let frames = capture_signal_frames.load(Ordering::Relaxed);
+      let advanced = prev_signal_frames.is_none_or(|p| frames > p);
+      prev_signal_frames = Some(frames);
+      silent_ticks = if advanced { 0 } else { silent_ticks + 1 };
+      let receiving = silent_ticks < SILENT_TICKS_LIMIT;
+      if last_emitted_receiving != Some(receiving) {
+        last_emitted_receiving = Some(receiving);
+        let _ = tx
+          .send(crate::Message::VoiceMicActivity { epoch, receiving })
+          .await;
       }
 
       let report = pc.get_stats().await;
@@ -205,6 +236,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               out_rate,
               cap_tx,
               rnd_tx,
+              capture_signal_frames,
             }) => {
               let pc = Arc::new(pc);
               let started = Arc::new(Mutex::new(HashSet::new()));
@@ -232,6 +264,15 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               let _ = outbound_tx
                 .send(crate::Message::JoinVoiceSuccessful { voice_channel_id })
                 .await;
+              // surface whether each direction actually came up so the UI can
+              // tell the user they joined but have no mic and/or no speaker.
+              let _ = outbound_tx
+                .send(crate::Message::VoiceDeviceHealth {
+                  epoch,
+                  input_ok: mic.is_some(),
+                  output_ok: speaker.is_some(),
+                })
+                .await;
 
               let cb_tx = outbound_tx.clone();
               pc.on_peer_connection_state_change(Box::new(move |new_state| {
@@ -246,7 +287,8 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 })
               }));
 
-              let stats_task = spawn_stats_poller(pc.clone(), epoch, outbound_tx.clone());
+              let stats_task =
+                spawn_stats_poller(pc.clone(), epoch, outbound_tx.clone(), capture_signal_frames);
               call = Some(ActiveCall {
                 pc,
                 mic,
@@ -258,6 +300,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 started: started.clone(),
                 cap_tx,
                 rnd_tx,
+                epoch,
               });
               *cloned_room_id.lock().await = Some(voice_channel_id);
 
@@ -336,10 +379,23 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                   let _ = active.cap_tx.send(CaptureEvent::Rate(rate));
                   active.in_rate = rate;
                 }
-                active.mic = stream;
+                active.mic = Some(stream);
               }
-              Err(e) => eprintln!("input device switch failed: {e:?}"),
+              Err(e) => {
+                // the new device failed: drop the old mic so we don't keep
+                // publishing from a device the user just switched away from, and
+                // report that we now have no working input.
+                eprintln!("input device switch failed; mic now silent: {e:?}");
+                active.mic = None;
+              }
             }
+            let _ = outbound_tx
+              .send(crate::Message::VoiceDeviceHealth {
+                epoch: active.epoch,
+                input_ok: active.mic.is_some(),
+                output_ok: active.speaker.is_some(),
+              })
+              .await;
           }
         }
         VoiceCommand::SetOutputDevice(name) => {
@@ -350,16 +406,34 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           // it). On a rate mismatch, fall back to a full rebuild via main's
           // epoch-aware rejoin path (brief audio blip).
           let mut rejoin_for: Option<Uuid> = None;
+          let mut report_health = false;
           if let Some(active) = call.as_mut() {
             match build_speaker(active.mixer.clone(), active.rnd_tx.clone(), output_name.as_deref()) {
               Ok((stream, rate)) if rate == active.out_rate => {
-                active.speaker = stream; // drop old speaker
+                active.speaker = Some(stream); // drop old speaker
+                report_health = true;
               }
               Ok((stream, _rate)) => {
+                // rate mismatch → full rebuild via rejoin, which re-reports health.
                 drop(stream);
                 rejoin_for = *cloned_room_id.lock().await;
               }
-              Err(e) => eprintln!("output device switch failed: {e:?}"),
+              Err(e) => {
+                // the new device failed: drop the old speaker and report that we
+                // now have no working output (we hear nobody).
+                eprintln!("output device switch failed; no speaker output: {e:?}");
+                active.speaker = None;
+                report_health = true;
+              }
+            }
+            if report_health {
+              let _ = outbound_tx
+                .send(crate::Message::VoiceDeviceHealth {
+                  epoch: active.epoch,
+                  input_ok: active.mic.is_some(),
+                  output_ok: active.speaker.is_some(),
+                })
+                .await;
             }
           }
           if let Some(voice_channel_id) = rejoin_for {

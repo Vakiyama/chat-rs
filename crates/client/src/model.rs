@@ -48,6 +48,18 @@ pub struct VoiceCall {
   // local mic/playback toggles. Deafen implies mute. Persist across calls.
   pub muted: bool,
   pub deafened: bool,
+  // per-device audio health, reported by the voice actor on join and on every
+  // live device swap. `false` means we joined the call but that direction is
+  // dead until the user fixes the device: no `input_ok` → nobody hears us, no
+  // `output_ok` → we hear nobody. Both default true until proven otherwise.
+  pub input_ok: bool,
+  pub output_ok: bool,
+  // whether mic capture frames are actually arriving. A mic device can open
+  // successfully (`input_ok`) yet deliver nothing — unplugged, OS-muted, or
+  // broken — in which case this flips false and we surface the same "no mic"
+  // warning. Defaults true so a fresh join doesn't flash a warning before the
+  // first frames land.
+  pub mic_receiving: bool,
 }
 
 impl std::hash::Hash for VoiceCall {
@@ -88,7 +100,10 @@ impl Default for Model {
       active_server_id: None,
       room_presence: HashMap::new(),
       stashed_chat: None,
-      audio_cues: AudioCues::new()
+      // Bind cues to the saved output device so they share the device the call
+      // uses. If this fails (e.g. no working device at startup) we leave it None
+      // and recover later via AudioCues::rebuild when a device appears/changes.
+      audio_cues: AudioCues::new(crate::voice_settings::VoiceSettings::load().output_device.as_deref())
         .map(|mut cues| {
           cues.set_volume(0.1);
           cues
