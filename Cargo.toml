@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/shared", "crates/server", "crates/client"]
+members = ["crates/shared", "crates/server", "crates/client", "crates/android-spike"]
 
 [workspace.dependencies]
 # one place to pin versions everything inherits
