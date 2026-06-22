@@ -442,6 +442,11 @@ pub struct CallSetup {
   // of pure silence (unplugged / OS-muted / wrong input). Survives live device
   // swaps since it's tied to the processor, not the cpal stream.
   pub capture_signal_frames: Arc<std::sync::atomic::AtomicU64>,
+  // target Opus packet-loss-perc for adaptive FEC. The stats poller writes the
+  // loss our outbound stream is suffering (from the receiver's RTCP reports);
+  // the encoder reads it and tells Opus how much in-band redundancy to add, so
+  // we only spend bitrate on FEC when the link is actually lossy.
+  pub fec_loss_perc: Arc<std::sync::atomic::AtomicU32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -540,6 +545,7 @@ pub async fn setup_client(
     }
   };
   let capture_signal_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  let fec_loss_perc = Arc::new(std::sync::atomic::AtomicU32::new(0));
   spawn_audio_processor(
     cap_rx,
     rnd_rx,
@@ -552,6 +558,7 @@ pub async fn setup_client(
     deafened,
     gate_threshold,
     capture_signal_frames.clone(),
+    fec_loss_perc.clone(),
   )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
@@ -574,6 +581,7 @@ pub async fn setup_client(
     cap_tx,
     rnd_tx,
     capture_signal_frames,
+    fec_loss_perc,
   })
 }
 
@@ -590,6 +598,7 @@ fn spawn_audio_processor(
   deafened: Arc<std::sync::atomic::AtomicBool>,
   gate_threshold: Arc<std::sync::atomic::AtomicU32>,
   capture_signal_frames: Arc<std::sync::atomic::AtomicU64>,
+  fec_loss_perc: Arc<std::sync::atomic::AtomicU32>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -623,6 +632,10 @@ fn spawn_audio_processor(
     encoder
       .set_inband_fec(true)
       .expect("Failed to set Inband FEC");
+    // adaptive FEC: track the last applied loss-perc so we only reconfigure the
+    // encoder when the poller's estimate actually changes. Starts at 0 (no
+    // redundancy) and the encoder default matches.
+    let mut applied_perc: u32 = 0;
 
     let mut cap_buf: Vec<f32> = Vec::new();
     let mut rnd_buf: Vec<f32> = Vec::new();
@@ -677,6 +690,17 @@ fn spawn_audio_processor(
           const SILENCE_EPS: f32 = 1e-4;
           if chunk.iter().any(|s| s.abs() > SILENCE_EPS) {
             capture_signal_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+          }
+          // adaptive FEC: push the poller's current loss estimate into the
+          // encoder when it changes. Higher perc → Opus embeds more redundancy
+          // (LBRR) so the receiver can reconstruct lost frames.
+          let want_perc = fec_loss_perc.load(std::sync::atomic::Ordering::Relaxed);
+          if want_perc != applied_perc {
+            if let Err(e) = encoder.set_packet_loss_perc(want_perc.min(100) as u8) {
+              eprintln!("set packet loss perc {want_perc}: {e:?}");
+            } else {
+              applied_perc = want_perc;
+            }
           }
           let mut at48k = Vec::new();
           if let Err(e) = cap_rs.push(&chunk, &mut at48k) { eprintln!("cap resample: {e:?}"); continue; }

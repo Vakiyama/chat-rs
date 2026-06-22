@@ -85,6 +85,22 @@ struct ActiveCall {
   epoch: u32,
 }
 
+// Worst loss fraction (0.0..1.0) the receiver reports for our outbound audio,
+// via RTCP receiver reports relayed back as RemoteInboundRTP stats. This is the
+// loss on the path our packets travel to the next hop, so it's the right signal
+// for how much FEC redundancy our encoder should add.
+fn outbound_loss(r: &StatsReport) -> Option<f64> {
+  let mut worst: Option<f64> = None;
+  for s in r.reports.values() {
+    if let StatsReportType::RemoteInboundRTP(s) = s
+      && s.kind == "audio"
+    {
+      worst = Some(worst.map_or(s.fraction_lost, |w: f64| w.max(s.fraction_lost)));
+    }
+  }
+  worst
+}
+
 fn inbound_audio(r: &StatsReport) -> (u32, u64) {
   let (mut n, mut bytes) = (0u32, 0u64);
   for s in r.reports.values() {
@@ -103,6 +119,7 @@ pub fn spawn_stats_poller(
   epoch: u32,
   tx: tokio::sync::mpsc::Sender<crate::Message>,
   capture_signal_frames: Arc<AtomicU64>,
+  fec_loss_perc: Arc<AtomicU32>,
 ) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -111,6 +128,12 @@ pub fn spawn_stats_poller(
     let mut prev_bytes: Option<u64> = None;
     let mut flat_audio = 0u32;
     let mut last_emitted: Option<MediaHealth> = None;
+
+    // adaptive FEC target. Rise fast to cover a loss burst, decay slowly so the
+    // encoder doesn't drop redundancy the instant a gap clears (loss is bursty).
+    // Capped so FEC overhead stays bounded even on a very lossy link.
+    let mut fec_smoothed: f64 = 0.0;
+    const FEC_MAX_PERC: f64 = 30.0;
 
     // mic liveness: `capture_signal_frames` only counts capture buffers that
     // carried real signal (peak above a digital-silence floor), so this catches
@@ -144,6 +167,20 @@ pub fn spawn_stats_poller(
       }
 
       let report = pc.get_stats().await;
+
+      // adaptive FEC: map the receiver-reported loss on our outbound audio to an
+      // Opus packet-loss-perc the encoder reads. Rise straight to the observed
+      // loss, decay slowly between bursts.
+      if let Some(loss) = outbound_loss(&report) {
+        let target = (loss * 100.0).clamp(0.0, FEC_MAX_PERC);
+        fec_smoothed = if target > fec_smoothed {
+          target
+        } else {
+          fec_smoothed * 0.8 + target * 0.2
+        };
+        fec_loss_perc.store(fec_smoothed.round() as u32, Ordering::Relaxed);
+      }
+
       let (audio_streams, bytes) = inbound_audio(&report);
 
       let first = prev_bytes.is_none();
@@ -237,6 +274,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               cap_tx,
               rnd_tx,
               capture_signal_frames,
+              fec_loss_perc,
             }) => {
               let pc = Arc::new(pc);
               let started = Arc::new(Mutex::new(HashSet::new()));
@@ -287,8 +325,13 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 })
               }));
 
-              let stats_task =
-                spawn_stats_poller(pc.clone(), epoch, outbound_tx.clone(), capture_signal_frames);
+              let stats_task = spawn_stats_poller(
+                pc.clone(),
+                epoch,
+                outbound_tx.clone(),
+                capture_signal_frames,
+                fec_loss_perc,
+              );
               call = Some(ActiveCall {
                 pc,
                 mic,
@@ -558,19 +601,75 @@ async fn read_track(
   // lazily from the wire header — the packet always carries the real ssrc.
   let mut src: Option<u32> = None;
 
+  // loss concealment state. We watch RTP sequence numbers for gaps and fill them
+  // before decoding the packet that landed, so the playback timeline stays
+  // continuous (the mixer underruns — and clicks — only when the queue truly
+  // empties). One 20ms Opus frame is 960 samples @ 48k mono.
+  const FRAME: usize = 960;
+  // cap how much we synthesize for a single gap. Opus PLC decays to near-silence
+  // within a few frames anyway, and a large gap is usually an outage or the peer
+  // muting (which stops their RTP) — flooding the mixer past this is pointless.
+  const MAX_CONCEAL: u16 = 5; // ~100ms
+  let mut last_seq: Option<u16> = None;
+
+  let push_frame = |out_rs: &mut crate::audio_processing::resampler::Resampler,
+                    s: u32,
+                    samples: &[f32]| {
+    let mut at_dev = Vec::new();
+    let _ = out_rs.push(samples, &mut at_dev);
+    mixer.push(s, &at_dev);
+  };
+
   while let Ok((pkt, _)) = track.read_rtp().await {
+    let seq = pkt.header.sequence_number;
+    let s = *src.get_or_insert(pkt.header.ssrc);
+
+    // drop late/duplicate packets (seq not strictly ahead of the last we used);
+    // forward distance > half the seq space means it's actually behind (wrapped).
+    if let Some(prev) = last_seq {
+      let fwd = seq.wrapping_sub(prev);
+      if fwd == 0 || fwd > 0x8000 {
+        continue;
+      }
+    }
+
     if pkt.payload.is_empty() {
+      // keep the timeline anchored on empty (e.g. padding) packets without
+      // concealing — they aren't audio, but they aren't losses either.
+      last_seq = Some(seq);
       continue;
     }
-    let s = *src.get_or_insert(pkt.header.ssrc);
-    match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
-      Ok(n) => {
-        let mut at_dev = Vec::new();
-        let _ = out_rs.push(&pcm[..n], &mut at_dev);
-        mixer.push(s, &at_dev);
+
+    // number of packets missing between the last one we decoded and this one.
+    let gap = match last_seq {
+      Some(prev) => seq.wrapping_sub(prev).wrapping_sub(1).min(MAX_CONCEAL),
+      None => 0,
+    };
+    if gap > 0 {
+      // the most recent lost frame can be reconstructed exactly: this packet
+      // carries an in-band FEC (LBRR) copy of it. Conceal the older losses with
+      // Opus PLC (generated silence/continuation), then FEC-recover the last one.
+      for _ in 0..gap - 1 {
+        if let Ok(n) = decoder.decode_float(None::<&[u8]>, &mut pcm[..FRAME], false) {
+          push_frame(&mut out_rs, s, &pcm[..n]);
+        }
       }
+      match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm[..FRAME], true) {
+        Ok(n) => push_frame(&mut out_rs, s, &pcm[..n]),
+        // no FEC data present for that frame → fall back to one more PLC frame.
+        Err(_) => {
+          if let Ok(n) = decoder.decode_float(None::<&[u8]>, &mut pcm[..FRAME], false) {
+            push_frame(&mut out_rs, s, &pcm[..n]);
+          }
+        }
+      }
+    }
+
+    match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
+      Ok(n) => push_frame(&mut out_rs, s, &pcm[..n]),
       Err(e) => eprintln!("opus decode error: {e}"),
     }
+    last_seq = Some(seq);
   }
 
   // Release the dedup key so this track id can be read again. Without this the set

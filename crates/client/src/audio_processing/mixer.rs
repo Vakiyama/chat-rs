@@ -10,6 +10,10 @@ use std::{
 struct Source {
   queue: VecDeque<f32>,
   primed: bool,
+  // whether this source has prebuffered at least once. The first prime waits for
+  // the full `target` cushion; after an underrun we re-prime at the smaller
+  // `resume` threshold so a brief hiccup doesn't cost a full `target` of silence.
+  ever_primed: bool,
   last: f32,
 }
 
@@ -17,6 +21,7 @@ struct Source {
 pub struct Mixer {
   sources: Arc<Mutex<HashMap<u32, Source>>>,
   target: usize,
+  resume: usize,
   max: usize,
   // when set, output is silenced (queues still drain so we don't resume from a
   // stale backlog on undeafen). Shared with the voice actor.
@@ -29,7 +34,8 @@ impl Mixer {
   pub fn new(sample_rate: u32, deafened: Arc<AtomicBool>) -> Self {
     Self {
       sources: Default::default(),
-      target: sample_rate as usize * 40 / 1000, // 40ms prebuffer
+      target: sample_rate as usize * 40 / 1000, // 40ms initial prebuffer
+      resume: sample_rate as usize * 10 / 1000, // 10ms re-prime after an underrun
       max: sample_rate as usize * 200 / 1000,   // 200ms
       deafened,
     }
@@ -42,8 +48,16 @@ impl Mixer {
     let source = sources.entry(src).or_default();
     source.queue.extend(samples);
 
-    if source.queue.len() >= self.target {
+    // wait for the full cushion on first start; after an underrun a smaller
+    // cushion is enough to resume, so a momentary gap doesn't mute for 40ms.
+    let threshold = if source.ever_primed {
+      self.resume
+    } else {
+      self.target
+    };
+    if source.queue.len() >= threshold {
       source.primed = true;
+      source.ever_primed = true;
     }
 
     // drops packets from queue if we back up past 200 ms
@@ -86,8 +100,11 @@ impl Mixer {
               sample
             }
             None => {
-              source.primed = false; // prefill again
-              source.last *= 0.85;
+              source.primed = false; // prefill again (at the smaller resume cushion)
+              // gentle fade of the last sample instead of an abrupt cut: ~0.99
+              // per sample decays to near-silence over a few ms, avoiding the
+              // click a fast (0.85/sample) drop produced on every underrun.
+              source.last *= 0.99;
               source.last
             }
           }
