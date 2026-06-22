@@ -209,6 +209,19 @@ pub enum Message {
     epoch: u32,
     health: MediaHealth,
   },
+  // per-device audio health for the current call: whether the mic and speaker
+  // streams actually came up. Reported on join and on every live device swap.
+  VoiceDeviceHealth {
+    epoch: u32,
+    input_ok: bool,
+    output_ok: bool,
+  },
+  // whether mic capture frames are currently arriving. Drops false when the mic
+  // opened but stopped delivering (unplugged / OS-muted / broken).
+  VoiceMicActivity {
+    epoch: u32,
+    receiving: bool,
+  },
   // a voice setting (output device at a new sample rate) needs the whole audio
   // path rebuilt; rejoin on a fresh, model-owned epoch.
   VoiceRejoinForSettings {
@@ -267,6 +280,27 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             _ => {}
           }
         }
+        // Re-bind audio cues to the chosen output device so they follow the same
+        // device the call uses. This also recovers cues that failed to start
+        // (e.g. no working device at startup) once a usable device is selected.
+        if let settings::Message::OutputDeviceSelected(name) = &msg {
+          match &mut model.audio_cues {
+            Some(cues) => {
+              if let Err(e) = cues.rebuild(Some(name)) {
+                eprintln!("audio cues rebuild failed: {e:?}");
+              }
+            }
+            None => {
+              model.audio_cues = crate::audio_processing::cues::AudioCues::new(Some(name))
+                .map(|mut cues| {
+                  cues.set_volume(0.1);
+                  cues
+                })
+                .map_err(|e| eprintln!("audio cues init failed: {e:?}"))
+                .ok();
+            }
+          }
+        }
         if let Screen::Settings(settings_model) = &mut model.screen {
           settings::update(settings_model, msg).map(Message::Settings)
         } else {
@@ -284,6 +318,11 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
               // earlier auto-reconnect.
               voice.epoch += 1;
               voice.link_state = model::LinkState::Connecting;
+              // clear any stale device warnings from a prior call; the fresh
+              // join re-reports device health and mic liveness.
+              voice.mic_receiving = true;
+              voice.input_ok = true;
+              voice.output_ok = true;
               voice.handle.join(voice_channel_id, voice.epoch);
             }
             Task::none()
@@ -458,6 +497,10 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         presence_snapshot: vec![],
         muted: false,
         deafened: false,
+        // assume healthy until a join (or device swap) reports otherwise.
+        input_ok: true,
+        output_ok: true,
+        mic_receiving: true,
       };
 
       // (re)subscribe to the active server's call presence so a fresh or
@@ -478,6 +521,19 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::JoinVoiceSuccessful { voice_channel_id } => {
       if let Some(ref mut voice) = model.voice {
         voice.voice_call_id = Some(voice_channel_id);
+        // Cues may have failed to initialize at startup (no working device then).
+        // A join is a good moment to retry against the currently-saved device so
+        // the join/leave/peer cues come back to life without a restart.
+        if model.audio_cues.is_none() {
+          let device = crate::voice_settings::VoiceSettings::load().output_device;
+          model.audio_cues = crate::audio_processing::cues::AudioCues::new(device.as_deref())
+            .map(|mut cues| {
+              cues.set_volume(0.1);
+              cues
+            })
+            .map_err(|e| eprintln!("audio cues init failed: {e:?}"))
+            .ok();
+        }
         if let Some(ref mut cues) = model.audio_cues {
           cues.play(Cue::Join);
         };
@@ -570,12 +626,44 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 
       Task::none()
     }
+    Message::VoiceDeviceHealth {
+      epoch,
+      input_ok,
+      output_ok,
+    } => {
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+
+      if epoch != call.epoch {
+        return Task::none();
+      }
+
+      call.input_ok = input_ok;
+      call.output_ok = output_ok;
+
+      Task::none()
+    }
+    Message::VoiceMicActivity { epoch, receiving } => {
+      let Some(ref mut call) = model.voice else {
+        return Task::none();
+      };
+
+      if epoch != call.epoch {
+        return Task::none();
+      }
+
+      call.mic_receiving = receiving;
+
+      Task::none()
+    }
     Message::VoiceRejoinForSettings { voice_channel_id } => {
       // bump the model-owned epoch so the dying pc's late callbacks are filtered
       // while the rebuilt call's callbacks are accepted (same contract as join).
       if let Some(voice) = &mut model.voice {
         voice.epoch += 1;
         voice.link_state = LinkState::Connecting;
+        voice.mic_receiving = true;
         voice.handle.join(voice_channel_id, voice.epoch);
       }
       Task::none()

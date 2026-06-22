@@ -426,13 +426,22 @@ fn spawn_speaker(
 pub struct CallSetup {
   pub pc: RTCPeerConnection,
   pub offer: RTCSessionDescription,
-  pub mic: cpal::Stream,
-  pub speaker: cpal::Stream,
+  // `None` means that device couldn't be opened — we still join the call, but
+  // that direction is silent until the user fixes/switches the device. A missing
+  // mic means nobody hears us; a missing speaker means we hear nobody.
+  pub mic: Option<cpal::Stream>,
+  pub speaker: Option<cpal::Stream>,
   pub mixer: Mixer,
   pub in_rate: u32,
   pub out_rate: u32,
   pub cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
   pub rnd_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+  // monotonically counts mic capture buffers that carried real signal (peak
+  // above a digital-silence floor). A poller watches it for staleness to detect
+  // a mic that opened but delivers nothing — either no frames at all, or frames
+  // of pure silence (unplugged / OS-muted / wrong input). Survives live device
+  // swaps since it's tied to the processor, not the cpal stream.
+  pub capture_signal_frames: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,21 +497,49 @@ pub async fn setup_client(
   // The output rate is fixed here for the life of the call: the mixer's jitter
   // buffer, every per-peer resampler, and the APM render config are all sized to
   // it. A live speaker swap is only seamless when the new device shares this rate.
-  let (cpal_stream_output, out_rate, mixer) = {
-    // Build the mixer against the chosen device's rate, then the speaker on top.
-    let host = cpal::default_host();
-    let out_dev = resolve_output_device(&host, output_name.as_deref())?;
-    let out_cfg = pick_config(
-      out_dev.default_output_config()?,
-      out_dev.supported_output_configs()?,
-    )?;
-    let out_rate = out_cfg.sample_rate();
-    let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
-    let stream = spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev)?; // playback + render tee
-    (stream, out_rate, mixer)
+  //
+  // A dead output device is non-fatal: we still join (so the user hears the rest
+  // of the UI react and can fix devices from Settings), just with no speaker.
+  // The mixer self-trims each source to 200ms, so leaving it undrained can't grow
+  // unbounded. When no device is resolvable we size the mixer/APM render at the
+  // target rate so the rest of the pipeline still has a coherent rate to use.
+  let (cpal_stream_output, out_rate, mixer) = match resolve_output_device(
+    &cpal::default_host(),
+    output_name.as_deref(),
+  )
+  .and_then(|dev| {
+    let cfg = pick_config(dev.default_output_config()?, dev.supported_output_configs()?)?;
+    Ok((dev, cfg))
+  }) {
+    Ok((out_dev, out_cfg)) => {
+      let out_rate = out_cfg.sample_rate();
+      let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
+      match spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev) {
+        Ok(stream) => (Some(stream), out_rate, mixer), // playback + render tee
+        Err(e) => {
+          eprintln!("output device build failed; joining without speaker: {e:?}");
+          (None, out_rate, mixer)
+        }
+      }
+    }
+    Err(e) => {
+      eprintln!("no usable output device; joining without speaker: {e:?}");
+      let mixer = Mixer::new(TARGET_RATE, deafened.clone());
+      (None, TARGET_RATE, mixer)
+    }
   };
 
-  let (cpal_stream_input, in_rate) = build_mic(cap_tx.clone(), input_name.as_deref())?; // capture only
+  // A dead input device is likewise non-fatal: we join muted-at-the-source
+  // (nobody hears us) until the mic is fixed. With no capture stream the audio
+  // processor simply never receives samples and publishes nothing.
+  let (cpal_stream_input, in_rate) = match build_mic(cap_tx.clone(), input_name.as_deref()) {
+    Ok((stream, rate)) => (Some(stream), rate),
+    Err(e) => {
+      eprintln!("input device build failed; joining without mic: {e:?}");
+      (None, TARGET_RATE)
+    }
+  };
+  let capture_signal_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
   spawn_audio_processor(
     cap_rx,
     rnd_rx,
@@ -514,6 +551,7 @@ pub async fn setup_client(
     muted,
     deafened,
     gate_threshold,
+    capture_signal_frames.clone(),
   )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
@@ -535,6 +573,7 @@ pub async fn setup_client(
     out_rate,
     cap_tx,
     rnd_tx,
+    capture_signal_frames,
   })
 }
 
@@ -550,6 +589,7 @@ fn spawn_audio_processor(
   muted: Arc<std::sync::atomic::AtomicBool>,
   deafened: Arc<std::sync::atomic::AtomicBool>,
   gate_threshold: Arc<std::sync::atomic::AtomicU32>,
+  capture_signal_frames: Arc<std::sync::atomic::AtomicU64>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -627,6 +667,17 @@ fn spawn_audio_processor(
             }
             CaptureEvent::Samples(chunk) => chunk,
           };
+          // mic liveness: count this buffer only if it carries real signal.
+          // Measured on the RAW device chunk (before APM/gain/gate/mute), so
+          // neither noise suppression nor self-mute can zero it. A working mic —
+          // even a quiet one — has a noise floor that peaks above this tiny
+          // epsilon within a buffer; a dead/muted/disconnected device that still
+          // fires callbacks delivers exact-zero (digital silence) samples and so
+          // never advances the counter. The poller flags sustained no-advance.
+          const SILENCE_EPS: f32 = 1e-4;
+          if chunk.iter().any(|s| s.abs() > SILENCE_EPS) {
+            capture_signal_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+          }
           let mut at48k = Vec::new();
           if let Err(e) = cap_rs.push(&chunk, &mut at48k) { eprintln!("cap resample: {e:?}"); continue; }
           cap_buf.extend_from_slice(&at48k);     // now genuinely 48k
