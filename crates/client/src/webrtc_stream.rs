@@ -604,6 +604,7 @@ fn spawn_audio_processor(
   fec_loss_perc: Arc<std::sync::atomic::AtomicU32>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
+  let mut rnd_rs = Resampler::new(out_rate, TARGET_RATE)?;
 
   tokio::spawn(async move {
     let config = Config {
@@ -622,7 +623,7 @@ fn spawn_audio_processor(
     let mut apm = AudioProcessing::builder()
       .config(config)
       .capture_config(sonora::StreamConfig::new(TARGET_RATE, 1))
-      .render_config(sonora::StreamConfig::new(out_rate, 1))
+      .render_config(sonora::StreamConfig::new(TARGET_RATE, 1))
       .build();
 
     let mut encoder = audiopus::coder::Encoder::new(
@@ -662,7 +663,10 @@ fn spawn_audio_processor(
     loop {
       tokio::select! {
         Some(chunk) = rnd_rx.recv() => {
-          rnd_buf.extend_from_slice(&chunk);
+          let mut at48k = Vec::new();
+          // claude said i should do this as rnd_rs resamples correctly for us on push
+          if let Err(e) = rnd_rs.push(&chunk, &mut at48k) { eprintln!("render resample: {e:?}"); continue; }
+          rnd_buf.extend_from_slice(&at48k);
           while rnd_buf.len() >= 480 {
             let frame: Vec<f32> = rnd_buf.drain(..480).collect();
             if let Err(e) = apm.process_render_f32(&[&frame], &mut [&mut rnd_sink[..]]) {
@@ -745,7 +749,7 @@ fn spawn_audio_processor(
                     apm = AudioProcessing::builder()
                       .config(config)
                       .capture_config(sonora::StreamConfig::new(TARGET_RATE, 1))
-                      .render_config(sonora::StreamConfig::new(out_rate, 1))
+                      .render_config(sonora::StreamConfig::new(TARGET_RATE, 1))
                       .build();
 
                     clean.copy_from_slice(&frame);   // raw > silence
