@@ -106,12 +106,13 @@ impl Default for Model {
 
 impl Model {
   fn persist(&self) {
-    VoiceSettings {
-      gate_threshold: self.gate_threshold,
-      input_device: self.input_device.clone(),
-      output_device: self.output_device.clone(),
-    }
-    .save();
+    // Load-modify-save so we only touch the fields this screen owns and leave
+    // others (e.g. the in-call mixer's per-user volumes) intact.
+    let mut settings = VoiceSettings::load();
+    settings.gate_threshold = self.gate_threshold;
+    settings.input_device = self.input_device.clone();
+    settings.output_device = self.output_device.clone();
+    settings.save();
   }
 }
 

@@ -2,6 +2,7 @@ use crate::audio_processing::{call_handler::VoiceHandle, cues::AudioCues};
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use crate::screens::settings::Model as SettingsModel;
+use crate::voice_settings::UserAudioPref;
 use chat_shared::domain::stream::{DisplayVoiceUser, User};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -76,6 +77,11 @@ pub struct Model {
   pub voice: Option<VoiceCall>,
   pub active_server_id: Option<Uuid>,
   pub room_presence: HashMap<Uuid, Vec<DisplayVoiceUser>>,
+  // Per-remote-user playback levels set from the in-call right-click mixer,
+  // keyed by user id. Mirrors the persisted `VoiceSettings::per_user_volumes`:
+  // the UI reads it to render each slider/mute state and rewrites it (and the
+  // file) on change, while the live gain is pushed to the voice actor.
+  pub per_user_audio: HashMap<Uuid, UserAudioPref>,
   pub audio_cues: Option<AudioCues>,
   // the chat model kept alive while the settings screen is showing, so returning
   // restores it instantly instead of rebuilding + re-fetching everything. It also
@@ -99,6 +105,7 @@ impl Default for Model {
       voice: None,
       active_server_id: None,
       room_presence: HashMap::new(),
+      per_user_audio: crate::voice_settings::VoiceSettings::load().per_user_volumes,
       stashed_chat: None,
       // Bind cues to the saved output device so they share the device the call
       // uses. If this fails (e.g. no working device at startup) we leave it None

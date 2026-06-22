@@ -32,6 +32,7 @@ mod client;
 mod model;
 mod screens;
 mod types;
+mod widgets;
 
 const SPACE_GRID: u16 = 8;
 
@@ -230,6 +231,17 @@ pub enum Message {
   LoggedIn(User),
 }
 
+// Mirror the in-memory per-user mixer levels into the persisted voice settings.
+// Load-modify-save so we only overwrite this one field and keep the gate/device
+// choices the settings screen owns. Failure is logged (inside save), never fatal.
+fn persist_user_audio(
+  per_user_audio: &std::collections::HashMap<Uuid, crate::voice_settings::UserAudioPref>,
+) {
+  let mut settings = crate::voice_settings::VoiceSettings::load();
+  settings.per_user_volumes = per_user_audio.clone();
+  settings.save();
+}
+
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
   match message {
     Message::Settings(msg) => match msg {
@@ -373,6 +385,34 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
                   Cue::Undeafen
                 });
               };
+            }
+            Task::none()
+          }
+          chat::Message::SetUserVolume { user_id, volume } => {
+            // live update while dragging: record the new level (clamped to the
+            // slider's 0..=200% range) and push the gain to the call so the user
+            // hears the change immediately. Persistence happens on release.
+            let pref = model.per_user_audio.entry(user_id).or_default();
+            pref.volume = volume.clamp(0.0, 2.0);
+            let gain = pref.effective_gain();
+            if let Some(voice) = &model.voice {
+              voice.handle.set_user_volume(user_id, gain);
+            }
+            Task::none()
+          }
+          chat::Message::UserVolumeReleased { .. } => {
+            // drag finished — persist the whole map once.
+            persist_user_audio(&model.per_user_audio);
+            Task::none()
+          }
+          chat::Message::ToggleUserMute { user_id } => {
+            // flip mute while keeping the remembered volume for un-mute.
+            let pref = model.per_user_audio.entry(user_id).or_default();
+            pref.muted = !pref.muted;
+            let gain = pref.effective_gain();
+            persist_user_audio(&model.per_user_audio);
+            if let Some(voice) = &model.voice {
+              voice.handle.set_user_volume(user_id, gain);
             }
             Task::none()
           }

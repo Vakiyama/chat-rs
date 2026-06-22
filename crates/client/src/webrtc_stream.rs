@@ -747,13 +747,13 @@ fn spawn_audio_processor(
                       echo_canceller: Some(EchoCanceller::default()),
                       noise_suppression: Some(NoiseSuppression::default()),
                       // adaptive digital AGC: normalizes quiet vs. loud mics toward a target
-      // loudness post-AEC/NS. The noise cap (max_output_noise_level_dbfs, -50
-      // default) keeps it from pumping the silent-room floor up to speech level.
-      gain_controller2: Some(GainController2 {
-        input_volume_controller: false,
-        adaptive_digital: Some(AdaptiveDigital::default()),
-        fixed_digital: FixedDigital::default(),
-      }),
+                      // loudness post-AEC/NS. The noise cap (max_output_noise_level_dbfs, -50
+                      // default) keeps it from pumping the silent-room floor up to speech level.
+                      gain_controller2: Some(GainController2 {
+                        input_volume_controller: false,
+                        adaptive_digital: Some(AdaptiveDigital::default()),
+                        fixed_digital: FixedDigital::default(),
+                      }),
                       ..Default::default()
                     };
                     apm = AudioProcessing::builder()
