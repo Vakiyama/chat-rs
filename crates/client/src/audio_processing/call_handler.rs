@@ -3,8 +3,9 @@ use crate::webrtc_stream::{
   CallSetup, CaptureEvent, WebRTCConnection, build_mic, build_speaker, setup_client,
 };
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -12,6 +13,8 @@ use uuid::Uuid;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::stats::{StatsReport, StatsReportType};
+
+pub type UserGainMap = Arc<RwLock<HashMap<Uuid, f32>>>;
 
 pub enum VoiceCommand {
   Join { voice_channel_id: Uuid, epoch: u32 },
@@ -23,6 +26,7 @@ pub enum VoiceCommand {
   SetNoiseGate(f32),
   SetInputDevice(Option<String>),
   SetOutputDevice(Option<String>),
+  SetUserVolume { user_id: Uuid, gain: f32 },
 }
 
 pub struct VoiceHandle {
@@ -62,6 +66,11 @@ impl VoiceHandle {
   }
   pub fn set_output_device(&self, name: Option<String>) {
     let _ = self.sender.send(VoiceCommand::SetOutputDevice(name));
+  }
+  pub fn set_user_volume(&self, user_id: Uuid, gain: f32) {
+    let _ = self
+      .sender
+      .send(VoiceCommand::SetUserVolume { user_id, gain });
   }
 }
 
@@ -216,7 +225,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
   let room_id = Arc::new(Mutex::new(None));
   let cloned_room_id = room_id.clone();
 
-  // mute/deafen persist across calls (like Discord); the audio pipeline reads these
+  // mute/deafen persist across calls; the audio pipeline reads these
   // atomics live, and we re-announce them to the server on each join.
   let muted = Arc::new(AtomicBool::new(false));
   let deafened = Arc::new(AtomicBool::new(false));
@@ -227,6 +236,14 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
   // effect the moment voice connects, before the settings screen is ever opened.
   let settings = crate::voice_settings::VoiceSettings::load();
   let gate_threshold = Arc::new(AtomicU32::new(settings.gate_threshold.to_bits()));
+
+  let per_user_gain: UserGainMap = Arc::new(RwLock::new(
+    settings
+      .per_user_volumes
+      .iter()
+      .map(|(id, pref)| (*id, pref.effective_gain()))
+      .collect(),
+  ));
 
   tokio::spawn(async move {
     let mut call: Option<ActiveCall> = None; // None = not in a call
@@ -280,6 +297,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               let started = Arc::new(Mutex::new(HashSet::new()));
               let started_for_track = started.clone();
               let mixer_for_track = mixer.clone();
+              let gain_for_track = per_user_gain.clone();
               // Single on_track handler that reads ALL inbound audio tracks
               // (both initial-answer tracks and renegotiated tracks) through the
               // same reader. We spawn read_track rather than awaiting it: the
@@ -291,8 +309,9 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               pc.on_track(Box::new(move |track, _, _| {
                 let started = started_for_track.clone();
                 let mixer = mixer_for_track.clone();
+                let gain = gain_for_track.clone();
                 Box::pin(async move {
-                  tokio::spawn(read_track(track, mixer, out_rate, started));
+                  tokio::spawn(read_track(track, mixer, out_rate, started, gain));
                 })
               }));
               conn.send(ClientVoice::Offer {
@@ -376,6 +395,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             &active.mixer,
             active.started.clone(),
             active.out_rate,
+            per_user_gain.clone(),
           )
           .await
           {
@@ -409,6 +429,14 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           // the audio processor reads this atomic live, so this takes effect
           // mid-call without touching the pipeline.
           gate_threshold.store(threshold.to_bits(), Ordering::Relaxed);
+        }
+        VoiceCommand::SetUserVolume { user_id, gain } => {
+          // track readers read this map live, so a new level takes effect on the
+          // very next decoded frame from that user — no rejoin, no pipeline touch.
+          per_user_gain
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(user_id, gain);
         }
         VoiceCommand::SetInputDevice(name) => {
           // remember for the next join, and hot-swap the mic if a call is live.
@@ -522,6 +550,7 @@ async fn apply_signal(
   mixer: &crate::audio_processing::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   out_rate: u32,
+  per_user_gain: UserGainMap,
 ) -> anyhow::Result<()> {
   match msg {
     ServerVoice::Answer { description, .. } => {
@@ -537,7 +566,13 @@ async fn apply_signal(
           let tracks = receiver.tracks().await;
           for track in tracks {
             if track.codec().capability.mime_type.starts_with("audio/") {
-              tokio::spawn(read_track(track, mixer.clone(), out_rate, started.clone()));
+              tokio::spawn(read_track(
+                track,
+                mixer.clone(),
+                out_rate,
+                started.clone(),
+                per_user_gain.clone(),
+              ));
             }
           }
         }
@@ -565,13 +600,30 @@ async fn apply_signal(
   Ok(())
 }
 
+/// Recover the publisher's user id from a relay track id of the form
+/// `audio-{user_id}-{random}`. `user_id` is a hyphenated UUID, so we can't just
+/// split on `-`; strip the `audio-` prefix and parse the first 36 chars as a
+/// UUID. Returns `None` for any other shape (treated as unity gain by callers).
+fn parse_track_user_id(track_id: &str) -> Option<Uuid> {
+  let rest = track_id.strip_prefix("audio-")?;
+  Uuid::parse_str(rest.get(..36)?).ok()
+}
+
 async fn read_track(
   track: Arc<webrtc::track::track_remote::TrackRemote>,
   mixer: crate::audio_processing::mixer::Mixer,
   out_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
+  per_user_gain: UserGainMap,
 ) {
   let id = track.id().to_string();
+
+  // The server names each relay track `audio-{publisher_user_id}-{random}` (see
+  // server webrtc relay setup), so the publisher's user id is recoverable
+  // straight from the track id — that's how a decoded stream maps to a person
+  // for per-user volume. Parse leniently: on any unexpected shape we leave this
+  // `None` and play at unity gain rather than risk silencing a real participant.
+  let user_id = parse_track_user_id(&id);
   // Single source of dedup. track.id() is stable from SDP parse time, unlike
   // ssrc() which can be 0 until the first packet. If another reader already owns
   // this id, bail. The async Mutex makes this check-and-insert atomic across the
@@ -620,6 +672,22 @@ async fn read_track(
     |out_rs: &mut crate::audio_processing::resampler::Resampler, s: u32, samples: &[f32]| {
       let mut at_dev = Vec::new();
       let _ = out_rs.push(samples, &mut at_dev);
+      // Apply this user's playback gain. Read live so a slider drag mid-call
+      // affects the next frame; skip the work entirely at unity (the common case).
+      let gain = user_id
+        .and_then(|id| {
+          per_user_gain
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .copied()
+        })
+        .unwrap_or(1.0);
+      if gain != 1.0 {
+        for sample in &mut at_dev {
+          *sample *= gain;
+        }
+      }
       mixer.push(s, &at_dev);
     };
 
@@ -683,5 +751,29 @@ async fn read_track(
 
   if let Some(s) = src {
     mixer.remove(s);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::parse_track_user_id;
+  use uuid::Uuid;
+
+  #[test]
+  fn parses_user_id_from_relay_track_id() {
+    let user = Uuid::new_v4();
+    // matches the server's relay naming: `audio-{user_id}-{random}`.
+    let track_id = format!("audio-{user}-{}", Uuid::new_v4());
+    assert_eq!(parse_track_user_id(&track_id), Some(user));
+  }
+
+  #[test]
+  fn returns_none_for_unexpected_shapes() {
+    // unity-gain fallbacks: anything not shaped like a relay id must not parse
+    // (and so must never silence a participant).
+    assert_eq!(parse_track_user_id("audio-not-a-uuid-tail"), None);
+    assert_eq!(parse_track_user_id("video-track-1"), None);
+    assert_eq!(parse_track_user_id("audio-"), None);
+    assert_eq!(parse_track_user_id(""), None);
   }
 }

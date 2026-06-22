@@ -1,6 +1,7 @@
 use crate::colors::{AccentsExt, NeutralsExt};
 use crate::screens::chat::View::NoneSelected;
 use crate::types::async_data::AsyncData;
+use crate::widgets::context_menu::ContextMenu;
 use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
 use chat_shared::convert::{IntoProto, TryIntoDomain};
@@ -13,7 +14,9 @@ use iced::Alignment::Center;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, rule, scrollable, space, stack, text, text_input};
+use iced::widget::{
+  button, column, operation, rule, scrollable, slider, space, stack, text, text_input,
+};
 use iced::widget::{container, row};
 use iced::{Border, Color, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
@@ -101,6 +104,14 @@ pub enum Message {
   // voice handle). Not handled inside chat::update.
   ToggleMute,
   ToggleDeafen,
+  // Per-user mixer, set from a participant's right-click menu. Both are
+  // intercepted by the top-level update (they touch persisted prefs + the voice
+  // handle). `volume` is a linear 0.0..=2.0 multiplier. Not handled in chat::update.
+  SetUserVolume { user_id: Uuid, volume: f32 },
+  // Slider released: persist the level once, instead of writing the file on
+  // every drag step (mirrors the noise-gate slider in the settings screen).
+  UserVolumeReleased { user_id: Uuid },
+  ToggleUserMute { user_id: Uuid },
   GoToSettings,
   None,
 }
@@ -379,6 +390,9 @@ pub fn update(
     | Message::ActiveServerChanged { .. }
     | Message::ToggleMute
     | Message::ToggleDeafen
+    | Message::SetUserVolume { .. }
+    | Message::UserVolumeReleased { .. }
+    | Message::ToggleUserMute { .. }
     | Message::GoToSettings => Task::none(),
   }
 }
@@ -571,137 +585,216 @@ fn view_channels<'a>(
         }
       };
 
-      button(column![
-        row![
-          icon(GoogleMaterialSymbols::Mic)
-            .size(20)
-            .style(selected_icon_font_style),
-          container(
-            text(&voice_channel.name)
-              .wrapping(text::Wrapping::None)
-              .font(Font {
-                weight: Weight::Semibold,
-                ..SOURCE_SANS_REGULAR
-              })
-              .style(selected_font_style)
-          )
-        ]
-        .spacing((SPACE_GRID) as u32)
-        .align_y(Center)
-        .clip(true),
-        column::Column::with_children({
-          main_model
-            .room_presence
-            .get(&voice_channel.id)
-            .map(|users| users.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .map(|presence| -> (Uuid, Element<'a, Message>) {
-              (
-                presence.user.id,
-                row![
-                  row![
-                    container(
-                      text(presence.user.name.get(0..1).unwrap_or("U"))
-                        .font(Font {
-                          weight: Weight::Semibold,
-                          ..SOURCE_SANS_REGULAR
-                        })
-                        .size(14)
-                    )
-                    .style(|theme: &Theme| {
-                      container::Style {
-                        text_color: Some(theme.extended_palette().background.weakest.color),
-                        background: Some(theme.accents().rosewater.into()),
-                        border: Border {
-                          color: if !presence.speaking {
-                            theme.accents().rosewater
-                          } else {
-                            theme.extended_palette().success.strong.color
-                          },
-                          width: 3.0,
-                          radius: border::radius(999),
-                        },
-                        ..container::Style::default()
-                      }
-                    })
-                    .center(Length::Fill)
-                    .width(24)
-                    .height(24),
-                    text(presence.user.name.clone())
-                      .font(Font {
-                        weight: Weight::Semibold,
-                        ..SOURCE_SANS_REGULAR
-                      })
-                      .size(14)
-                  ]
-                  .align_y(Center)
-                  .spacing(SPACE_GRID as u32),
-                  iced::widget::space::horizontal(),
-                  row![
-                    if presence.muted {
-                      let el: Element<'a, Message> = icon(GoogleMaterialSymbols::MicOff).into();
-                      el
-                    } else {
-                      let el: Element<'a, Message> = iced::widget::space().width(16).into();
-                      el
-                    },
-                    if presence.deafened {
-                      let el: Element<'a, Message> = icon(GoogleMaterialSymbols::HeadsetOff).into();
-                      el
-                    } else {
-                      let el: Element<'a, Message> = iced::widget::space().width(16).into();
-                      el
-                    }
-                  ]
-                  .spacing(SPACE_GRID as u32)
-                  .align_y(Center)
-                ]
-                .align_y(Center)
-                .padding([0, SPACE_GRID * 3])
-                .into(),
-              )
+      let header_row = row![
+        icon(GoogleMaterialSymbols::Mic)
+          .size(20)
+          .style(selected_icon_font_style),
+        container(
+          text(&voice_channel.name)
+            .wrapping(text::Wrapping::None)
+            .font(Font {
+              weight: Weight::Semibold,
+              ..SOURCE_SANS_REGULAR
             })
-        })
-        .spacing(SPACE_GRID as u32)
-        .padding([
-          if main_model
-            .room_presence
-            .get(&voice_channel.id)
-            .is_some_and(|presence| !presence.is_empty())
-          {
-            SPACE_GRID / 2
-          } else {
-            0
-          },
-          0
-        ]),
-      ])
-      .style(|theme: &Theme, status| -> button::Style {
-        let palette = theme.extended_palette();
-        let background = match status {
-          button::Status::Active => None,
-          button::Status::Hovered => Some(palette.background.stronger.color.into()),
-          button::Status::Pressed => Some(palette.background.strong.color.into()),
-          button::Status::Disabled => None,
-        };
+            .style(selected_font_style)
+        )
+      ]
+      .spacing((SPACE_GRID) as u32)
+      .align_y(Center)
+      .clip(true);
 
-        button::Style {
-          background,
-          text_color: palette.background.base.text,
-          border: Border {
-            radius: (SPACE_GRID as u32 / 2).into(),
-            ..Default::default()
-          },
-          ..button::Style::default()
-        }
+      // The header is the join affordance — a button only while we're NOT in this
+      // call. Once joined it becomes a plain row, so clicking it can't trigger a
+      // redundant rejoin, and only the header (not the whole call card with its
+      // participant list) reacts to hover.
+      let header: Element<'a, Message> = if is_selected {
+        container(header_row)
+          // .padding(SPACE_GRID / 2)
+          .width(Length::Fill)
+          .into()
+      } else {
+        button(header_row)
+          .style(|theme: &Theme, status| -> button::Style {
+            let palette = theme.extended_palette();
+            let background = match status {
+              button::Status::Hovered => Some(palette.background.stronger.color.into()),
+              button::Status::Pressed => Some(palette.background.strong.color.into()),
+              _ => None,
+            };
+            button::Style {
+              background,
+              text_color: palette.background.base.text,
+              border: Border {
+                radius: (SPACE_GRID as u32 / 2).into(),
+                ..Default::default()
+              },
+              ..button::Style::default()
+            }
+          })
+          .width(Length::Fill)
+          .on_press(Message::JoinVoice {
+            voice_channel_id: voice_channel.id,
+          })
+          .into()
+      };
+
+      let participants = column::Column::with_children({
+        main_model
+          .room_presence
+          .get(&voice_channel.id)
+          .map(|users| users.as_slice())
+          .unwrap_or(&[])
+          .iter()
+          .map(|presence| -> (Uuid, Element<'a, Message>) {
+            let muted_by_me = main_model
+              .per_user_audio
+              .get(&presence.user.id)
+              .is_some_and(|p| p.muted);
+            let speaking_ring = presence.speaking && !muted_by_me;
+            let row_el: Element<'a, Message> = row![
+              row![
+                container(
+                  text(presence.user.name.get(0..1).unwrap_or("U").to_uppercase())
+                    .font(Font {
+                      weight: Weight::Semibold,
+                      ..SOURCE_SANS_REGULAR
+                    })
+                    .size(14)
+                )
+                .style(move |theme: &Theme| {
+                  container::Style {
+                    text_color: Some(theme.extended_palette().background.weakest.color),
+                    background: Some(theme.accents().rosewater.into()),
+                    border: Border {
+                      color: if !speaking_ring {
+                        theme.accents().rosewater
+                      } else {
+                        theme.extended_palette().success.strong.color
+                      },
+                      width: 3.0,
+                      radius: border::radius(999),
+                    },
+                    ..container::Style::default()
+                  }
+                })
+                .center(Length::Fill)
+                .width(24)
+                .height(24),
+                text(presence.user.name.clone())
+                  .font(Font {
+                    weight: Weight::Semibold,
+                    ..SOURCE_SANS_REGULAR
+                  })
+                  .size(14)
+              ]
+              .align_y(Center)
+              .spacing(SPACE_GRID as u32),
+              iced::widget::space::horizontal(),
+              row![
+                if muted_by_me {
+                  let el: Element<'a, Message> = icon(GoogleMaterialSymbols::MicOff)
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                      color: Some(theme.accents().red),
+                    })
+                    .into();
+                  el
+                } else {
+                  let el: Element<'a, Message> = iced::widget::space().width(16).into();
+                  el
+                },
+                if presence.muted {
+                  let el: Element<'a, Message> = icon(GoogleMaterialSymbols::MicOff).into();
+                  el
+                } else {
+                  let el: Element<'a, Message> = iced::widget::space().width(16).into();
+                  el
+                },
+                if presence.deafened {
+                  let el: Element<'a, Message> = icon(GoogleMaterialSymbols::HeadsetOff).into();
+                  el
+                } else {
+                  let el: Element<'a, Message> = iced::widget::space().width(16).into();
+                  el
+                }
+              ]
+              .spacing(SPACE_GRID as u32)
+              .align_y(Center)
+            ]
+            .align_y(Center)
+            .padding([0, SPACE_GRID * 3])
+            .into();
+
+            // Right-click a *remote* participant to open their personal volume
+            // mixer (no menu on our own row — there's nothing to adjust). The
+            // current level comes from the persisted per-user prefs, defaulting
+            // to unity when we've never touched this user.
+            let me_id = match &main_model.user {
+              crate::model::Auth::LoggedIn(u) => Some(u.id),
+              _ => None,
+            };
+            let user_id = presence.user.id;
+            let element: Element<'a, Message> = if Some(user_id) == me_id {
+              // our own row: nothing to adjust. Plain container, padded to line
+              // up with the interactive rows below.
+              container(row_el)
+                .padding(SPACE_GRID / 4)
+                .width(Length::Fill)
+                .into()
+            } else {
+              let pref = main_model
+                .per_user_audio
+                .get(&user_id)
+                .copied()
+                .unwrap_or_default();
+              let name = presence.user.name.clone();
+              // wrap each peer in a button purely for the per-row hover
+              // highlight, signalling "this row is interactive" so the
+              // right-click mixer is discoverable. Left-press is a no-op; the
+              // mixer opens on right-click via the ContextMenu.
+              let hover_row = button(row_el)
+                .padding(SPACE_GRID / 4)
+                .width(Length::Fill)
+                .on_press(Message::None)
+                .style(|theme: &Theme, status| -> button::Style {
+                  let palette = theme.extended_palette();
+                  button::Style {
+                    background: match status {
+                      button::Status::Hovered | button::Status::Pressed => {
+                        Some(palette.background.weak.color.into())
+                      }
+                      _ => None,
+                    },
+                    text_color: palette.background.base.text,
+                    border: Border {
+                      radius: (SPACE_GRID as u32 / 2).into(),
+                      ..Default::default()
+                    },
+                    ..button::Style::default()
+                  }
+                });
+              ContextMenu::new(hover_row, move || {
+                user_mixer_overlay(user_id, name.clone(), pref)
+              })
+              .into()
+            };
+            (user_id, element)
+          })
       })
-      .width(Length::Fill)
-      .on_press(Message::JoinVoice {
-        voice_channel_id: voice_channel.id,
-      })
-      // .style(container::primary)
-      .into()
+      .spacing((SPACE_GRID as u32) / 2)
+      .padding([
+        if main_model
+          .room_presence
+          .get(&voice_channel.id)
+          .is_some_and(|presence| !presence.is_empty())
+        {
+          SPACE_GRID / 2
+        } else {
+          0
+        },
+        0,
+      ]);
+
+      column![header, participants].width(Length::Fill).into()
     })
     .collect();
 
@@ -828,7 +921,7 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
   container(
     row![
       container(
-        text(username.get(0..1).unwrap_or("U"))
+        text(username.get(0..1).unwrap_or("U").to_uppercase())
           .font(Font {
             weight: Weight::Bold,
             ..SOURCE_SANS_REGULAR
@@ -1465,4 +1558,82 @@ fn voice_toggle_button<'a>(
       }
     })
     .into()
+}
+
+/// The right-click mixer popup for one remote participant: a name header, a
+/// 0–200% volume slider, and a mute toggle. The displayed values come from the
+/// caller's persisted pref; each interaction emits a message the top-level
+/// update persists and forwards to the voice actor.
+fn user_mixer_overlay<'a>(
+  user_id: Uuid,
+  name: String,
+  pref: crate::voice_settings::UserAudioPref,
+) -> Element<'a, Message> {
+  let percent = (pref.volume * 100.0).round() as u32;
+
+  let volume_slider = slider(0.0..=2.0, pref.volume, move |volume| {
+    Message::SetUserVolume { user_id, volume }
+  })
+  .step(0.01)
+  .on_release(Message::UserVolumeReleased { user_id });
+
+  let mute_label = if pref.muted { "Unmute" } else { "Mute" };
+  let mute_button = button(text(mute_label).size(14))
+    .on_press(Message::ToggleUserMute { user_id })
+    .width(Length::Fill)
+    .style(move |theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
+        _ => palette.background.weakest.color,
+      };
+      button::Style {
+        background: Some(background.into()),
+        text_color: if pref.muted {
+          palette.warning.base.color
+        } else {
+          palette.background.base.text
+        },
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    });
+
+  container(
+    column![
+      text(name)
+        .font(Font {
+          weight: Weight::Semibold,
+          ..SOURCE_SANS_REGULAR
+        })
+        .size(14),
+      row![
+        text("Volume").size(12),
+        iced::widget::space::horizontal(),
+        text(format!("{percent}%")).size(12),
+      ]
+      .align_y(Center),
+      volume_slider,
+      mute_button,
+    ]
+    .spacing(SPACE_GRID as u32)
+    .width(180),
+  )
+  .padding(SPACE_GRID * 2)
+  .style(|theme: &Theme| {
+    let palette = theme.extended_palette();
+    container::Style {
+      background: Some(palette.background.weak.color.into()),
+      border: Border {
+        color: palette.background.strong.color,
+        width: 1.0,
+        radius: border::radius(SPACE_GRID as u32),
+      },
+      ..container::Style::default()
+    }
+  })
+  .into()
 }
