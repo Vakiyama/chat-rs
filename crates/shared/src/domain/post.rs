@@ -7,6 +7,7 @@ pub struct Post {
   pub author_name: String,
   pub content: String,
   pub created_at: chrono::DateTime<Utc>,
+  pub text_channel_id: Uuid,
 }
 
 #[derive(Clone, Debug)]

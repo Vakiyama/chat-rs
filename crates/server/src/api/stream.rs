@@ -440,6 +440,7 @@ impl StreamService for StreamServer {
               author_name: user.username.clone(),
               content: content.clone(),
               created_at: chrono::Utc::now(),
+              text_channel_id,
             });
 
             let channel = entities::channel::Entity::find()

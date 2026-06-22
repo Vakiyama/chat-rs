@@ -41,6 +41,7 @@ impl IntoProto<PostProto> for Post {
       author_name: self.author_name,
       content: self.content,
       created_at: Some(created_at),
+      text_channel_id: self.text_channel_id.into(),
     }
   }
 }
@@ -124,6 +125,7 @@ impl TryFromProto<PostProto> for Post {
       author_name: proto.author_name,
       content: proto.content,
       created_at,
+      text_channel_id: parse_id(proto.text_channel_id)?,
     })
   }
 }

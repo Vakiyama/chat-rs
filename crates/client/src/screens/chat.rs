@@ -270,7 +270,7 @@ pub fn update(
         // id, so clear by author name (best-effort; the timeout covers the rest).
         let author_name = post.author_name.clone();
 
-        let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&text_channel.id) else {
+        let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&post.text_channel_id) else {
           return Task::none();
         };
 
