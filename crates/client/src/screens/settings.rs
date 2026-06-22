@@ -309,6 +309,16 @@ fn view_noise_gate<'a>(model: &'a Model) -> Element<'a, Message> {
     slider(0.0..=1.0, display, |d| Message::NoiseGateChanged(
       display_to_threshold(d)
     ))
+    .style(|theme, status| slider::Style {
+      rail: slider::Rail {
+        backgrounds: (
+          slider::default(theme, status).rail.backgrounds.0,
+          theme.extended_palette().background.strongest.color.into()
+        ),
+        ..slider::default(theme, status).rail
+      },
+      ..slider::default(theme, status)
+    })
     .step(0.01f32)
     .on_release(Message::NoiseGateReleased),
     // live mic meter on the same scale. Green when the gate would be open
