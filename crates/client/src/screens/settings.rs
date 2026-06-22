@@ -19,17 +19,34 @@ use crate::{
 };
 
 // The gate threshold is a linear RMS value, but voice levels bunch up near the
-// bottom of 0..1, so the slider works in a perceptual "display" space and we
-// square it for the stored threshold. Display 1.0 → threshold 1.0 (cuts all
-// audio); display 0 → 0 (gate off). The level meter is shown on the same curve.
+// bottom of 0..1 — speech RMS typically lives around 0.01..0.05 — so an
+// amplitude curve (even squared) leaves the slider and meter pinned to the
+// bottom. Instead the slider works in a decibel "display" space, the way audio
+// meters do: display maps linearly across GATE_FLOOR_DB..0 dB, which spreads
+// the quiet, useful range over the whole 0..1 travel. Display 1.0 → 0 dB
+// (threshold 1.0, cuts all audio); display 0 → 0 (gate off).
+const GATE_FLOOR_DB: f32 = -60.0;
+
 fn display_to_threshold(display: f32) -> f32 {
-  display * display
+  if display <= 0.0 {
+    return 0.0; // gate off
+  }
+  let db = GATE_FLOOR_DB * (1.0 - display.min(1.0));
+  10f32.powf(db / 20.0)
 }
 fn threshold_to_display(threshold: f32) -> f32 {
-  threshold.max(0.0).sqrt()
+  if threshold <= 0.0 {
+    return 0.0;
+  }
+  let db = 20.0 * threshold.log10();
+  (1.0 - db / GATE_FLOOR_DB).clamp(0.0, 1.0)
 }
 fn level_to_display(rms: f32) -> f32 {
-  rms.max(0.0).sqrt().min(1.0)
+  if rms <= 0.0 {
+    return 0.0;
+  }
+  let db = 20.0 * rms.log10();
+  (1.0 - db / GATE_FLOOR_DB).clamp(0.0, 1.0)
 }
 
 #[derive(Clone)]

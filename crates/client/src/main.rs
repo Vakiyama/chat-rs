@@ -167,7 +167,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
           },
         ));
         subs.push(
-          iced::time::every(Duration::from_millis(50))
+          iced::time::every(Duration::from_millis(20))
             .map(|_| Message::Settings(settings::Message::Tick)),
         );
       }

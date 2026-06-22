@@ -22,7 +22,7 @@ pub struct VoiceSettings {
 impl Default for VoiceSettings {
   fn default() -> Self {
     Self {
-      gate_threshold: 0.0,
+      gate_threshold: 0.008, // 30%
       input_device: None,
       output_device: None,
     }

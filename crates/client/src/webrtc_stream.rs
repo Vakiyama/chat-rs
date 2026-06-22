@@ -10,7 +10,9 @@ use futures::channel::mpsc;
 use futures::stream::StreamExt;
 use iced::futures;
 use iced::task::{Never, Sipper, sipper};
-use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
+use sonora::config::{
+  AdaptiveDigital, EchoCanceller, FixedDigital, GainController2, NoiseSuppression,
+};
 use sonora::{AudioProcessing, Config};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -555,7 +557,14 @@ fn spawn_audio_processor(
     let config = Config {
       echo_canceller: Some(EchoCanceller::default()),
       noise_suppression: Some(NoiseSuppression::default()),
-      gain_controller2: Some(GainController2::default()),
+      // adaptive digital AGC: normalizes quiet vs. loud mics toward a target
+      // loudness post-AEC/NS. The noise cap (max_output_noise_level_dbfs, -50
+      // default) keeps it from pumping the silent-room floor up to speech level.
+      gain_controller2: Some(GainController2 {
+        input_volume_controller: false,
+        adaptive_digital: Some(AdaptiveDigital::default()),
+        fixed_digital: FixedDigital::default(),
+      }),
       ..Default::default()
     };
     let mut apm = AudioProcessing::builder()
@@ -645,7 +654,14 @@ fn spawn_audio_processor(
                     let config = Config {
                       echo_canceller: Some(EchoCanceller::default()),
                       noise_suppression: Some(NoiseSuppression::default()),
-                      gain_controller2: Some(GainController2::default()),
+                      // adaptive digital AGC: normalizes quiet vs. loud mics toward a target
+      // loudness post-AEC/NS. The noise cap (max_output_noise_level_dbfs, -50
+      // default) keeps it from pumping the silent-room floor up to speech level.
+      gain_controller2: Some(GainController2 {
+        input_volume_controller: false,
+        adaptive_digital: Some(AdaptiveDigital::default()),
+        fixed_digital: FixedDigital::default(),
+      }),
                       ..Default::default()
                     };
                     apm = AudioProcessing::builder()
