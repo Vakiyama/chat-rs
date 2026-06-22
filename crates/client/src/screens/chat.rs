@@ -37,7 +37,7 @@ use uuid::Uuid;
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
-  posts: HashMap<Uuid, AsyncData<IndexMap<Uuid, RenderedPost>, tonic::Status>>,
+  posts: HashMap<Uuid, Posts>,
   // multi-line editor buffer (Shift+Enter inserts a newline; Enter submits).
   input: text_editor::Content,
   // peers currently typing, keyed channel -> (user id -> entry). The IndexMap
@@ -67,9 +67,13 @@ enum View {
 #[derive(Clone)]
 struct TextChannel {
   id: Uuid,
+  name: String,
+}
+
+struct Posts {
+  posts: AsyncData<IndexMap<Uuid, RenderedPost>, tonic::Status>,
   next_timestamp: Option<chrono::DateTime<Utc>>,
   loading_more: bool,
-  name: String,
 }
 
 #[derive(Clone)]
@@ -203,7 +207,11 @@ pub fn update(
         return Task::none();
       };
 
-      let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&text_channel.id) else {
+      let Some(Posts {
+        posts: AsyncData::Done(Ok(posts)),
+        ..
+      }) = model.posts.get_mut(&text_channel.id)
+      else {
         return Task::none();
       };
 
@@ -270,7 +278,11 @@ pub fn update(
         // id, so clear by author name (best-effort; the timeout covers the rest).
         let author_name = post.author_name.clone();
 
-        let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&post.text_channel_id) else {
+        let Some(Posts {
+          posts: AsyncData::Done(Ok(posts)),
+          ..
+        }) = model.posts.get_mut(&text_channel.id)
+        else {
           return Task::none();
         };
 
@@ -350,8 +362,6 @@ pub fn update(
     } => {
       model.view = View::TextChannel(TextChannel {
         id: text_channel_id,
-        loading_more: false,
-        next_timestamp: None,
         name,
       });
 
@@ -430,17 +440,19 @@ pub fn update(
       };
 
       if let Ok(ref res) = res {
-        text_channel.next_timestamp = res.next_timestamp;
-
         model.posts.insert(
           res.text_channel_id,
-          AsyncData::Done(Ok(IndexMap::from_iter(
-            res
-              .posts
-              .clone()
-              .into_iter()
-              .map(|post| (post.id, RenderedPost::Sent(post))),
-          ))),
+          Posts {
+            posts: AsyncData::Done(Ok(IndexMap::from_iter(
+              res
+                .posts
+                .clone()
+                .into_iter()
+                .map(|post| (post.id, RenderedPost::Sent(post))),
+            ))),
+            next_timestamp: res.next_timestamp,
+            loading_more: false,
+          },
         );
       };
 
@@ -448,20 +460,21 @@ pub fn update(
     }
     Message::None => Task::none(),
     Message::ApiReturnedMorePosts(res) => {
-      let View::TextChannel(ref mut text_channel) = model.view else {
-        return Task::none();
-      };
-
-      text_channel.loading_more = false; // release the prefetch guard, success or not
-
       let Ok(res) = res else {
         return Task::none(); // (or stash the error somewhere)
       };
 
-      text_channel.next_timestamp = res.next_timestamp;
-
-      if let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&res.text_channel_id) {
+      if let Some(Posts {
+        posts: AsyncData::Done(Ok(posts)),
+        next_timestamp,
+        loading_more,
+        ..
+      }) = model.posts.get_mut(&res.text_channel_id)
+      {
         let existing = std::mem::take(posts);
+
+        *loading_more = false; // release the prefetch guard, success or not
+        *next_timestamp = res.next_timestamp;
 
         let mut combined = IndexMap::with_capacity(existing.len() + res.posts.len());
         combined.extend(
@@ -482,12 +495,16 @@ pub fn update(
         return Task::none();
       };
 
-      if text_channel.loading_more || text_channel.next_timestamp.is_none() {
+      let Some(posts) = model.posts.get(&text_channel.id) else {
+        return Task::none();
+      };
+
+      if posts.loading_more || posts.next_timestamp.is_none() {
         return Task::none();
       };
 
       let text_channel_id = text_channel.id;
-      let starting_before_timestamp = text_channel.next_timestamp;
+      let starting_before_timestamp = posts.next_timestamp;
 
       Task::future(async move {
         let mut client = client::get().await;
@@ -569,7 +586,15 @@ pub fn view<'a>(
   let text_chat: Element<'_, Message> = match &model.view {
     NoneSelected => container(text("No text chat selected!").center().width(Length::Fill)).into(),
     View::TextChannel(text_channel) => match &model.posts.get(&text_channel.id) {
-      Some(AsyncData::NotAsked) | Some(AsyncData::Loading) | None => {
+      Some(Posts {
+        posts: AsyncData::NotAsked,
+        ..
+      })
+      | Some(Posts {
+        posts: AsyncData::Loading,
+        ..
+      })
+      | None => {
         // todo: Spinner here
         container(
           text("Loading posts...")
@@ -579,7 +604,10 @@ pub fn view<'a>(
         )
         .into()
       }
-      Some(AsyncData::Done(Err(status))) => container(
+      Some(Posts {
+        posts: AsyncData::Done(Err(status)),
+        ..
+      }) => container(
         text(format!(
           "An error occurred while loading posts: {}",
           status.code()
@@ -588,7 +616,11 @@ pub fn view<'a>(
         .width(Length::Fill),
       )
       .into(),
-      Some(AsyncData::Done(Ok(posts))) => {
+      Some(Posts {
+        posts: AsyncData::Done(Ok(posts)),
+        loading_more,
+        ..
+      }) => {
         let typing_names: Vec<&str> = model
           .typing
           .get(&text_channel.id)
@@ -598,7 +630,7 @@ pub fn view<'a>(
           &text_channel.name,
           posts,
           &model.input,
-          text_channel.loading_more,
+          *loading_more,
           &text_channel.id,
           typing_names,
         )
