@@ -221,7 +221,7 @@ pub fn view<'a>(model: &'a Model) -> Element<'a, Message> {
     container(view_close_button())
       .width(Length::Fill)
       .align_x(iced::alignment::Horizontal::Right)
-      .padding(SPACE_GRID * 2),
+      .padding(SPACE_GRID * 4),
   ]
   .width(Length::Fill)
   .height(Length::Fill)
@@ -230,15 +230,18 @@ pub fn view<'a>(model: &'a Model) -> Element<'a, Message> {
 
 fn view_close_button<'a>() -> Element<'a, Message> {
   button(
-    icon(GoogleMaterialSymbols::Close)
-      .font(Font {
-        weight: Weight::Semibold,
-        ..MATERIAL
-      })
-      .size(18),
+    container(
+      icon(GoogleMaterialSymbols::Close)
+        .font(Font {
+          weight: Weight::Semibold,
+          ..MATERIAL
+        })
+        .size(18)
+        .center(),
+    )
+    .center(Length::Fill),
   )
   .on_press(Message::Close)
-  .padding(SPACE_GRID)
   .style(|theme: &Theme, status| {
     let palette = theme.extended_palette();
     let pair = match status {
@@ -248,10 +251,12 @@ fn view_close_button<'a>() -> Element<'a, Message> {
     button::Style {
       background: Some(pair.color.into()),
       text_color: pair.text,
-      border: Border::default().rounded(100),
+      border: Border::default().rounded(999),
       ..button::Style::default()
     }
   })
+  .height(30)
+  .width(30)
   .into()
 }
 
@@ -278,6 +283,7 @@ fn view_voice_settings<'a>(model: &'a Model) -> Element<'a, Message> {
     ]
     .spacing((SPACE_GRID * 2) as u32),
   ]
+  .max_width((SPACE_GRID * 80) as u32)
   .spacing((SPACE_GRID * 3) as u32)
   .into()
 }
