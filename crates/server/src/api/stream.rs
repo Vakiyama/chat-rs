@@ -100,6 +100,20 @@ impl Manager {
   fn targets_with_self(&self) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
     self.sockets.values().cloned().collect()
   }
+
+  /// Everyone but the given socket — used for typing notifications, which the
+  /// sender shouldn't receive back (they'd see themselves "typing").
+  fn targets_without_self(
+    &self,
+    me: &Uuid,
+  ) -> Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>> {
+    self
+      .sockets
+      .iter()
+      .filter(|(id, _)| *id != me)
+      .map(|(_, sender)| sender.clone())
+      .collect()
+  }
   /// broadcasts to all passed in targets
   async fn emit(
     targets: Vec<mpsc::Sender<Result<ServerTextMessage, tonic::Status>>>,
@@ -474,6 +488,19 @@ impl StreamService for StreamServer {
                 .into_proto(),
               ))
               .await;
+          }
+          Ok(ClientText::Typing { text_channel_id }) => {
+            // fan out to everyone else; the sender is excluded so they don't see
+            // themselves typing. Transient — not persisted, no DB work.
+            let targets = manager.lock().unwrap().targets_without_self(&socket_id);
+            let server_msg = ServerText::Typing {
+              from: User {
+                id: user.id,
+                name: user.username.clone(),
+              },
+              text_channel_id,
+            };
+            Manager::emit(targets, server_msg.into_proto()).await;
           }
           Err(err) => {
             eprint!("Error in incoming client message: {err:?}")
