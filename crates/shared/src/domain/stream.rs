@@ -23,6 +23,9 @@ pub enum ClientText {
   Ping {
     timestamp: u64,
   },
+  Typing {
+    text_channel_id: Uuid,
+  },
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +40,10 @@ pub enum ServerText {
   Pong {
     timestamp: u64,
     server_received_at: u64,
+  },
+  Typing {
+    from: User,
+    text_channel_id: Uuid,
   },
 }
 

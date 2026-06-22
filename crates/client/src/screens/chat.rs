@@ -15,21 +15,44 @@ use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
 use iced::widget::{
-  button, column, operation, rule, scrollable, slider, space, stack, text, text_input,
+  button, column, operation, rule, scrollable, slider, space, stack, text, text_editor,
 };
 use iced::widget::{container, row};
 use iced::{Border, Color, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+/// How often, at most, we announce our own typing to the server while editing.
+const TYPING_SEND_THROTTLE: Duration = Duration::from_millis(2500);
+/// How long a received typing indicator lingers before it's expired locally.
+/// Must exceed `TYPING_SEND_THROTTLE` so a steadily-typing peer never flickers.
+const TYPING_TIMEOUT: Duration = Duration::from_secs(5);
 use uuid::Uuid;
 
 // --------------------------------- MODEL ---------------------------------
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
-  input: String,
+  // multi-line editor buffer (Shift+Enter inserts a newline; Enter submits).
+  input: text_editor::Content,
+  // peers currently typing, keyed channel -> (user id -> entry). The IndexMap
+  // keeps a stable "who started first" order for the indicator. Entries expire
+  // via delayed ExpireTyping tasks; `seq` lets a stale expiry skip a peer who
+  // has typed again since it was scheduled.
+  typing: HashMap<Uuid, IndexMap<Uuid, TypingPeer>>,
+  typing_seq: u64,
+  // when we last announced our own typing, so editing doesn't spam the server.
+  last_typing_sent: Option<Instant>,
+}
+
+#[derive(Clone)]
+struct TypingPeer {
+  name: String,
+  seq: u64,
 }
 
 // todo: view should model which server we're in, then which text channel we're in.
@@ -85,8 +108,14 @@ impl RenderedPost {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-  UserChangedChatInput(String),
+  EditorAction(text_editor::Action),
   UserSubmittedChatInput,
+  // a received typing indicator timed out; clear it if not refreshed since.
+  ExpireTyping {
+    text_channel_id: Uuid,
+    user_id: Uuid,
+    seq: u64,
+  },
   Stream(ServerText),
   UserSelectedTextChannel { text_channel_id: Uuid, name: String },
   ApiReturnedServers(Result<ServersResponse, tonic::Status>),
@@ -124,8 +153,31 @@ pub fn update(
   stream: Stream<chat_stream::ChatConnection>,
 ) -> Task<Message> {
   match message {
-    Message::UserChangedChatInput(new) => {
-      model.input = new;
+    Message::EditorAction(action) => {
+      let is_edit = action.is_edit();
+      model.input.perform(action);
+
+      // While the user is actively editing in a channel, announce typing to the
+      // server — throttled, and never for an empty buffer (e.g. just cleared).
+      let channel_id = match model.view {
+        View::TextChannel(TextChannel { id, .. }) => Some(id),
+        _ => None,
+      };
+      if is_edit
+        && let Some(channel_id) = channel_id
+        && let Stream::Connected(mut stream) = stream
+      {
+        let now = Instant::now();
+        let due = model
+          .last_typing_sent
+          .is_none_or(|last| now.duration_since(last) >= TYPING_SEND_THROTTLE);
+        if due && !model.input.text().trim().is_empty() {
+          model.last_typing_sent = Some(now);
+          let _ = stream.try_send(ClientText::Typing {
+            text_channel_id: channel_id,
+          });
+        }
+      }
       Task::none()
     }
     Message::UserSubmittedChatInput => {
@@ -141,11 +193,17 @@ pub fn update(
         return Task::none();
       };
 
+      let content = model.input.text();
+      // ignore submits with no real content (blank lines / whitespace only).
+      if content.trim().is_empty() {
+        return Task::none();
+      }
+
       let post_id = uuid::Uuid::new_v4();
 
       let send_result = stream.try_send(ClientText::CreatePostRequest {
         id: post_id,
-        content: model.input.clone(),
+        content: content.clone(),
         text_channel_id: text_channel.id,
       });
 
@@ -153,20 +211,22 @@ pub fn update(
         Ok(_) => RenderedPost::Sending {
           id: post_id,
           created_at: chrono::Utc::now(),
-          content: model.input.clone(),
+          content: content.clone(),
           name: user.name.clone(),
         },
 
         Err(_) => RenderedPost::Errored {
           id: post_id,
           created_at: chrono::Utc::now(),
-          content: model.input.clone(),
+          content,
           name: user.name.clone(),
         },
       };
 
       posts.insert(post_id, post);
-      model.input = "".into();
+      model.input = text_editor::Content::new();
+      // sending implies we're no longer typing; let the next edit re-announce.
+      model.last_typing_sent = None;
 
       Task::none()
     }
@@ -191,6 +251,10 @@ pub fn update(
         let View::TextChannel(ref mut text_channel) = model.view else {
           return Task::none();
         };
+        let channel_id = text_channel.id;
+        // a delivered post means its author stopped typing. Post carries no user
+        // id, so clear by author name (best-effort; the timeout covers the rest).
+        let author_name = post.author_name.clone();
 
         let AsyncData::Done(Ok(ref mut posts)) = text_channel.posts else {
           return Task::none();
@@ -206,10 +270,57 @@ pub fn update(
           }
         });
 
+        if let Some(channel_typing) = model.typing.get_mut(&channel_id) {
+          channel_typing.retain(|_, peer| peer.name != author_name);
+        }
+        if model.typing.get(&channel_id).is_some_and(|c| c.is_empty()) {
+          model.typing.remove(&channel_id);
+        }
+
         Task::none()
       }
       ServerText::Pong { .. } => Task::none(),
+      ServerText::Typing {
+        from,
+        text_channel_id,
+      } => {
+        model.typing_seq += 1;
+        let seq = model.typing_seq;
+        let user_id = from.id;
+        model
+          .typing
+          .entry(text_channel_id)
+          .or_default()
+          .insert(user_id, TypingPeer { name: from.name, seq });
+
+        // schedule this entry's expiry; a newer event bumps `seq` so this one
+        // becomes a no-op (see Message::ExpireTyping).
+        Task::future(async move {
+          tokio::time::sleep(TYPING_TIMEOUT).await;
+          Message::ExpireTyping {
+            text_channel_id,
+            user_id,
+            seq,
+          }
+        })
+      }
     },
+    Message::ExpireTyping {
+      text_channel_id,
+      user_id,
+      seq,
+    } => {
+      if let Some(channel_typing) = model.typing.get_mut(&text_channel_id) {
+        // only remove if this peer hasn't typed again since we scheduled this.
+        if channel_typing.get(&user_id).is_some_and(|peer| peer.seq == seq) {
+          channel_typing.shift_remove(&user_id);
+        }
+      }
+      if model.typing.get(&text_channel_id).is_some_and(|c| c.is_empty()) {
+        model.typing.remove(&text_channel_id);
+      }
+      Task::none()
+    }
     Message::UserSelectedTextChannel {
       text_channel_id,
       name,
@@ -376,12 +487,14 @@ pub fn update(
       };
 
       let text_input_id = make_text_input_id(&current_text_channel_id);
-      // model
-      model.input.push_str(&input);
-      Task::batch([
-        operation::focus(text_input_id.clone()), // text_input::move_cursor_to_end(self.message_input_id.clone()),
-        operation::move_cursor_to_end(text_input_id),
-      ])
+      // insert the typed-ahead text at the cursor (Content has no push_str), then
+      // focus the editor so subsequent keystrokes land there.
+      for c in input.chars() {
+        model
+          .input
+          .perform(text_editor::Action::Edit(text_editor::Edit::Insert(c)));
+      }
+      operation::focus(text_input_id)
     }
     // These are all intercepted by the top-level update (they need the voice
     // handle), so they're no-ops here.
@@ -446,13 +559,21 @@ pub fn view<'a>(
         .width(Length::Fill),
       )
       .into(),
-      AsyncData::Done(Ok(posts)) => view_text_chat_window(
-        &text_channel.name,
-        posts,
-        &model.input,
-        text_channel.loading_more,
-        &text_channel.id,
-      ),
+      AsyncData::Done(Ok(posts)) => {
+        let typing_names: Vec<&str> = model
+          .typing
+          .get(&text_channel.id)
+          .map(|peers| peers.values().map(|p| p.name.as_str()).collect())
+          .unwrap_or_default();
+        view_text_chat_window(
+          &text_channel.name,
+          posts,
+          &model.input,
+          text_channel.loading_more,
+          &text_channel.id,
+          typing_names,
+        )
+      }
     },
   };
 
@@ -1022,66 +1143,86 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
 fn view_text_chat_window<'a>(
   name: &'a str,
   posts: &'a IndexMap<Uuid, RenderedPost>,
-  text_input_string: &'a str,
+  input: &'a text_editor::Content,
   loading_more: bool,
   text_channel_id: &'a Uuid,
+  typing_names: Vec<&'a str>,
 ) -> Element<'a, Message> {
-  // let children: Element<'_, Message> = column![
-  //   container(Column::with_children(posts))
-  //     .padding([SPACE_GRID, 0])
-  //     .height(iced::Fill),
-  //   text_input("Send message", &text_input_string)
-  //     .on_input(on_input)
-  //     .on_submit(on_submit)
-  //     .padding(SPACE_GRID)
-  // ]
-  // .into();
+  let editor = text_editor(input)
+    .placeholder(format!("Message #{name}"))
+    .id(make_text_input_id(text_channel_id))
+    .on_action(Message::EditorAction)
+    // Enter submits; Shift+Enter inserts a newline (the editor's default Enter).
+    // Custom skips the buffer edit, so the submit newline never lands in `input`.
+    .key_binding(|key_press| {
+      use iced::keyboard::Key;
+      use iced::keyboard::key::Named;
+      if matches!(&key_press.key, Key::Named(Named::Enter)) && !key_press.modifiers.shift() {
+        Some(text_editor::Binding::Custom(Message::UserSubmittedChatInput))
+      } else {
+        text_editor::Binding::from_key_press(key_press)
+      }
+    })
+    // grows with content (Shrink height) up to a cap, then scrolls internally —
+    // so a long multi-line draft can't push the message list off-screen.
+    .max_height((SPACE_GRID * 24) as f32)
+    .padding(SPACE_GRID * 2)
+    .style(|theme, status| {
+      let default_style = text_editor::default(theme, status);
+      text_editor::Style {
+        border: Border {
+          radius: (SPACE_GRID as u32).into(),
+          ..default_style.border
+        },
+        ..default_style
+      }
+    });
 
   container(column![
     // top - channel name
     view_text_chat_title(name), // middle:
     row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
-    // row: text posts - user list
-    container(
-      text_input(&format!("Message #{name}"), text_input_string)
-        .id(make_text_input_id(text_channel_id))
-        .on_input(Message::UserChangedChatInput)
-        .on_submit(Message::UserSubmittedChatInput)
-        .style(|theme, status| {
-          let default_style = text_input::default(theme, status);
-          text_input::Style {
-            border: Border {
-              radius: (SPACE_GRID as u32).into(),
-              ..default_style.border
-            },
-            ..default_style
-          }
-        })
-        .padding(SPACE_GRID * 2)
-    )
-    .padding(Padding {
+    // Discord-style typing line, just above the input. Always present (as a
+    // fixed-height slot) so toggling it doesn't nudge the layout.
+    container(view_typing_indicator(&typing_names)).padding(Padding {
+      top: 0.0,
+      right: (SPACE_GRID * 2).into(),
+      bottom: 0.0,
+      left: (SPACE_GRID * 2 + SPACE_GRID / 2).into(),
+    }),
+    // bottom - the message input
+    container(editor).padding(Padding {
       top: 0.0,
       right: (SPACE_GRID * 2).into(),
       bottom: (SPACE_GRID * 3).into(),
-      left: (SPACE_GRID * 2).into()
+      left: (SPACE_GRID * 2).into(),
     }),
-    // .style(|_theme: &Theme, _status| {
-    //   ButtonStyle {
-    //     background: Some(iced::Background::Color(Color::from_rgb(0.9, 0.9, 0.9))),
-    //     text_color: Color::from_rgb(0.2, 0.2, 0.2),
-    //     border: Border {
-    //       radius: border::Radius::new(Pixels(SPACE_GRID.into()) / 2),
-    //       ..Border::default()
-    //     },
-    //     ..ButtonStyle::default()
-    //   }
-    // }),
-    // btm - input
-    // Message::UserChangedChatInput,
-    // Message::UserSubmittedChatInput,
   ])
   .height(Length::Fill)
   .into()
+}
+
+/// The "X is typing…" line above the input. Returns a fixed-height element even
+/// when nobody's typing, so the input doesn't jump as it appears/disappears.
+fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
+  let line = match names {
+    [] => None,
+    [a] => Some(format!("{a} is typing…")),
+    [a, b] => Some(format!("{a} and {b} are typing…")),
+    [a, b, c] => Some(format!("{a}, {b}, and {c} are typing…")),
+    _ => Some("Several people are typing…".to_string()),
+  };
+
+  match line {
+    Some(line) => text(line)
+      .size(12)
+      .height((SPACE_GRID * 2) as f32)
+      .style(|theme: &Theme| text::Style {
+        color: Some(theme.extended_palette().background.weak.text),
+      })
+      .into(),
+    None => space().height((SPACE_GRID * 2) as f32).into(),
+  }
 }
 
 fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {

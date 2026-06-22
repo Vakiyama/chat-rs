@@ -99,10 +99,11 @@ message LeftRoom {
 
 message ServerTextMessage {
   oneof payload {
-    JoinedRoom       joined_room = 1;
-    LeftRoom         left_room   = 2;
-    Post             chat        = 3;
-    Pong             pong        = 4;
+    JoinedRoom         joined_room = 1;
+    LeftRoom           left_room   = 2;
+    Post               chat        = 3;
+    Pong               pong        = 4;
+    TypingNotification typing      = 5;
   }
 }
 
@@ -110,7 +111,21 @@ message ClientTextMessage {
   oneof payload {
     CreatePostRequest post = 1;
     Ping        ping        = 2;
+    Typing      typing      = 3;
   }
+}
+
+// A client signals it's actively typing in a text channel. Sent throttled while
+// the user edits the input; the server fans it out to the other clients.
+message Typing {
+  string text_channel_id = 1;
+}
+
+// The server tells clients that `from` is typing in `text_channel_id`. Clients
+// show a transient indicator and expire it on their own timeout.
+message TypingNotification {
+  DisplayUser from = 1;
+  string text_channel_id = 2;
 }
 
 message Ping {

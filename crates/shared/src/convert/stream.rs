@@ -144,6 +144,11 @@ impl IntoProto<ClientTextMessage> for ClientText {
       ClientText::Ping { timestamp } => ClientTextMessage {
         payload: Some(client_text_message::Payload::Ping(Ping { timestamp })),
       },
+      ClientText::Typing { text_channel_id } => ClientTextMessage {
+        payload: Some(client_text_message::Payload::Typing(Typing {
+          text_channel_id: text_channel_id.to_string(),
+        })),
+      },
     }
   }
 }
@@ -184,6 +189,15 @@ impl IntoProto<ServerTextMessage> for ServerText {
         payload: Some(server_text_message::Payload::Pong(Pong {
           timestamp,
           server_received_at,
+        })),
+      },
+      ServerText::Typing {
+        from,
+        text_channel_id,
+      } => ServerTextMessage {
+        payload: Some(server_text_message::Payload::Typing(TypingNotification {
+          from: Some(from.into_proto()),
+          text_channel_id: text_channel_id.to_string(),
         })),
       },
     }
@@ -350,6 +364,16 @@ impl TryFromProto<ServerTextMessage> for ServerText {
           timestamp: pong.timestamp,
           server_received_at: pong.server_received_at,
         }),
+        server_text_message::Payload::Typing(typing) => {
+          let Some(user) = typing.from else {
+            return Err(tonic::Status::invalid_argument("Missing user"));
+          };
+
+          Ok(ServerText::Typing {
+            from: user.try_into_domain()?,
+            text_channel_id: parse_id(typing.text_channel_id)?,
+          })
+        }
       }
     } else {
       Err(tonic::Status::invalid_argument("Missing payload"))
@@ -370,6 +394,9 @@ impl TryFromProto<ClientTextMessage> for ClientText {
         }),
         client_text_message::Payload::Ping(ping) => Ok(ClientText::Ping {
           timestamp: ping.timestamp,
+        }),
+        client_text_message::Payload::Typing(typing) => Ok(ClientText::Typing {
+          text_channel_id: parse_id(typing.text_channel_id)?,
         }),
       }
     } else {
