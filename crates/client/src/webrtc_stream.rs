@@ -94,6 +94,14 @@ pub fn connect() -> impl Sipper<Never, Event> {
 // handle messages
 
 pub const TARGET_RATE: u32 = 48_000;
+// the webrtc APM processes fixed 10ms frames; at 48k that is 480 samples
+const APM_FRAME: usize = TARGET_RATE as usize / 100;
+// opus publishes 20ms packets, i.e. two APM frames
+const OPUS_FRAME: usize = 2 * APM_FRAME;
+const OPUS_FRAME_MS: u64 = 20;
+const _: () = assert!(OPUS_FRAME == TARGET_RATE as usize / 1000 * OPUS_FRAME_MS as usize);
+// ethernet MTU, an upper bound for one RTP/opus packet
+const MAX_PACKET_BYTES: usize = 1500;
 
 /// What the mic stream sends to the audio processor. `Rate` is emitted once when
 /// the input device (and thus its native sample rate) changes live, so the
@@ -495,7 +503,7 @@ pub async fn setup_client(
   let sender = client.add_track(mic_track.clone()).await?;
 
   tokio::spawn(async move {
-    let mut buf = vec![0u8; 1500];
+    let mut buf = vec![0u8; MAX_PACKET_BYTES];
     while sender.read(&mut buf).await.is_ok() {}
   });
 
@@ -643,10 +651,13 @@ fn spawn_audio_processor(
 
     let mut cap_buf: Vec<f32> = Vec::new();
     let mut rnd_buf: Vec<f32> = Vec::new();
-    let mut clean = vec![0f32; 480]; // one 10ms APM frame
-    let mut rnd_sink = vec![0f32; 480];
-    let mut pcm_20ms: Vec<f32> = Vec::with_capacity(960);
-    let mut out = vec![0u8; 1500];
+    let mut clean = vec![0f32; APM_FRAME];
+    let mut rnd_sink = vec![0f32; APM_FRAME];
+    let mut frame = vec![0f32; APM_FRAME]; // reused 10ms capture frame
+    let mut cap_at48k: Vec<f32> = Vec::new();
+    let mut rnd_at48k: Vec<f32> = Vec::new();
+    let mut pcm_20ms: Vec<f32> = Vec::with_capacity(OPUS_FRAME);
+    let mut out = vec![0u8; MAX_PACKET_BYTES];
     // noise gate: closes (mutes the published frame) once the post-NS RMS stays
     // below the live-tunable threshold for GATE_HANGOVER frames. The threshold is
     // read each frame from a shared atomic (f32 bits); 0.0 disables the gate.
@@ -663,15 +674,14 @@ fn spawn_audio_processor(
     loop {
       tokio::select! {
         Some(chunk) = rnd_rx.recv() => {
-          let mut at48k = Vec::new();
-          // claude said i should do this as rnd_rs resamples correctly for us on push
-          if let Err(e) = rnd_rs.push(&chunk, &mut at48k) { eprintln!("render resample: {e:?}"); continue; }
-          rnd_buf.extend_from_slice(&at48k);
-          while rnd_buf.len() >= 480 {
-            let frame: Vec<f32> = rnd_buf.drain(..480).collect();
-            if let Err(e) = apm.process_render_f32(&[&frame], &mut [&mut rnd_sink[..]]) {
+          rnd_at48k.clear();
+          if let Err(e) = rnd_rs.push(&chunk, &mut rnd_at48k) { eprintln!("render resample: {e:?}"); continue; }
+          rnd_buf.extend_from_slice(&rnd_at48k);
+          while rnd_buf.len() >= APM_FRAME {
+            if let Err(e) = apm.process_render_f32(&[&rnd_buf[..APM_FRAME]], &mut [&mut rnd_sink[..]]) {
               eprintln!("apm render error: {e:?}");
             }
+            rnd_buf.drain(..APM_FRAME);
           }
         }
         Some(event) = cap_rx.recv() => {
@@ -709,13 +719,13 @@ fn spawn_audio_processor(
               applied_perc = want_perc;
             }
           }
-          let mut at48k = Vec::new();
-          if let Err(e) = cap_rs.push(&chunk, &mut at48k) { eprintln!("cap resample: {e:?}"); continue; }
-          cap_buf.extend_from_slice(&at48k);     // now genuinely 48k
+          cap_at48k.clear();
+          if let Err(e) = cap_rs.push(&chunk, &mut cap_at48k) { eprintln!("cap resample: {e:?}"); continue; }
+          cap_buf.extend_from_slice(&cap_at48k); // now genuinely 48k
 
-
-          while cap_buf.len() >= 480 {
-            let frame: Vec<f32> = cap_buf.drain(..480).collect();
+          while cap_buf.len() >= APM_FRAME {
+            frame.copy_from_slice(&cap_buf[..APM_FRAME]);
+            cap_buf.drain(..APM_FRAME);
 
             // to prevent internal err, we catch unwind and rebuild the apm:
             // thread 'tokio-rt-worker' (2506228) panicked at /home/user/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sonora-aec3-0.1.0/src/adaptive_fir_filter.rs:136:22:
@@ -793,15 +803,15 @@ fn spawn_audio_processor(
             }
             pcm_20ms.extend_from_slice(&clean);
 
-            if pcm_20ms.len() >= 960 {
+            if pcm_20ms.len() >= OPUS_FRAME {
               // while gated we still drain the accumulator (so it can't grow
               // unbounded) but publish nothing to the track.
               if !gated {
-                match encoder.encode_float(&pcm_20ms[..960], &mut out) {
+                match encoder.encode_float(&pcm_20ms[..OPUS_FRAME], &mut out) {
                   Ok(n) => {
                     let _ = track.write_sample(&Sample {
                       data: bytes::Bytes::copy_from_slice(&out[..n]),
-                      duration: std::time::Duration::from_millis(20),
+                      duration: std::time::Duration::from_millis(OPUS_FRAME_MS),
                       ..Default::default()
                     }).await;
                   }
