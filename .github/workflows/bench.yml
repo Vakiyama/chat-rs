@@ -1,6 +1,8 @@
 name: Build bench
 on:
   workflow_dispatch:
+  push:
+    branches: ["ci/cache-fix"]
 permissions:
   contents: read
 jobs:
