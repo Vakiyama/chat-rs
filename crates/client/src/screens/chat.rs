@@ -1090,6 +1090,7 @@ fn view_posts<'a>(
     .unwrap_or_default();
 
   let mut previous_date: Option<chrono::NaiveDate> = None;
+  let mut previous_author: Option<&str> = None;
   for post in posts.iter() {
     let (id, content, created_at, name) = match post.1 {
       RenderedPost::Sending {
@@ -1115,10 +1116,20 @@ fn view_posts<'a>(
 
     let local = created_at.with_timezone(&Local);
     let date = local.date_naive();
-    if previous_date != Some(date) {
+    let is_new_day = previous_date != Some(date);
+    if is_new_day {
       children.push(view_day_divider(date));
       previous_date = Some(date);
     }
+
+    // Hide the name when this message continues a run from the same author (but
+    // always show it after a day divider). The sizer below keeps content aligned.
+    let display_name = if !is_new_day && previous_author == Some(name.as_str()) {
+      String::new()
+    } else {
+      truncate_name(name)
+    };
+    previous_author = Some(name);
 
     let display_time = local.format("%H:%M").to_string();
     let text_color = match post.1 {
@@ -1145,7 +1156,7 @@ fn view_posts<'a>(
               })
           )
           .padding(padding::left(SPACE_GRID as f32 * 2.0)),
-          iced_selection::text(truncate_name(name))
+          iced_selection::text(display_name)
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right)
             .wrapping(text::Wrapping::None)
