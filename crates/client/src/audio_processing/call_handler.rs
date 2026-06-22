@@ -451,7 +451,11 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
           let mut rejoin_for: Option<Uuid> = None;
           let mut report_health = false;
           if let Some(active) = call.as_mut() {
-            match build_speaker(active.mixer.clone(), active.rnd_tx.clone(), output_name.as_deref()) {
+            match build_speaker(
+              active.mixer.clone(),
+              active.rnd_tx.clone(),
+              output_name.as_deref(),
+            ) {
               Ok((stream, rate)) if rate == active.out_rate => {
                 active.speaker = Some(stream); // drop old speaker
                 report_health = true;
@@ -612,13 +616,12 @@ async fn read_track(
   const MAX_CONCEAL: u16 = 5; // ~100ms
   let mut last_seq: Option<u16> = None;
 
-  let push_frame = |out_rs: &mut crate::audio_processing::resampler::Resampler,
-                    s: u32,
-                    samples: &[f32]| {
-    let mut at_dev = Vec::new();
-    let _ = out_rs.push(samples, &mut at_dev);
-    mixer.push(s, &at_dev);
-  };
+  let push_frame =
+    |out_rs: &mut crate::audio_processing::resampler::Resampler, s: u32, samples: &[f32]| {
+      let mut at_dev = Vec::new();
+      let _ = out_rs.push(samples, &mut at_dev);
+      mixer.push(s, &at_dev);
+    };
 
   while let Ok((pkt, _)) = track.read_rtp().await {
     let seq = pkt.header.sequence_number;

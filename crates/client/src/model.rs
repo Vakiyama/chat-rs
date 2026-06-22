@@ -103,13 +103,17 @@ impl Default for Model {
       // Bind cues to the saved output device so they share the device the call
       // uses. If this fails (e.g. no working device at startup) we leave it None
       // and recover later via AudioCues::rebuild when a device appears/changes.
-      audio_cues: AudioCues::new(crate::voice_settings::VoiceSettings::load().output_device.as_deref())
-        .map(|mut cues| {
-          cues.set_volume(0.1);
-          cues
-        })
-        .map_err(|err| eprintln!("Warning: audio cues failed to initialize: {err:?}"))
-        .ok(),
+      audio_cues: AudioCues::new(
+        crate::voice_settings::VoiceSettings::load()
+          .output_device
+          .as_deref(),
+      )
+      .map(|mut cues| {
+        cues.set_volume(0.1);
+        cues
+      })
+      .map_err(|err| eprintln!("Warning: audio cues failed to initialize: {err:?}"))
+      .ok(),
     }
   }
 }

@@ -89,28 +89,28 @@ impl Mixer {
     for sample in out.iter_mut() {
       *sample = gain
         * sources
-        .values_mut()
-        .map(|source| {
-          if !source.primed {
-            return 0.0; // silent until prefilling finished
-          }
-          match source.queue.pop_front() {
-            Some(sample) => {
-              source.last = sample;
-              sample
+          .values_mut()
+          .map(|source| {
+            if !source.primed {
+              return 0.0; // silent until prefilling finished
             }
-            None => {
-              source.primed = false; // prefill again (at the smaller resume cushion)
-              // gentle fade of the last sample instead of an abrupt cut: ~0.99
-              // per sample decays to near-silence over a few ms, avoiding the
-              // click a fast (0.85/sample) drop produced on every underrun.
-              source.last *= 0.99;
-              source.last
+            match source.queue.pop_front() {
+              Some(sample) => {
+                source.last = sample;
+                sample
+              }
+              None => {
+                source.primed = false; // prefill again (at the smaller resume cushion)
+                // gentle fade of the last sample instead of an abrupt cut: ~0.99
+                // per sample decays to near-silence over a few ms, avoiding the
+                // click a fast (0.85/sample) drop produced on every underrun.
+                source.last *= 0.99;
+                source.last
+              }
             }
-          }
-        })
-        .sum::<f32>()
-        .clamp(-1.0, 1.0);
+          })
+          .sum::<f32>()
+          .clamp(-1.0, 1.0);
     }
   }
 }

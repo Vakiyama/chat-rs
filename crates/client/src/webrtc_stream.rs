@@ -310,7 +310,10 @@ pub fn build_speaker(
 ) -> anyhow::Result<(cpal::Stream, u32)> {
   let host = cpal::default_host();
   let dev = resolve_output_device(&host, device_name)?;
-  let cfg = pick_config(dev.default_output_config()?, dev.supported_output_configs()?)?;
+  let cfg = pick_config(
+    dev.default_output_config()?,
+    dev.supported_output_configs()?,
+  )?;
   let rate = cfg.sample_rate();
   let stream = spawn_speaker(mixer, render_tx, cfg, dev)?;
   Ok((stream, rate))
@@ -508,31 +511,31 @@ pub async fn setup_client(
   // The mixer self-trims each source to 200ms, so leaving it undrained can't grow
   // unbounded. When no device is resolvable we size the mixer/APM render at the
   // target rate so the rest of the pipeline still has a coherent rate to use.
-  let (cpal_stream_output, out_rate, mixer) = match resolve_output_device(
-    &cpal::default_host(),
-    output_name.as_deref(),
-  )
-  .and_then(|dev| {
-    let cfg = pick_config(dev.default_output_config()?, dev.supported_output_configs()?)?;
-    Ok((dev, cfg))
-  }) {
-    Ok((out_dev, out_cfg)) => {
-      let out_rate = out_cfg.sample_rate();
-      let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
-      match spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev) {
-        Ok(stream) => (Some(stream), out_rate, mixer), // playback + render tee
-        Err(e) => {
-          eprintln!("output device build failed; joining without speaker: {e:?}");
-          (None, out_rate, mixer)
+  let (cpal_stream_output, out_rate, mixer) =
+    match resolve_output_device(&cpal::default_host(), output_name.as_deref()).and_then(|dev| {
+      let cfg = pick_config(
+        dev.default_output_config()?,
+        dev.supported_output_configs()?,
+      )?;
+      Ok((dev, cfg))
+    }) {
+      Ok((out_dev, out_cfg)) => {
+        let out_rate = out_cfg.sample_rate();
+        let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
+        match spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev) {
+          Ok(stream) => (Some(stream), out_rate, mixer), // playback + render tee
+          Err(e) => {
+            eprintln!("output device build failed; joining without speaker: {e:?}");
+            (None, out_rate, mixer)
+          }
         }
       }
-    }
-    Err(e) => {
-      eprintln!("no usable output device; joining without speaker: {e:?}");
-      let mixer = Mixer::new(TARGET_RATE, deafened.clone());
-      (None, TARGET_RATE, mixer)
-    }
-  };
+      Err(e) => {
+        eprintln!("no usable output device; joining without speaker: {e:?}");
+        let mixer = Mixer::new(TARGET_RATE, deafened.clone());
+        (None, TARGET_RATE, mixer)
+      }
+    };
 
   // A dead input device is likewise non-fatal: we join muted-at-the-source
   // (nobody hears us) until the mic is fixed. With no capture stream the audio

@@ -7,15 +7,15 @@ use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, rule, scrollable, space, text, text_input};
+use iced::widget::{button, column, operation, rule, scrollable, space, stack, text, text_input};
 use iced::widget::{container, row};
-use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
+use iced::{Border, Color, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -69,6 +69,13 @@ impl RenderedPost {
       RenderedPost::Sending { created_at, .. }
       | RenderedPost::Errored { created_at, .. }
       | RenderedPost::Sent(Post { created_at, .. }) => created_at,
+    }
+  }
+
+  fn author_name(&self) -> &str {
+    match self {
+      RenderedPost::Sending { name, .. } | RenderedPost::Errored { name, .. } => name,
+      RenderedPost::Sent(Post { author_name, .. }) => author_name,
     }
   }
 }
@@ -1014,6 +1021,55 @@ fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
   .into()
 }
 
+fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>) {
+  let today = Local::now().date_naive();
+  let label = match (today - date).num_days() {
+    0 => "Today".to_string(),
+    1 => "Yesterday".to_string(),
+    _ => date.format("%A, %B %-d, %Y").to_string(),
+  };
+
+  // deterministic, stable key per calendar day so keyed diffing stays consistent
+  let key = Uuid::from_u64_pair(0xda7e_da7e_da7e_da7e, date.num_days_from_ce() as u64);
+
+  let line = || {
+    rule::horizontal(1).style(|theme: &Theme| rule::Style {
+      color: theme.extended_palette().secondary.weak.color,
+      ..rule::default(theme)
+    })
+  };
+
+  (
+    key,
+    row![
+      container(line()).width(Length::Fill).center_y(Length::Fill),
+      text(label).size(12).style(|theme| text::Style {
+        color: text::secondary(theme).color,
+      }),
+      container(line()).width(Length::Fill).center_y(Length::Fill),
+    ]
+    .align_y(Center)
+    .spacing(SPACE_GRID as u32)
+    .padding([SPACE_GRID, 0])
+    .into(),
+  )
+}
+
+// The author-name column is sized to the widest name present in the channel so
+// message content always starts at the same horizontal offset, just past the
+// longest name. Names are truncated to `NAME_MAX_CHARS` first, so one very long
+// name can't push the whole column across the screen.
+const NAME_MAX_CHARS: usize = 22;
+
+fn truncate_name(name: &str) -> String {
+  if name.chars().count() <= NAME_MAX_CHARS {
+    name.to_string()
+  } else {
+    let truncated: String = name.chars().take(NAME_MAX_CHARS - 1).collect();
+    format!("{truncated}…")
+  }
+}
+
 fn view_posts<'a>(
   posts: &'a IndexMap<Uuid, RenderedPost>,
   loading_more: bool,
@@ -1026,76 +1082,116 @@ fn view_posts<'a>(
     ));
   };
 
-  let posts = posts
-    .iter()
-    .map(|post| {
-      let (id, content, created_at, name) = match post.1 {
-        RenderedPost::Sending {
-          id,
-          created_at,
-          content,
-          name,
-        }
-        | RenderedPost::Errored {
-          id,
-          created_at,
-          content,
-          name,
-        }
-        | RenderedPost::Sent(Post {
-          id,
-          author_name: name,
-          content,
-          created_at,
-          ..
-        }) => (id, content, created_at, name),
-      };
+  // Widest (truncated) name in the channel — drives the name-column width below.
+  let longest_name = posts
+    .values()
+    .map(|post| truncate_name(post.author_name()))
+    .max_by_key(|name| name.chars().count())
+    .unwrap_or_default();
 
-      let display_time = created_at.with_timezone(&Local).format("%H:%M").to_string();
-      let text_color = match post.1 {
-        RenderedPost::Sending { .. } => text::secondary,
-        RenderedPost::Errored { .. } => text::danger,
-        RenderedPost::Sent(_) => text::default,
-      };
+  let mut previous_date: Option<chrono::NaiveDate> = None;
+  let mut previous_author: Option<&str> = None;
+  for post in posts.iter() {
+    let (id, content, created_at, name) = match post.1 {
+      RenderedPost::Sending {
+        id,
+        created_at,
+        content,
+        name,
+      }
+      | RenderedPost::Errored {
+        id,
+        created_at,
+        content,
+        name,
+      }
+      | RenderedPost::Sent(Post {
+        id,
+        author_name: name,
+        content,
+        created_at,
+        ..
+      }) => (id, content, created_at, name),
+    };
 
-      (
-        *id,
-        row![
-          iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
-            color: text::secondary(theme).color,
-            selection: theme.extended_palette().secondary.strong.text
-          }), //.align_x(Alignment::Start),
-          iced_selection::text(name).style(|theme| iced_selection::text::Style {
-            color: text::base(theme).color,
-            selection: theme.extended_palette().secondary.strong.text
-          }),
-          iced_selection::text(content)
-            .style(move |theme| iced_selection::text::Style {
-              color: text_color(theme).color,
+    let local = created_at.with_timezone(&Local);
+    let date = local.date_naive();
+    let is_new_day = previous_date != Some(date);
+    if is_new_day {
+      children.push(view_day_divider(date));
+      previous_date = Some(date);
+    }
+
+    // Hide the name when this message continues a run from the same author (but
+    // always show it after a day divider). The sizer below keeps content aligned.
+    let display_name = if !is_new_day && previous_author == Some(name.as_str()) {
+      String::new()
+    } else {
+      truncate_name(name)
+    };
+    previous_author = Some(name);
+
+    let display_time = local.format("%H:%M").to_string();
+    let text_color = match post.1 {
+      RenderedPost::Sending { .. } => text::secondary,
+      RenderedPost::Errored { .. } => text::danger,
+      RenderedPost::Sent(_) => text::default,
+    };
+
+    children.push((
+      *id,
+      row![
+        iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
+          color: text::secondary(theme).color,
+          selection: theme.extended_palette().secondary.strong.text
+        }), //.align_x(Alignment::Start),
+        stack![
+          // invisible sizer reserving the width of the widest name in the channel,
+          // plus a little left padding so right-aligned names don't clip
+          container(
+            text(longest_name.clone())
+              .wrapping(text::Wrapping::None)
+              .style(|_theme| text::Style {
+                color: Some(Color::TRANSPARENT)
+              })
+          )
+          .padding(padding::left(SPACE_GRID as f32 * 2.0)),
+          iced_selection::text(display_name)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .wrapping(text::Wrapping::None)
+            .style(|theme| iced_selection::text::Style {
+              color: text::base(theme).color,
               selection: theme.extended_palette().secondary.strong.text
-            })
-            .wrapping(text::Wrapping::WordOrGlyph)
-        ]
-        .spacing(Pixels(SPACE_GRID.into()))
-        .into(),
-      )
-    })
-    .collect::<Vec<(Uuid, Element<'a, Message>)>>();
-
-  children.extend(posts);
+            }),
+        ],
+        iced_selection::text(content)
+          .style(move |theme| iced_selection::text::Style {
+            color: text_color(theme).color,
+            selection: theme.extended_palette().secondary.strong.text
+          })
+          .wrapping(text::Wrapping::WordOrGlyph)
+      ]
+      .spacing(Pixels(SPACE_GRID.into()))
+      .into(),
+    ));
+  }
 
   let scrollbar = Scrollbar::new().width(4).scroller_width(4);
 
   scrollable(
-    column::Column::with_children(children)
-      .padding(padding::right(SPACE_GRID as u32))
-      .padding([SPACE_GRID, 0]),
+    column::Column::with_children(children).padding(padding::Padding {
+      top: SPACE_GRID as f32,
+      right: SPACE_GRID as f32 * 2.0,
+      bottom: SPACE_GRID as f32,
+      left: 0.0,
+    }),
   )
   .direction(scrollable::Direction::Vertical(scrollbar))
   .anchor_bottom()
   .on_scroll(|viewport| {
     // distance from the *top* under anchor_bottom == reversed offset
-    const LOAD_THRESHOLD: f32 = 200.0; // start prefetching ~200px early
+    const LOAD_THRESHOLD: f32 = 400.0; // start prefetching ~200px early
     if viewport.absolute_offset_reversed().y <= LOAD_THRESHOLD {
       Message::UserScrolledToTop
     } else {
