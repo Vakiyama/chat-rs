@@ -349,12 +349,23 @@ fn spawn_mic(
   let stream = device.build_input_stream(
     stream_config,
     move |data: &[f32], _| {
-      let mono: Vec<f32> = data
-        .chunks(channels.into())
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect();
+      // cpal invokes this from the OS audio thread through a C boundary; a panic
+      // unwinding back into it is UB and aborts the process on Windows. Contain
+      // any panic here. A zero channel count would make `chunks(0)` panic.
+      let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if channels == 0 {
+          return;
+        }
+        let mono: Vec<f32> = data
+          .chunks(channels.into())
+          .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+          .collect();
 
-      let _ = tx.send(CaptureEvent::Samples(mono));
+        let _ = tx.send(CaptureEvent::Samples(mono));
+      }));
+      if result.is_err() {
+        eprintln!("cpal input callback panicked; dropping buffer");
+      }
     },
     |err| eprintln!("cpal input error: {err}"),
     None,
@@ -378,13 +389,27 @@ fn spawn_speaker(
   let stream = device.build_output_stream(
     stream_config,
     move |data: &mut [f32], _| {
-      let frames = data.len() / channels;
-      scratch.resize(frames, 0.0);
-      mixer.mix_mono(&mut scratch); // mono mix, no channel logic
-      for (frame, s) in data.chunks_mut(channels).zip(scratch.iter()) {
-        frame.fill(*s); // upmix to device channels
+      // cpal invokes this from the OS audio thread through a C boundary; a panic
+      // unwinding back into it is UB and aborts the process on Windows. Contain
+      // any panic here. `channels == 0` would make `data.len() / channels` and
+      // `chunks_mut(0)` panic — guard it and emit silence instead.
+      let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if channels == 0 {
+          data.fill(0.0);
+          return;
+        }
+        let frames = data.len() / channels;
+        scratch.resize(frames, 0.0);
+        mixer.mix_mono(&mut scratch); // mono mix, no channel logic
+        for (frame, s) in data.chunks_mut(channels).zip(scratch.iter()) {
+          frame.fill(*s); // upmix to device channels
+        }
+        let _ = render_tx.send(scratch.clone()); // tee to the APM
+      }));
+      if result.is_err() {
+        data.fill(0.0); // keep the stream alive; output silence this cycle
+        eprintln!("cpal output callback panicked; silencing buffer");
       }
-      let _ = render_tx.send(scratch.clone()); // tee to the APM
     },
     |err| eprintln!("cpal output error: {err}"),
     None,

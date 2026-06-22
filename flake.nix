@@ -79,6 +79,18 @@
 
           serverUrl = "http://5.78.193.193:3000";
 
+          # Just the LLVM tools cargo-xwin needs for the MSVC target, symlinked on
+          # their own so the full binutils package's unprefixed names (dwp, ar, …)
+          # don't collide with the gcc toolchain in the devshell env.
+          xwinLlvmTools = pkgs.runCommand "xwin-llvm-tools" { } ''
+            mkdir -p $out/bin
+            for t in llvm-lib llvm-rc llvm-dlltool llvm-ar llvm-ranlib; do
+              if [ -e ${pkgs.llvmPackages.bintools-unwrapped}/bin/$t ]; then
+                ln -s ${pkgs.llvmPackages.bintools-unwrapped}/bin/$t $out/bin/$t
+              fi
+            done
+          '';
+
           guiLibs = with pkgs; [
             libGL
             vulkan-loader
@@ -132,13 +144,22 @@
         {
           devshells.default = {
             packages = [
-              # rust toolchain
-              (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default
+              # rust toolchain (+ windows-msvc target std for cargo-xwin)
+              ((inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default.override {
+                targets = [ "x86_64-pc-windows-msvc" ];
+              })
               pkgs.rust-analyzer
 
               # c toolchain + linker
               pkgs.stdenv.cc
               pkgs.mold
+
+              # windows (msvc) cross-compile from linux: `win-build`
+              pkgs.cargo-xwin
+              pkgs.ninja # cmake generator cargo-xwin uses for C deps (libz-ng-sys, opus)
+              pkgs.llvmPackages.clang-unwrapped # provides clang-cl
+              pkgs.lld # provides lld-link
+              xwinLlvmTools # llvm-lib / llvm-rc / llvm-dlltool (collision-free subset)
 
               # native build deps
               pkgs.pkg-config
@@ -204,6 +225,11 @@
                 name = "PROTOC";
                 eval = "${pkgs.protobuf}/bin/protoc";
               }
+              {
+                # auto-accept the Microsoft CRT/SDK license so cargo-xwin can fetch it
+                name = "XWIN_ACCEPT_LICENSE";
+                value = "1";
+              }
             ];
 
             commands = [
@@ -222,6 +248,32 @@
               {
                 name = "pg-status";
                 command = ''pg_ctl status -D "$PGDATA"'';
+              }
+              {
+                name = "win-build";
+                help = "cross-compile the windows (msvc) client via cargo-xwin";
+                command = ''
+                  set -e
+                  # audiopus_sys can't cross-build opus from source (its autotools
+                  # path targets the host); point it at the prebuilt MSVC static
+                  # opus.lib it vendors — the same lib a native MSVC build links.
+                  reg="''${CARGO_HOME:-$HOME/.cargo}/registry/src"
+                  find_opus() { dirname "$(find "$reg" -path '*audiopus_sys-*/msvc/x64/opus.lib' 2>/dev/null | head -1)"; }
+                  opus_dir="$(find_opus)"
+                  if [ -z "$opus_dir" ] || [ "$opus_dir" = "." ]; then
+                    echo "extracting deps to locate audiopus_sys's prebuilt opus..." >&2
+                    cargo fetch >/dev/null 2>&1 || true
+                    opus_dir="$(find_opus)"
+                  fi
+
+                  # Clear the mold linker flag (linux-only) so it isn't passed to the
+                  # windows link, and bake the same server URL the release uses. Extra
+                  # args ($@) pass through, e.g. `win-build --features foo`.
+                  RUSTFLAGS="" DEFAULT_SERVER_URL="${serverUrl}" \
+                    OPUS_STATIC=1 OPUS_NO_PKG=1 OPUS_LIB_DIR="$opus_dir" \
+                    cargo xwin build --release --target x86_64-pc-windows-msvc -p chat-client "$@"
+                  echo "exe: target/x86_64-pc-windows-msvc/release/client.exe"
+                '';
               }
             ];
           };

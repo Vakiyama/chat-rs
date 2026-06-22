@@ -36,7 +36,9 @@ impl Mixer {
   }
 
   pub fn push(&self, src: u32, samples: &[f32]) {
-    let mut sources = self.sources.lock().unwrap();
+    // tolerate a poisoned lock (a panic in another holder) rather than panicking
+    // again — this runs in the realtime output callback on some paths.
+    let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
     let source = sources.entry(src).or_default();
     source.queue.extend(samples);
 
@@ -51,11 +53,17 @@ impl Mixer {
   }
 
   pub fn remove(&self, src: u32) {
-    self.sources.lock().unwrap().remove(&src);
+    self
+      .sources
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .remove(&src);
   }
 
   pub fn mix_mono(&self, out: &mut [f32]) {
-    let mut sources = self.sources.lock().unwrap();
+    // tolerate a poisoned lock (a panic in another holder) rather than panicking
+    // again — this runs in the realtime output callback on some paths.
+    let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
     // silence playback while deafened, but keep advancing the queues below so a
     // long-deafened call doesn't dump a buffered backlog the instant it's undone.
     let gain = if self.deafened.load(Ordering::Relaxed) {
