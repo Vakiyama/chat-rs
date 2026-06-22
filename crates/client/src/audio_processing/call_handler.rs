@@ -84,7 +84,6 @@ struct ActiveCall {
   stats_task: tokio::task::JoinHandle<()>,
   mixer: crate::audio_processing::mixer::Mixer,
   in_rate: u32,
-  out_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
   // kept so a live device swap can feed the running audio path without a rejoin.
   cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
@@ -287,7 +286,6 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               speaker,
               mixer,
               in_rate,
-              out_rate,
               cap_tx,
               rnd_tx,
               capture_signal_frames,
@@ -311,7 +309,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 let mixer = mixer_for_track.clone();
                 let gain = gain_for_track.clone();
                 Box::pin(async move {
-                  tokio::spawn(read_track(track, mixer, out_rate, started, gain));
+                  tokio::spawn(read_track(track, mixer, started, gain));
                 })
               }));
               conn.send(ClientVoice::Offer {
@@ -358,7 +356,6 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 stats_task,
                 mixer,
                 in_rate,
-                out_rate,
                 started: started.clone(),
                 cap_tx,
                 rnd_tx,
@@ -394,7 +391,6 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
             *msg,
             &active.mixer,
             active.started.clone(),
-            active.out_rate,
             per_user_gain.clone(),
           )
           .await
@@ -471,50 +467,29 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
         }
         VoiceCommand::SetOutputDevice(name) => {
           // remember for the next join, and hot-swap the speaker if a call is live.
+          // The mixer is rate-agnostic (48k) and the speaker resamples to its own
+          // device rate, so any output device swaps in live with no rejoin.
           output_name = name;
-          // A seamless swap is only possible when the new device shares the
-          // call's fixed output rate (mixer + per-peer resamplers are sized to
-          // it). On a rate mismatch, fall back to a full rebuild via main's
-          // epoch-aware rejoin path (brief audio blip).
-          let mut rejoin_for: Option<Uuid> = None;
-          let mut report_health = false;
           if let Some(active) = call.as_mut() {
             match build_speaker(
               active.mixer.clone(),
               active.rnd_tx.clone(),
               output_name.as_deref(),
             ) {
-              Ok((stream, rate)) if rate == active.out_rate => {
-                active.speaker = Some(stream); // drop old speaker
-                report_health = true;
-              }
-              Ok((stream, _rate)) => {
-                // rate mismatch → full rebuild via rejoin, which re-reports health.
-                drop(stream);
-                rejoin_for = *cloned_room_id.lock().await;
-              }
+              Ok(stream) => active.speaker = Some(stream), // drop old speaker
               Err(e) => {
                 // the new device failed: drop the old speaker and report that we
                 // now have no working output (we hear nobody).
                 eprintln!("output device switch failed; no speaker output: {e:?}");
                 active.speaker = None;
-                report_health = true;
               }
             }
-            if report_health {
-              let _ = outbound_tx
-                .send(crate::Message::VoiceDeviceHealth {
-                  epoch: active.epoch,
-                  input_ok: active.mic.is_some(),
-                  output_ok: active.speaker.is_some(),
-                })
-                .await;
-            }
-          }
-          if let Some(voice_channel_id) = rejoin_for {
-            eprintln!("output device rate differs from call; rebuilding audio path");
             let _ = outbound_tx
-              .send(crate::Message::VoiceRejoinForSettings { voice_channel_id })
+              .send(crate::Message::VoiceDeviceHealth {
+                epoch: active.epoch,
+                input_ok: active.mic.is_some(),
+                output_ok: active.speaker.is_some(),
+              })
               .await;
           }
         }
@@ -549,7 +524,6 @@ async fn apply_signal(
   msg: ServerVoice,
   mixer: &crate::audio_processing::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
-  out_rate: u32,
   per_user_gain: UserGainMap,
 ) -> anyhow::Result<()> {
   match msg {
@@ -569,7 +543,6 @@ async fn apply_signal(
               tokio::spawn(read_track(
                 track,
                 mixer.clone(),
-                out_rate,
                 started.clone(),
                 per_user_gain.clone(),
               ));
@@ -612,7 +585,6 @@ fn parse_track_user_id(track_id: &str) -> Option<Uuid> {
 async fn read_track(
   track: Arc<webrtc::track::track_remote::TrackRemote>,
   mixer: crate::audio_processing::mixer::Mixer,
-  out_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
   per_user_gain: UserGainMap,
 ) {
@@ -632,16 +604,6 @@ async fn read_track(
     return;
   }
 
-  let mut out_rs = match crate::audio_processing::resampler::Resampler::new(
-    crate::webrtc_stream::TARGET_RATE,
-    out_rate,
-  ) {
-    Ok(r) => r,
-    Err(e) => {
-      eprintln!("Failed to create resampler for track {id}: {e}");
-      return;
-    }
-  };
   let mut decoder =
     match audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono) {
       Ok(d) => d,
@@ -668,28 +630,27 @@ async fn read_track(
   const MAX_CONCEAL: u16 = 5; // ~100ms
   let mut last_seq: Option<u16> = None;
 
-  let push_frame =
-    |out_rs: &mut crate::audio_processing::resampler::Resampler, s: u32, samples: &[f32]| {
-      let mut at_dev = Vec::new();
-      let _ = out_rs.push(samples, &mut at_dev);
-      // Apply this user's playback gain. Read live so a slider drag mid-call
-      // affects the next frame; skip the work entirely at unity (the common case).
-      let gain = user_id
-        .and_then(|id| {
-          per_user_gain
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
-            .copied()
-        })
-        .unwrap_or(1.0);
-      if gain != 1.0 {
-        for sample in &mut at_dev {
-          *sample *= gain;
-        }
-      }
-      mixer.push(s, &at_dev);
-    };
+  // the mixer runs at 48k, so decoded frames go straight in; the speaker does the
+  // single resample to the device rate (see spawn_speaker).
+  let push_frame = |s: u32, samples: &[f32]| {
+    // Apply this user's playback gain. Read live so a slider drag mid-call affects
+    // the next frame; skip the work (and the copy) entirely at unity, the common case.
+    let gain = user_id
+      .and_then(|id| {
+        per_user_gain
+          .read()
+          .unwrap_or_else(|e| e.into_inner())
+          .get(&id)
+          .copied()
+      })
+      .unwrap_or(1.0);
+    if gain != 1.0 {
+      let scaled: Vec<f32> = samples.iter().map(|sample| sample * gain).collect();
+      mixer.push(s, &scaled);
+    } else {
+      mixer.push(s, samples);
+    }
+  };
 
   while let Ok((pkt, _)) = track.read_rtp().await {
     let seq = pkt.header.sequence_number;
@@ -722,22 +683,22 @@ async fn read_track(
       // Opus PLC (generated silence/continuation), then FEC-recover the last one.
       for _ in 0..gap - 1 {
         if let Ok(n) = decoder.decode_float(None::<&[u8]>, &mut pcm[..FRAME], false) {
-          push_frame(&mut out_rs, s, &pcm[..n]);
+          push_frame(s, &pcm[..n]);
         }
       }
       match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm[..FRAME], true) {
-        Ok(n) => push_frame(&mut out_rs, s, &pcm[..n]),
+        Ok(n) => push_frame(s, &pcm[..n]),
         // no FEC data present for that frame → fall back to one more PLC frame.
         Err(_) => {
           if let Ok(n) = decoder.decode_float(None::<&[u8]>, &mut pcm[..FRAME], false) {
-            push_frame(&mut out_rs, s, &pcm[..n]);
+            push_frame(s, &pcm[..n]);
           }
         }
       }
     }
 
     match decoder.decode_float(Some(&pkt.payload[..]), &mut pcm, false) {
-      Ok(n) => push_frame(&mut out_rs, s, &pcm[..n]),
+      Ok(n) => push_frame(s, &pcm[..n]),
       Err(e) => eprintln!("opus decode error: {e}"),
     }
     last_seq = Some(seq);

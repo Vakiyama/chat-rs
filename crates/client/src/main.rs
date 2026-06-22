@@ -223,11 +223,6 @@ pub enum Message {
     epoch: u32,
     receiving: bool,
   },
-  // a voice setting (output device at a new sample rate) needs the whole audio
-  // path rebuilt; rejoin on a fresh, model-owned epoch.
-  VoiceRejoinForSettings {
-    voice_channel_id: Uuid,
-  },
   LoggedIn(User),
 }
 
@@ -695,17 +690,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 
       call.mic_receiving = receiving;
 
-      Task::none()
-    }
-    Message::VoiceRejoinForSettings { voice_channel_id } => {
-      // bump the model-owned epoch so the dying pc's late callbacks are filtered
-      // while the rebuilt call's callbacks are accepted (same contract as join).
-      if let Some(voice) = &mut model.voice {
-        voice.epoch += 1;
-        voice.link_state = LinkState::Connecting;
-        voice.mic_receiving = true;
-        voice.handle.join(voice_channel_id, voice.epoch);
-      }
       Task::none()
     }
     Message::ServerSentPresenceSnapshot {

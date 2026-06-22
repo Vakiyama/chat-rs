@@ -309,22 +309,20 @@ pub fn build_mic(
 }
 
 /// Build (and start) a speaker stream on the named device (or the default),
-/// reusing the given mixer and render tee, returning the stream and its native
-/// sample rate. A live swap is only seamless when the rate matches the mixer's.
+/// reusing the given mixer and render tee. The mixer runs at 48k and the speaker
+/// resamples to its own device rate, so any output device can be swapped in live.
 pub fn build_speaker(
   mixer: Mixer,
   render_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
   device_name: Option<&str>,
-) -> anyhow::Result<(cpal::Stream, u32)> {
+) -> anyhow::Result<cpal::Stream> {
   let host = cpal::default_host();
   let dev = resolve_output_device(&host, device_name)?;
   let cfg = pick_config(
     dev.default_output_config()?,
     dev.supported_output_configs()?,
   )?;
-  let rate = cfg.sample_rate();
-  let stream = spawn_speaker(mixer, render_tx, cfg, dev)?;
-  Ok((stream, rate))
+  spawn_speaker(mixer, render_tx, cfg, dev)
 }
 
 fn pick_config(
@@ -397,7 +395,13 @@ fn spawn_speaker(
 ) -> anyhow::Result<cpal::Stream> {
   let stream_config: cpal::StreamConfig = config.into();
   let channels = stream_config.channels as usize;
-  let mut scratch: Vec<f32> = Vec::new();
+  let out_rate = stream_config.sample_rate;
+  // the mixer runs at 48k; resample the single mono mix to the device rate here,
+  // once, instead of once per peer. The pre-resample 48k mix is teed to the APM,
+  // so the echo reference never round-trips through the device rate.
+  let mut mix_rs = Resampler::new(TARGET_RATE, out_rate)?;
+  let mut mix48: Vec<f32> = Vec::new(); // one 10ms block of 48k mix
+  let mut dev: Vec<f32> = Vec::new(); // resampled device-rate samples, kept across callbacks
 
   let stream = device.build_output_stream(
     stream_config,
@@ -412,12 +416,24 @@ fn spawn_speaker(
           return;
         }
         let frames = data.len() / channels;
-        scratch.resize(frames, 0.0);
-        mixer.mix_mono(&mut scratch); // mono mix, no channel logic
-        for (frame, s) in data.chunks_mut(channels).zip(scratch.iter()) {
-          frame.fill(*s); // upmix to device channels
+        // pull 48k mix one APM frame at a time, tee it, and resample into `dev`
+        // until we have enough device-rate samples for this callback. The device
+        // clock paces this loop, so the 48k mix drains at exactly real time.
+        while dev.len() < frames {
+          mix48.resize(APM_FRAME, 0.0);
+          mixer.mix_mono(&mut mix48); // mono mix, no channel logic
+          let _ = render_tx.send(mix48.clone()); // clean 48k tee to the APM
+          if mix_rs.push(&mix48, &mut dev).is_err() {
+            break; // resampler error: emit what we have, pad the rest with silence
+          }
         }
-        let _ = render_tx.send(scratch.clone()); // tee to the APM
+        let n = frames.min(dev.len());
+        for (frame, s) in data.chunks_mut(channels).zip(dev.drain(..n)) {
+          frame.fill(s); // upmix to device channels
+        }
+        for frame in data.chunks_mut(channels).skip(n) {
+          frame.fill(0.0); // underran the resampler (priming): silence the tail
+        }
       }));
       if result.is_err() {
         data.fill(0.0); // keep the stream alive; output silence this cycle
@@ -444,7 +460,6 @@ pub struct CallSetup {
   pub speaker: Option<cpal::Stream>,
   pub mixer: Mixer,
   pub in_rate: u32,
-  pub out_rate: u32,
   pub cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
   pub rnd_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
   // monotonically counts mic capture buffers that carried real signal (peak
@@ -510,16 +525,15 @@ pub async fn setup_client(
   let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<CaptureEvent>();
   let (rnd_tx, rnd_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
-  // The output rate is fixed here for the life of the call: the mixer's jitter
-  // buffer, every per-peer resampler, and the APM render config are all sized to
-  // it. A live speaker swap is only seamless when the new device shares this rate.
+  // The mixer runs at 48k for the whole call; the speaker resamples to its own
+  // device rate, so the call is rate-agnostic and any output device swaps in live.
   //
   // A dead output device is non-fatal: we still join (so the user hears the rest
   // of the UI react and can fix devices from Settings), just with no speaker.
   // The mixer self-trims each source to 200ms, so leaving it undrained can't grow
-  // unbounded. When no device is resolvable we size the mixer/APM render at the
-  // target rate so the rest of the pipeline still has a coherent rate to use.
-  let (cpal_stream_output, out_rate, mixer) =
+  // unbounded.
+  let mixer = Mixer::new(TARGET_RATE, deafened.clone());
+  let cpal_stream_output =
     match resolve_output_device(&cpal::default_host(), output_name.as_deref()).and_then(|dev| {
       let cfg = pick_config(
         dev.default_output_config()?,
@@ -528,20 +542,17 @@ pub async fn setup_client(
       Ok((dev, cfg))
     }) {
       Ok((out_dev, out_cfg)) => {
-        let out_rate = out_cfg.sample_rate();
-        let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
         match spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev) {
-          Ok(stream) => (Some(stream), out_rate, mixer), // playback + render tee
+          Ok(stream) => Some(stream), // playback + render tee
           Err(e) => {
             eprintln!("output device build failed; joining without speaker: {e:?}");
-            (None, out_rate, mixer)
+            None
           }
         }
       }
       Err(e) => {
         eprintln!("no usable output device; joining without speaker: {e:?}");
-        let mixer = Mixer::new(TARGET_RATE, deafened.clone());
-        (None, TARGET_RATE, mixer)
+        None
       }
     };
 
@@ -562,7 +573,6 @@ pub async fn setup_client(
     rnd_rx,
     mic_track.clone(),
     in_rate,
-    out_rate,
     voice_channel_id,
     conn,
     muted,
@@ -588,7 +598,6 @@ pub async fn setup_client(
     speaker: cpal_stream_output,
     mixer,
     in_rate,
-    out_rate,
     cap_tx,
     rnd_tx,
     capture_signal_frames,
@@ -602,7 +611,6 @@ fn spawn_audio_processor(
   mut rnd_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
   track: Arc<TrackLocalStaticSample>,
   in_rate: SampleRate,
-  out_rate: SampleRate,
   voice_channel_id: Uuid,
   mut conn: WebRTCConnection,
   muted: Arc<std::sync::atomic::AtomicBool>,
@@ -612,7 +620,6 @@ fn spawn_audio_processor(
   fec_loss_perc: Arc<std::sync::atomic::AtomicU32>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
-  let mut rnd_rs = Resampler::new(out_rate, TARGET_RATE)?;
 
   tokio::spawn(async move {
     let config = Config {
@@ -655,7 +662,6 @@ fn spawn_audio_processor(
     let mut rnd_sink = vec![0f32; APM_FRAME];
     let mut frame = vec![0f32; APM_FRAME]; // reused 10ms capture frame
     let mut cap_at48k: Vec<f32> = Vec::new();
-    let mut rnd_at48k: Vec<f32> = Vec::new();
     let mut pcm_20ms: Vec<f32> = Vec::with_capacity(OPUS_FRAME);
     let mut out = vec![0u8; MAX_PACKET_BYTES];
     // noise gate: closes (mutes the published frame) once the post-NS RMS stays
@@ -674,9 +680,8 @@ fn spawn_audio_processor(
     loop {
       tokio::select! {
         Some(chunk) = rnd_rx.recv() => {
-          rnd_at48k.clear();
-          if let Err(e) = rnd_rs.push(&chunk, &mut rnd_at48k) { eprintln!("render resample: {e:?}"); continue; }
-          rnd_buf.extend_from_slice(&rnd_at48k);
+          // chunk is the 48k mix teed from the speaker, already at 48k
+          rnd_buf.extend_from_slice(&chunk);
           while rnd_buf.len() >= APM_FRAME {
             if let Err(e) = apm.process_render_f32(&[&rnd_buf[..APM_FRAME]], &mut [&mut rnd_sink[..]]) {
               eprintln!("apm render error: {e:?}");
