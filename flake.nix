@@ -35,7 +35,15 @@
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             name = "chat-rs-source";
-            filter = path: type: (pkgs.lib.hasSuffix ".proto" path) || (craneLib.filterCargoSources path type);
+            # crane's cargo filter keeps only Rust/manifest sources, so non-.rs
+            # assets the client embeds with include_bytes! (audio cues, fonts)
+            # must be allowed through explicitly — same as the .proto files.
+            filter =
+              path: type:
+              (pkgs.lib.hasSuffix ".proto" path)
+              || (pkgs.lib.hasSuffix ".wav" path)
+              || (pkgs.lib.hasSuffix ".ttf" path)
+              || (craneLib.filterCargoSources path type);
           };
 
           commonArgs = {
