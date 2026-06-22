@@ -7,7 +7,7 @@ use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
 use iced::font::Weight;
@@ -1014,6 +1014,40 @@ fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
   .into()
 }
 
+fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>) {
+  let today = Local::now().date_naive();
+  let label = match (today - date).num_days() {
+    0 => "Today".to_string(),
+    1 => "Yesterday".to_string(),
+    _ => date.format("%A, %B %-d, %Y").to_string(),
+  };
+
+  // deterministic, stable key per calendar day so keyed diffing stays consistent
+  let key = Uuid::from_u64_pair(0xda7e_da7e_da7e_da7e, date.num_days_from_ce() as u64);
+
+  let line = || {
+    rule::horizontal(1).style(|theme: &Theme| rule::Style {
+      color: theme.extended_palette().secondary.weak.color,
+      ..rule::default(theme)
+    })
+  };
+
+  (
+    key,
+    row![
+      container(line()).width(Length::Fill).center_y(Length::Fill),
+      text(label).size(12).style(|theme| text::Style {
+        color: text::secondary(theme).color,
+      }),
+      container(line()).width(Length::Fill).center_y(Length::Fill),
+    ]
+    .align_y(Center)
+    .spacing(SPACE_GRID as u32)
+    .padding([SPACE_GRID, 0])
+    .into(),
+  )
+}
+
 fn view_posts<'a>(
   posts: &'a IndexMap<Uuid, RenderedPost>,
   loading_more: bool,
@@ -1026,76 +1060,82 @@ fn view_posts<'a>(
     ));
   };
 
-  let posts = posts
-    .iter()
-    .map(|post| {
-      let (id, content, created_at, name) = match post.1 {
-        RenderedPost::Sending {
-          id,
-          created_at,
-          content,
-          name,
-        }
-        | RenderedPost::Errored {
-          id,
-          created_at,
-          content,
-          name,
-        }
-        | RenderedPost::Sent(Post {
-          id,
-          author_name: name,
-          content,
-          created_at,
-          ..
-        }) => (id, content, created_at, name),
-      };
+  let mut previous_date: Option<chrono::NaiveDate> = None;
+  for post in posts.iter() {
+    let (id, content, created_at, name) = match post.1 {
+      RenderedPost::Sending {
+        id,
+        created_at,
+        content,
+        name,
+      }
+      | RenderedPost::Errored {
+        id,
+        created_at,
+        content,
+        name,
+      }
+      | RenderedPost::Sent(Post {
+        id,
+        author_name: name,
+        content,
+        created_at,
+        ..
+      }) => (id, content, created_at, name),
+    };
 
-      let display_time = created_at.with_timezone(&Local).format("%H:%M").to_string();
-      let text_color = match post.1 {
-        RenderedPost::Sending { .. } => text::secondary,
-        RenderedPost::Errored { .. } => text::danger,
-        RenderedPost::Sent(_) => text::default,
-      };
+    let local = created_at.with_timezone(&Local);
+    let date = local.date_naive();
+    if previous_date != Some(date) {
+      children.push(view_day_divider(date));
+      previous_date = Some(date);
+    }
 
-      (
-        *id,
-        row![
-          iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
-            color: text::secondary(theme).color,
+    let display_time = local.format("%H:%M").to_string();
+    let text_color = match post.1 {
+      RenderedPost::Sending { .. } => text::secondary,
+      RenderedPost::Errored { .. } => text::danger,
+      RenderedPost::Sent(_) => text::default,
+    };
+
+    children.push((
+      *id,
+      row![
+        iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
+          color: text::secondary(theme).color,
+          selection: theme.extended_palette().secondary.strong.text
+        }), //.align_x(Alignment::Start),
+        iced_selection::text(name).style(|theme| iced_selection::text::Style {
+          color: text::base(theme).color,
+          selection: theme.extended_palette().secondary.strong.text
+        }),
+        iced_selection::text(content)
+          .style(move |theme| iced_selection::text::Style {
+            color: text_color(theme).color,
             selection: theme.extended_palette().secondary.strong.text
-          }), //.align_x(Alignment::Start),
-          iced_selection::text(name).style(|theme| iced_selection::text::Style {
-            color: text::base(theme).color,
-            selection: theme.extended_palette().secondary.strong.text
-          }),
-          iced_selection::text(content)
-            .style(move |theme| iced_selection::text::Style {
-              color: text_color(theme).color,
-              selection: theme.extended_palette().secondary.strong.text
-            })
-            .wrapping(text::Wrapping::WordOrGlyph)
-        ]
-        .spacing(Pixels(SPACE_GRID.into()))
-        .into(),
-      )
-    })
-    .collect::<Vec<(Uuid, Element<'a, Message>)>>();
-
-  children.extend(posts);
+          })
+          .wrapping(text::Wrapping::WordOrGlyph)
+      ]
+      .spacing(Pixels(SPACE_GRID.into()))
+      .into(),
+    ));
+  }
 
   let scrollbar = Scrollbar::new().width(4).scroller_width(4);
 
   scrollable(
-    column::Column::with_children(children)
-      .padding(padding::right(SPACE_GRID as u32))
-      .padding([SPACE_GRID, 0]),
+    column::Column::with_children(children).padding(padding::Padding {
+      top: SPACE_GRID as f32,
+      right: SPACE_GRID as f32 * 2.0,
+      bottom: SPACE_GRID as f32,
+      left: 0.0,
+    }),
   )
   .direction(scrollable::Direction::Vertical(scrollbar))
   .anchor_bottom()
   .on_scroll(|viewport| {
     // distance from the *top* under anchor_bottom == reversed offset
-    const LOAD_THRESHOLD: f32 = 200.0; // start prefetching ~200px early
+    const LOAD_THRESHOLD: f32 = 400.0; // start prefetching ~200px early
     if viewport.absolute_offset_reversed().y <= LOAD_THRESHOLD {
       Message::UserScrolledToTop
     } else {

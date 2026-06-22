@@ -18,12 +18,10 @@ fn resolve_cue_device(name: Option<&str>) -> Option<cpal_kira::Device> {
   // device by its cpal 0.18 `Display` string, which is the human-readable
   // `description().name()`. cpal 0.17's `name()` returns the raw ALSA pcm_id
   // instead, which would never match the saved choice.
-  host.output_devices().ok()?.find(|dev| {
-    dev
-      .description()
-      .map(|d| d.name() == name)
-      .unwrap_or(false)
-  })
+  host
+    .output_devices()
+    .ok()?
+    .find(|dev| dev.description().map(|d| d.name() == name).unwrap_or(false))
 }
 
 /// Every presence event chat-rs emits a sound for.
