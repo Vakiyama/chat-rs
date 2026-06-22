@@ -157,15 +157,15 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
       // Settings-only subscriptions: Esc closes back to chat, and a timer drives
       // the live mic-level meter. Scoped so they can't fire on chat/auth.
       if matches!(model.screen, Screen::Settings(_)) {
-        subs.push(iced::event::listen_with(|event, _status, _window| {
-          match event {
+        subs.push(iced::event::listen_with(
+          |event, _status, _window| match event {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
               key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
               ..
             }) => Some(Message::Settings(settings::Message::Close)),
             _ => None,
-          }
-        }));
+          },
+        ));
         subs.push(
           iced::time::every(Duration::from_millis(50))
             .map(|_| Message::Settings(settings::Message::Tick)),
@@ -400,15 +400,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::None => iced::Task::none(),
     Message::Loaded(me_return) => match me_return {
       Some(response) => {
-        // model.screen = Screen::Chat(Default::default());
-        model.screen = Screen::Settings(Default::default());
+        model.screen = Screen::Chat(Default::default());
+        // model.screen = Screen::Settings(Default::default());
         model.user = Auth::LoggedIn(User {
           id: response.user_id,
           name: response.username.clone(),
         });
 
-        //iced::Task::done(Message::Chat(chat::Message::Init))
-        Task::none()
+        iced::Task::done(Message::Chat(chat::Message::Init))
+        // Task::none()
       }
       None => Task::none(),
     },
