@@ -46,12 +46,15 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
+              # cmake is a build-time tool (some -sys build scripts invoke it), so it
+              # must be on PATH. With strictDeps only nativeBuildInputs land there —
+              # in buildInputs it's treated as a target lib and never found.
+              pkgs.cmake
             ];
             buildInputs = [
               pkgs.openssl
               pkgs.alsa-lib
               pkgs.libopus
-              pkgs.cmake
             ];
           };
 
