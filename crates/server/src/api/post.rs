@@ -102,6 +102,7 @@ impl PostsService for PostsServer {
       DomainGetPostsResponse {
         posts,
         next_timestamp,
+        text_channel_id,
       }
       .into_proto(),
     ))

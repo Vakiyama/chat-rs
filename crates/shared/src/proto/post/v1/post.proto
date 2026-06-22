@@ -25,4 +25,5 @@ message Post {
 message GetPostsResponse {
   repeated Post posts = 1;
   optional google.protobuf.Timestamp next_timestamp = 2;
+  string text_channel_id = 3;
 }

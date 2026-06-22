@@ -11,6 +11,7 @@ pub struct Post {
 
 #[derive(Clone, Debug)]
 pub struct GetPostsResponse {
+  pub text_channel_id: Uuid,
   pub posts: Vec<Post>,
   pub next_timestamp: Option<chrono::DateTime<Utc>>,
 }
