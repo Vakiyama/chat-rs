@@ -13,9 +13,9 @@ use iced::Alignment::Center;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, rule, scrollable, space, text, text_input};
+use iced::widget::{button, column, operation, rule, scrollable, space, stack, text, text_input};
 use iced::widget::{container, row};
-use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
+use iced::{Border, Color, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -69,6 +69,13 @@ impl RenderedPost {
       RenderedPost::Sending { created_at, .. }
       | RenderedPost::Errored { created_at, .. }
       | RenderedPost::Sent(Post { created_at, .. }) => created_at,
+    }
+  }
+
+  fn author_name(&self) -> &str {
+    match self {
+      RenderedPost::Sending { name, .. } | RenderedPost::Errored { name, .. } => name,
+      RenderedPost::Sent(Post { author_name, .. }) => author_name,
     }
   }
 }
@@ -1048,6 +1055,21 @@ fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>)
   )
 }
 
+// The author-name column is sized to the widest name present in the channel so
+// message content always starts at the same horizontal offset, just past the
+// longest name. Names are truncated to `NAME_MAX_CHARS` first, so one very long
+// name can't push the whole column across the screen.
+const NAME_MAX_CHARS: usize = 22;
+
+fn truncate_name(name: &str) -> String {
+  if name.chars().count() <= NAME_MAX_CHARS {
+    name.to_string()
+  } else {
+    let truncated: String = name.chars().take(NAME_MAX_CHARS - 1).collect();
+    format!("{truncated}…")
+  }
+}
+
 fn view_posts<'a>(
   posts: &'a IndexMap<Uuid, RenderedPost>,
   loading_more: bool,
@@ -1059,6 +1081,13 @@ fn view_posts<'a>(
       text("Loading more posts...").width(Length::Fill).into(),
     ));
   };
+
+  // Widest (truncated) name in the channel — drives the name-column width below.
+  let longest_name = posts
+    .values()
+    .map(|post| truncate_name(post.author_name()))
+    .max_by_key(|name| name.chars().count())
+    .unwrap_or_default();
 
   let mut previous_date: Option<chrono::NaiveDate> = None;
   for post in posts.iter() {
@@ -1105,10 +1134,26 @@ fn view_posts<'a>(
           color: text::secondary(theme).color,
           selection: theme.extended_palette().secondary.strong.text
         }), //.align_x(Alignment::Start),
-        iced_selection::text(name).style(|theme| iced_selection::text::Style {
-          color: text::base(theme).color,
-          selection: theme.extended_palette().secondary.strong.text
-        }),
+        stack![
+          // invisible sizer reserving the width of the widest name in the channel,
+          // plus a little left padding so right-aligned names don't clip
+          container(
+            text(longest_name.clone())
+              .wrapping(text::Wrapping::None)
+              .style(|_theme| text::Style {
+                color: Some(Color::TRANSPARENT)
+              })
+          )
+          .padding(padding::left(SPACE_GRID as f32 * 2.0)),
+          iced_selection::text(truncate_name(name))
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .wrapping(text::Wrapping::None)
+            .style(|theme| iced_selection::text::Style {
+              color: text::base(theme).color,
+              selection: theme.extended_palette().secondary.strong.text
+            }),
+        ],
         iced_selection::text(content)
           .style(move |theme| iced_selection::text::Style {
             color: text_color(theme).color,
