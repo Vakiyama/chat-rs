@@ -117,18 +117,25 @@ pub enum Message {
     seq: u64,
   },
   Stream(ServerText),
-  UserSelectedTextChannel { text_channel_id: Uuid, name: String },
+  UserSelectedTextChannel {
+    text_channel_id: Uuid,
+    name: String,
+  },
   ApiReturnedServers(Result<ServersResponse, tonic::Status>),
   ApiReturnedInitialPosts(Result<GetPostsResponse, tonic::Status>),
   ApiReturnedMorePosts(Result<GetPostsResponse, tonic::Status>),
   UserScrolledToTop,
   TypeAhead(String),
   Init,
-  JoinVoice { voice_channel_id: Uuid },
+  JoinVoice {
+    voice_channel_id: Uuid,
+  },
   LeaveVoice,
   // Intercepted in the top-level update to (re)subscribe voice-call presence for
   // the active server. Not handled inside chat::update.
-  ActiveServerChanged { server_id: Uuid },
+  ActiveServerChanged {
+    server_id: Uuid,
+  },
   // Mute/deafen toggles, also intercepted by the top-level update (they need the
   // voice handle). Not handled inside chat::update.
   ToggleMute,
@@ -136,11 +143,18 @@ pub enum Message {
   // Per-user mixer, set from a participant's right-click menu. Both are
   // intercepted by the top-level update (they touch persisted prefs + the voice
   // handle). `volume` is a linear 0.0..=2.0 multiplier. Not handled in chat::update.
-  SetUserVolume { user_id: Uuid, volume: f32 },
+  SetUserVolume {
+    user_id: Uuid,
+    volume: f32,
+  },
   // Slider released: persist the level once, instead of writing the file on
   // every drag step (mirrors the noise-gate slider in the settings screen).
-  UserVolumeReleased { user_id: Uuid },
-  ToggleUserMute { user_id: Uuid },
+  UserVolumeReleased {
+    user_id: Uuid,
+  },
+  ToggleUserMute {
+    user_id: Uuid,
+  },
   GoToSettings,
   None,
 }
@@ -287,11 +301,13 @@ pub fn update(
         model.typing_seq += 1;
         let seq = model.typing_seq;
         let user_id = from.id;
-        model
-          .typing
-          .entry(text_channel_id)
-          .or_default()
-          .insert(user_id, TypingPeer { name: from.name, seq });
+        model.typing.entry(text_channel_id).or_default().insert(
+          user_id,
+          TypingPeer {
+            name: from.name,
+            seq,
+          },
+        );
 
         // schedule this entry's expiry; a newer event bumps `seq` so this one
         // becomes a no-op (see Message::ExpireTyping).
@@ -312,11 +328,18 @@ pub fn update(
     } => {
       if let Some(channel_typing) = model.typing.get_mut(&text_channel_id) {
         // only remove if this peer hasn't typed again since we scheduled this.
-        if channel_typing.get(&user_id).is_some_and(|peer| peer.seq == seq) {
+        if channel_typing
+          .get(&user_id)
+          .is_some_and(|peer| peer.seq == seq)
+        {
           channel_typing.shift_remove(&user_id);
         }
       }
-      if model.typing.get(&text_channel_id).is_some_and(|c| c.is_empty()) {
+      if model
+        .typing
+        .get(&text_channel_id)
+        .is_some_and(|c| c.is_empty())
+      {
         model.typing.remove(&text_channel_id);
       }
       Task::none()
@@ -728,45 +751,56 @@ fn view_channels<'a>(
       // call. Once joined it becomes a plain row, so clicking it can't trigger a
       // redundant rejoin, and only the header (not the whole call card with its
       // participant list) reacts to hover.
+      // Always a button so the header keeps identical padding/layout whether or
+      // not we're in the call. When joined we just omit `on_press`, which makes
+      // the button inert — it can't trigger a redundant rejoin and shows no hover
+      // highlight (its status stays Disabled).
+      let header_button = button(header_row)
+        .style(|theme: &Theme, status| -> button::Style {
+          let palette = theme.extended_palette();
+          let background = match status {
+            button::Status::Hovered => Some(palette.background.stronger.color.into()),
+            button::Status::Pressed => Some(palette.background.strong.color.into()),
+            // Active + Disabled (joined): no highlight.
+            _ => None,
+          };
+          button::Style {
+            background,
+            text_color: palette.background.base.text,
+            border: Border {
+              radius: (SPACE_GRID as u32 / 2).into(),
+              ..Default::default()
+            },
+            ..button::Style::default()
+          }
+        })
+        .width(Length::Fill);
+
       let header: Element<'a, Message> = if is_selected {
-        container(header_row)
-          // .padding(SPACE_GRID / 2)
-          .width(Length::Fill)
-          .into()
+        header_button.into()
       } else {
-        button(header_row)
-          .style(|theme: &Theme, status| -> button::Style {
-            let palette = theme.extended_palette();
-            let background = match status {
-              button::Status::Hovered => Some(palette.background.stronger.color.into()),
-              button::Status::Pressed => Some(palette.background.strong.color.into()),
-              _ => None,
-            };
-            button::Style {
-              background,
-              text_color: palette.background.base.text,
-              border: Border {
-                radius: (SPACE_GRID as u32 / 2).into(),
-                ..Default::default()
-              },
-              ..button::Style::default()
-            }
-          })
-          .width(Length::Fill)
+        header_button
           .on_press(Message::JoinVoice {
             voice_channel_id: voice_channel.id,
           })
           .into()
       };
 
-      let participants = column::Column::with_children({
+      // NON-keyed column on purpose: rows are heterogeneous (our own row is a
+      // plain container, peers are stateful ContextMenus). A keyed column
+      // reconciles reordered children with a non-tag-checking diff, which can
+      // pair a ContextMenu element with a leftover stateless tree when the
+      // roster changes — and then panics ("Downcast on stateless state") on the
+      // overlay pass. A plain Column tag-checks each child and rebuilds state on
+      // a type mismatch, so it stays correct as people join/leave.
+      let participants = iced::widget::Column::with_children({
         main_model
           .room_presence
           .get(&voice_channel.id)
           .map(|users| users.as_slice())
           .unwrap_or(&[])
           .iter()
-          .map(|presence| -> (Uuid, Element<'a, Message>) {
+          .map(|presence| -> Element<'a, Message> {
             let muted_by_me = main_model
               .per_user_audio
               .get(&presence.user.id)
@@ -898,7 +932,7 @@ fn view_channels<'a>(
               })
               .into()
             };
-            (user_id, element)
+            element
           })
       })
       .spacing((SPACE_GRID as u32) / 2)
@@ -1158,7 +1192,9 @@ fn view_text_chat_window<'a>(
       use iced::keyboard::Key;
       use iced::keyboard::key::Named;
       if matches!(&key_press.key, Key::Named(Named::Enter)) && !key_press.modifiers.shift() {
-        Some(text_editor::Binding::Custom(Message::UserSubmittedChatInput))
+        Some(text_editor::Binding::Custom(
+          Message::UserSubmittedChatInput,
+        ))
       } else {
         text_editor::Binding::from_key_press(key_press)
       }
@@ -1180,16 +1216,24 @@ fn view_text_chat_window<'a>(
 
   container(column![
     // top - channel name
-    view_text_chat_title(name), // middle:
-    row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
-    // Discord-style typing line, just above the input. Always present (as a
-    // fixed-height slot) so toggling it doesn't nudge the layout.
-    container(view_typing_indicator(&typing_names)).padding(Padding {
-      top: 0.0,
-      right: (SPACE_GRID * 2).into(),
-      bottom: 0.0,
-      left: (SPACE_GRID * 2 + SPACE_GRID / 2).into(),
-    }),
+    view_text_chat_title(name),
+    // The message list fills the space above the input. The Discord-style typing
+    // line is floated transparently over the *bottom* of this list (just above
+    // the input) rather than taking its own row — so it reserves no gap and the
+    // messages scroll behind it. It's non-interactive, so scrolling the list
+    // beneath is unaffected.
+    stack![
+      row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
+      container(view_typing_indicator(&typing_names))
+        .width(Length::Fill)
+        .align_bottom(Length::Fill)
+        .padding(Padding {
+          top: 0.0,
+          right: (SPACE_GRID * 2).into(),
+          bottom: 0.0,
+          left: (SPACE_GRID * 2 + SPACE_GRID / 2).into(),
+        }),
+    ],
     // bottom - the message input
     container(editor).padding(Padding {
       top: 0.0,
@@ -1214,14 +1258,21 @@ fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
   };
 
   match line {
-    Some(line) => text(line)
-      .size(12)
-      .height((SPACE_GRID * 2) as f32)
-      .style(|theme: &Theme| text::Style {
-        color: Some(theme.extended_palette().background.weak.text),
-      })
-      .into(),
-    None => space().height((SPACE_GRID * 2) as f32).into(),
+    // Active: an opaque "pill" behind the text so it reads cleanly instead of
+    // clipping with the messages scrolling behind it. Background matches the
+    // chat area (root `base`), so it occludes without looking like a foreign box.
+    Some(line) => container(text(line).size(12).style(|theme: &Theme| text::Style {
+      color: Some(theme.extended_palette().background.weak.text),
+    }))
+    .padding([SPACE_GRID / 4, SPACE_GRID / 2])
+    .style(|theme: &Theme| container::Style {
+      background: Some(theme.extended_palette().background.weak.color.into()),
+      border: border::rounded((SPACE_GRID / 2) as f32),
+      ..container::Style::default()
+    })
+    .into(),
+    // Inactive: render nothing (the overlay reserves no space of its own).
+    None => space().into(),
   }
 }
 
