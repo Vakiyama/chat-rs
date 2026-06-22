@@ -1061,10 +1061,19 @@ fn view_posts<'a>(
       (
         *id,
         row![
-          text(display_time).style(text::secondary), //.align_x(Alignment::Start),
-          text(name).style(text::base),
-          text(content)
-            .style(text_color)
+          iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
+            color: text::secondary(theme).color,
+            selection: theme.extended_palette().secondary.strong.text
+          }), //.align_x(Alignment::Start),
+          iced_selection::text(name).style(|theme| iced_selection::text::Style {
+            color: text::base(theme).color,
+            selection: theme.extended_palette().secondary.strong.text
+          }),
+          iced_selection::text(content)
+            .style(move |theme| iced_selection::text::Style {
+              color: text_color(theme).color,
+              selection: theme.extended_palette().secondary.strong.text
+            })
             .wrapping(text::Wrapping::WordOrGlyph)
         ]
         .spacing(Pixels(SPACE_GRID.into()))

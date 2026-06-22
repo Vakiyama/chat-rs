@@ -1216,6 +1216,7 @@ dependencies = [
  "http-body-util",
  "iced",
  "iced_aw",
+ "iced_selection",
  "indexmap",
  "keyring",
  "kira",
@@ -3451,6 +3452,16 @@ dependencies = [
  "raw-window-handle",
  "sipper",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "iced_selection"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ab7ead659318b8eea8f864bafe96f761e244c32e11d55035b99dcf0c56ba757"
+dependencies = [
+ "iced_widget",
+ "unicode-segmentation",
 ]
 
 [[package]]
