@@ -1231,11 +1231,12 @@ fn view_text_chat_window<'a>(
           top: 0.0,
           right: (SPACE_GRID * 2).into(),
           bottom: 0.0,
-          left: (SPACE_GRID * 2 + SPACE_GRID / 2).into(),
+          left: (SPACE_GRID * 2).into(),
         }),
     ],
-    // bottom - the message input
-    container(editor).padding(Padding {
+    // bottom - the message input. Fill width so the editor is bounded and wraps
+    // long lines (a Shrink container would give it unbounded width = no wrap).
+    container(editor).width(Length::Fill).padding(Padding {
       top: 0.0,
       right: (SPACE_GRID * 2).into(),
       bottom: (SPACE_GRID * 3).into(),
@@ -1264,6 +1265,7 @@ fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
     Some(line) => container(text(line).size(12).style(|theme: &Theme| text::Style {
       color: Some(theme.extended_palette().background.weak.text),
     }))
+    .width(Length::Fill)
     .padding([SPACE_GRID / 4, SPACE_GRID / 2])
     .style(|theme: &Theme| container::Style {
       background: Some(theme.extended_palette().background.weak.color.into()),
@@ -1468,7 +1470,9 @@ fn view_posts<'a>(
     column::Column::with_children(children).padding(padding::Padding {
       top: SPACE_GRID as f32,
       right: SPACE_GRID as f32 * 2.0,
-      bottom: SPACE_GRID as f32,
+      // extra bottom whitespace so the floating typing indicator doesn't occlude
+      // the latest message/timestamp when scrolled to the bottom.
+      bottom: SPACE_GRID as f32 * 3.0,
       left: 0.0,
     }),
   )
