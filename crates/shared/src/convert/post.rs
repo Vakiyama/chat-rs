@@ -4,6 +4,7 @@ pub mod proto {
 
 use crate::convert::IntoProto;
 use crate::convert::TryFromProto;
+use crate::convert::stream::parse_id;
 use crate::domain::post::*;
 use chrono::DateTime;
 use prost_types::Timestamp;
@@ -24,6 +25,7 @@ impl IntoProto<GetPostsResponseProto> for GetPostsResponse {
     GetPostsResponseProto {
       posts: self.posts.into_iter().map(|p| p.into_proto()).collect(),
       next_timestamp,
+      text_channel_id: self.text_channel_id.into(),
     }
   }
 }
@@ -39,6 +41,7 @@ impl IntoProto<PostProto> for Post {
       author_name: self.author_name,
       content: self.content,
       created_at: Some(created_at),
+      text_channel_id: self.text_channel_id.into(),
     }
   }
 }
@@ -97,6 +100,7 @@ impl TryFromProto<GetPostsResponseProto> for GetPostsResponse {
     Ok(GetPostsResponse {
       posts,
       next_timestamp,
+      text_channel_id: parse_id(proto.text_channel_id)?,
     })
   }
 }
@@ -121,6 +125,7 @@ impl TryFromProto<PostProto> for Post {
       author_name: proto.author_name,
       content: proto.content,
       created_at,
+      text_channel_id: parse_id(proto.text_channel_id)?,
     })
   }
 }

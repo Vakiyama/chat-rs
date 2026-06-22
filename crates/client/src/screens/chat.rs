@@ -37,6 +37,7 @@ use uuid::Uuid;
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
+  posts: HashMap<Uuid, AsyncData<IndexMap<Uuid, RenderedPost>, tonic::Status>>,
   // multi-line editor buffer (Shift+Enter inserts a newline; Enter submits).
   input: text_editor::Content,
   // peers currently typing, keyed channel -> (user id -> entry). The IndexMap
@@ -66,7 +67,6 @@ enum View {
 #[derive(Clone)]
 struct TextChannel {
   id: Uuid,
-  posts: AsyncData<IndexMap<Uuid, RenderedPost>, tonic::Status>,
   next_timestamp: Option<chrono::DateTime<Utc>>,
   loading_more: bool,
   name: String,
@@ -203,7 +203,7 @@ pub fn update(
         return Task::none();
       };
 
-      let AsyncData::Done(Ok(ref mut posts)) = text_channel.posts else {
+      let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&text_channel.id) else {
         return Task::none();
       };
 
@@ -270,7 +270,7 @@ pub fn update(
         // id, so clear by author name (best-effort; the timeout covers the rest).
         let author_name = post.author_name.clone();
 
-        let AsyncData::Done(Ok(ref mut posts)) = text_channel.posts else {
+        let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&post.text_channel_id) else {
           return Task::none();
         };
 
@@ -350,28 +350,32 @@ pub fn update(
     } => {
       model.view = View::TextChannel(TextChannel {
         id: text_channel_id,
-        posts: AsyncData::Loading,
         loading_more: false,
         next_timestamp: None,
         name,
       });
-      Task::future(async move {
-        let mut client = client::get().await;
-        Message::ApiReturnedInitialPosts(
-          client
-            .posts
-            .get_posts(
-              GetPostsRequest {
-                text_channel_id,
-                limit: 50,
-                starting_before_timestamp: None,
-              }
-              .into_proto(),
-            )
-            .await
-            .and_then(|response| response.into_inner().try_into_domain()),
-        )
-      })
+
+      if model.posts.contains_key(&text_channel_id) {
+        Task::none() // messages were loaded before
+      } else {
+        Task::future(async move {
+          let mut client = client::get().await;
+          Message::ApiReturnedInitialPosts(
+            client
+              .posts
+              .get_posts(
+                GetPostsRequest {
+                  text_channel_id,
+                  limit: 50,
+                  starting_before_timestamp: None,
+                }
+                .into_proto(),
+              )
+              .await
+              .and_then(|response| response.into_inner().try_into_domain()),
+          )
+        })
+      }
     }
     Message::Init => {
       model.servers = AsyncData::Loading;
@@ -427,16 +431,18 @@ pub fn update(
 
       if let Ok(ref res) = res {
         text_channel.next_timestamp = res.next_timestamp;
-      };
 
-      text_channel.posts = AsyncData::Done(res.map(|res| {
-        IndexMap::from_iter(
-          res
-            .posts
-            .into_iter()
-            .map(|post| (post.id, RenderedPost::Sent(post))),
-        )
-      }));
+        model.posts.insert(
+          res.text_channel_id,
+          AsyncData::Done(Ok(IndexMap::from_iter(
+            res
+              .posts
+              .clone()
+              .into_iter()
+              .map(|post| (post.id, RenderedPost::Sent(post))),
+          ))),
+        );
+      };
 
       Task::none()
     }
@@ -454,7 +460,7 @@ pub fn update(
 
       text_channel.next_timestamp = res.next_timestamp;
 
-      if let AsyncData::Done(Ok(ref mut posts)) = text_channel.posts {
+      if let Some(AsyncData::Done(Ok(posts))) = model.posts.get_mut(&res.text_channel_id) {
         let existing = std::mem::take(posts);
 
         let mut combined = IndexMap::with_capacity(existing.len() + res.posts.len());
@@ -562,8 +568,8 @@ pub fn view<'a>(
 
   let text_chat: Element<'_, Message> = match &model.view {
     NoneSelected => container(text("No text chat selected!").center().width(Length::Fill)).into(),
-    View::TextChannel(text_channel) => match &text_channel.posts {
-      AsyncData::NotAsked | AsyncData::Loading => {
+    View::TextChannel(text_channel) => match &model.posts.get(&text_channel.id) {
+      Some(AsyncData::NotAsked) | Some(AsyncData::Loading) | None => {
         // todo: Spinner here
         container(
           text("Loading posts...")
@@ -573,7 +579,7 @@ pub fn view<'a>(
         )
         .into()
       }
-      AsyncData::Done(Err(status)) => container(
+      Some(AsyncData::Done(Err(status))) => container(
         text(format!(
           "An error occurred while loading posts: {}",
           status.code()
@@ -582,7 +588,7 @@ pub fn view<'a>(
         .width(Length::Fill),
       )
       .into(),
-      AsyncData::Done(Ok(posts)) => {
+      Some(AsyncData::Done(Ok(posts))) => {
         let typing_names: Vec<&str> = model
           .typing
           .get(&text_channel.id)

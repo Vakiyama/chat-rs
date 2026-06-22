@@ -168,6 +168,7 @@ impl IntoProto<ServerTextMessage> for ServerText {
               author_name: post.author_name,
               content: post.content,
               created_at: Some(created_at),
+              text_channel_id: post.text_channel_id.into(),
             },
           )),
         }
@@ -358,6 +359,7 @@ impl TryFromProto<ServerTextMessage> for ServerText {
             author_name: chat_message.author_name,
             content: chat_message.content,
             created_at,
+            text_channel_id: parse_id(chat_message.text_channel_id)?,
           }))
         }
         server_text_message::Payload::Pong(pong) => Ok(ServerText::Pong {

@@ -20,9 +20,11 @@ message Post {
   string author_name = 2;
   string content = 3;
   google.protobuf.Timestamp created_at = 4;
+  string text_channel_id = 5;
 }
 
 message GetPostsResponse {
   repeated Post posts = 1;
   optional google.protobuf.Timestamp next_timestamp = 2;
+  string text_channel_id = 3;
 }

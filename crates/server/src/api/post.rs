@@ -85,6 +85,7 @@ impl PostsService for PostsServer {
         author_name: poster.username,
         content: post.content,
         created_at: post.created_at,
+        text_channel_id,
       })
       .collect();
 
@@ -102,6 +103,7 @@ impl PostsService for PostsServer {
       DomainGetPostsResponse {
         posts,
         next_timestamp,
+        text_channel_id,
       }
       .into_proto(),
     ))
