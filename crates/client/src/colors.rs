@@ -51,3 +51,67 @@ impl AccentsExt for Theme {
     }
   }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Neutrals {
+  pub crust: Color,
+  pub mantle: Color,
+  pub base: Color,
+  pub surface0: Color,
+  pub surface1: Color,
+  pub surface2: Color,
+}
+
+pub const FRAPPE_NEUTRALS: Neutrals = Neutrals {
+  crust: Color::from_rgb8(0x23, 0x26, 0x34),
+  mantle: Color::from_rgb8(0x29, 0x2c, 0x3c),
+  base: Color::from_rgb8(0x30, 0x34, 0x46),
+  surface0: Color::from_rgb8(0x41, 0x45, 0x59),
+  surface1: Color::from_rgb8(0x51, 0x57, 0x6d),
+  surface2: Color::from_rgb8(0x62, 0x68, 0x80),
+};
+
+pub trait NeutralsExt {
+  fn neutrals(&self) -> Neutrals;
+}
+
+impl NeutralsExt for Theme {
+  fn neutrals(&self) -> Neutrals {
+    match self {
+      Theme::CatppuccinFrappe => FRAPPE_NEUTRALS,
+      _ => FRAPPE_NEUTRALS,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Text {
+  pub text: Color, // primary text
+  pub subtext1: Color,
+  pub subtext0: Color, // secondary text
+  pub overlay2: Color,
+  pub overlay1: Color, // placeholders / muted
+  pub overlay0: Color, // disabled / faintest
+}
+
+pub const FRAPPE_TEXT: Text = Text {
+  text: Color::from_rgb8(0xc6, 0xd0, 0xf5),
+  subtext1: Color::from_rgb8(0xb5, 0xbf, 0xe2),
+  subtext0: Color::from_rgb8(0xa5, 0xad, 0xce),
+  overlay2: Color::from_rgb8(0x94, 0x9c, 0xbb),
+  overlay1: Color::from_rgb8(0x83, 0x8b, 0xa7),
+  overlay0: Color::from_rgb8(0x73, 0x79, 0x94),
+};
+
+pub trait TextExt {
+  fn text(&self) -> Text;
+}
+
+impl TextExt for Theme {
+  fn text(&self) -> Text {
+    match self {
+      Theme::CatppuccinFrappe => FRAPPE_TEXT,
+      _ => FRAPPE_TEXT,
+    }
+  }
+}

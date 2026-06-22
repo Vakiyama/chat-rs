@@ -247,6 +247,19 @@ impl GrpcClient {
 
     tokens.access_token.is_some() && tokens.refresh_token.is_some()
   }
+
+  /// Log out: drop the in-memory access/refresh tokens and erase the persisted
+  /// refresh token from the system credential store.
+  pub async fn clear_tokens(&self) {
+    {
+      let mut tokens = self.tokens.lock().await;
+      tokens.access_token = None;
+      tokens.refresh_token = None;
+    }
+    if let Err(e) = clear_refresh_token().await {
+      eprintln!("Failed to clear refresh token from credential store: {e}");
+    }
+  }
 }
 
 static GRPC_CLIENT: tokio::sync::OnceCell<GrpcClient> = OnceCell::const_new();

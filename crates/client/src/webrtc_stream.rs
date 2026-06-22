@@ -93,6 +93,227 @@ pub fn connect() -> impl Sipper<Never, Event> {
 
 pub const TARGET_RATE: u32 = 48_000;
 
+/// What the mic stream sends to the audio processor. `Rate` is emitted once when
+/// the input device (and thus its native sample rate) changes live, so the
+/// processor can rebuild its capture resampler before the new samples arrive.
+pub enum CaptureEvent {
+  Samples(Vec<f32>),
+  Rate(u32),
+}
+
+// cpal 0.18 exposes the device name through `Display` (`to_string()`), not a
+// `name()` accessor — that's our stable identifier for a saved device choice.
+fn resolve_input_device(host: &cpal::Host, name: Option<&str>) -> anyhow::Result<Device> {
+  if let Some(name) = name {
+    for dev in host.input_devices()? {
+      if dev.to_string() == name {
+        return Ok(dev);
+      }
+    }
+    eprintln!("input device {name:?} not found; falling back to default");
+  }
+  host
+    .default_input_device()
+    .ok_or_else(|| anyhow::anyhow!("no input device"))
+}
+
+fn resolve_output_device(host: &cpal::Host, name: Option<&str>) -> anyhow::Result<Device> {
+  if let Some(name) = name {
+    for dev in host.output_devices()? {
+      if dev.to_string() == name {
+        return Ok(dev);
+      }
+    }
+    eprintln!("output device {name:?} not found; falling back to default");
+  }
+  host
+    .default_output_device()
+    .ok_or_else(|| anyhow::anyhow!("no output device"))
+}
+
+// ALSA enumerates a flood of virtual/plugin PCMs (and outright duplicate names).
+// Drop the obvious plugin entries and de-duplicate so the picker is readable.
+// "default"/"pulse"/"pipewire" and real hardware survive; if the filter would
+// empty the list we fall back to the merely-deduped one as a safety net.
+fn clean_device_list(names: Vec<String>) -> Vec<String> {
+  const NOISE_PREFIXES: &[&str] = &[
+    "sysdefault",
+    "samplerate",
+    "speexrate",
+    "upmix",
+    "vdownmix",
+    "dmix",
+    "dsnoop",
+    "surround",
+    "iec958",
+    "spdif",
+    "modem",
+    "phoneline",
+    "usbstream",
+    "null",
+    "oss",
+  ];
+
+  let dedup = |iter: &mut dyn Iterator<Item = String>| -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    iter.filter(|n| seen.insert(n.clone())).collect()
+  };
+
+  let filtered = dedup(
+    &mut names
+      .iter()
+      .filter(|n| {
+        let lower = n.to_ascii_lowercase();
+        !NOISE_PREFIXES.iter().any(|p| lower.starts_with(p))
+      })
+      .cloned(),
+  );
+
+  if filtered.is_empty() {
+    dedup(&mut names.into_iter())
+  } else {
+    filtered
+  }
+}
+
+/// Enumerate input device names for the settings picker. Best-effort: returns an
+/// empty list rather than erroring so the UI can still render.
+pub fn list_input_devices() -> Vec<String> {
+  clean_device_list(
+    cpal::default_host()
+      .input_devices()
+      .map(|devs| devs.map(|d| d.to_string()).collect())
+      .unwrap_or_default(),
+  )
+}
+
+/// Enumerate output device names for the settings picker.
+pub fn list_output_devices() -> Vec<String> {
+  clean_device_list(
+    cpal::default_host()
+      .output_devices()
+      .map(|devs| devs.map(|d| d.to_string()).collect())
+      .unwrap_or_default(),
+  )
+}
+
+/// A lightweight standalone mic-level meter for the settings screen, independent
+/// of any call. Runs its own capture stream on a dedicated thread (cpal streams
+/// aren't `Send`) and publishes a smoothed RMS level (f32 bits) that the UI
+/// polls. Dropping it stops the stream.
+pub struct MicMonitor {
+  stop: Arc<std::sync::atomic::AtomicBool>,
+  level: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl MicMonitor {
+  pub fn start(device_name: Option<String>) -> Self {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    let stop = Arc::new(AtomicBool::new(false));
+    let level = Arc::new(AtomicU32::new(0));
+    let stop_thread = stop.clone();
+    let level_thread = level.clone();
+
+    std::thread::spawn(move || {
+      let host = cpal::default_host();
+      let dev = match resolve_input_device(&host, device_name.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+          eprintln!("mic monitor: no input device: {e:?}");
+          return;
+        }
+      };
+      let cfg = match (dev.default_input_config(), dev.supported_input_configs()) {
+        (Ok(default), Ok(ranges)) => match pick_config(default, ranges) {
+          Ok(c) => c,
+          Err(e) => {
+            eprintln!("mic monitor: pick config: {e:?}");
+            return;
+          }
+        },
+        (Err(e), _) | (_, Err(e)) => {
+          eprintln!("mic monitor: query config: {e:?}");
+          return;
+        }
+      };
+      let stream_cfg: cpal::StreamConfig = cfg.into();
+
+      // peak-hold meter: snaps up to transients, decays smoothly.
+      let mut smoothed = 0f32;
+      let stream = dev.build_input_stream(
+        stream_cfg,
+        move |data: &[f32], _| {
+          let rms = (data.iter().map(|s| s * s).sum::<f32>() / data.len().max(1) as f32).sqrt();
+          smoothed = (smoothed * 0.85).max(rms);
+          level_thread.store(smoothed.to_bits(), Ordering::Relaxed);
+        },
+        |err| eprintln!("mic monitor input error: {err}"),
+        None,
+      );
+      let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+          eprintln!("mic monitor: build stream failed: {e}");
+          return;
+        }
+      };
+      if let Err(e) = stream.play() {
+        eprintln!("mic monitor: play failed: {e}");
+        return;
+      }
+
+      while !stop_thread.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      }
+      // stream dropped here → capture stops.
+    });
+
+    MicMonitor { stop, level }
+  }
+
+  /// Latest smoothed input RMS (0.0..~1.0).
+  pub fn level(&self) -> f32 {
+    f32::from_bits(self.level.load(std::sync::atomic::Ordering::Relaxed))
+  }
+}
+
+impl Drop for MicMonitor {
+  fn drop(&mut self) {
+    self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+  }
+}
+
+/// Build (and start) a mic capture stream on the named device (or the default),
+/// returning the stream and its native sample rate. Used both at call setup and
+/// when the user switches input device live.
+pub fn build_mic(
+  cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
+  device_name: Option<&str>,
+) -> anyhow::Result<(cpal::Stream, u32)> {
+  let host = cpal::default_host();
+  let dev = resolve_input_device(&host, device_name)?;
+  let cfg = pick_config(dev.default_input_config()?, dev.supported_input_configs()?)?;
+  let rate = cfg.sample_rate();
+  let stream = spawn_mic(cap_tx, cfg, dev)?;
+  Ok((stream, rate))
+}
+
+/// Build (and start) a speaker stream on the named device (or the default),
+/// reusing the given mixer and render tee, returning the stream and its native
+/// sample rate. A live swap is only seamless when the rate matches the mixer's.
+pub fn build_speaker(
+  mixer: Mixer,
+  render_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+  device_name: Option<&str>,
+) -> anyhow::Result<(cpal::Stream, u32)> {
+  let host = cpal::default_host();
+  let dev = resolve_output_device(&host, device_name)?;
+  let cfg = pick_config(dev.default_output_config()?, dev.supported_output_configs()?)?;
+  let rate = cfg.sample_rate();
+  let stream = spawn_speaker(mixer, render_tx, cfg, dev)?;
+  Ok((stream, rate))
+}
+
 fn pick_config(
   default: cpal::SupportedStreamConfig,
   ranges: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
@@ -117,7 +338,7 @@ fn pick_config(
 }
 
 fn spawn_mic(
-  tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+  tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
   config: SupportedStreamConfig,
   device: Device,
 ) -> anyhow::Result<cpal::Stream> {
@@ -133,7 +354,7 @@ fn spawn_mic(
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect();
 
-      let _ = tx.send(mono);
+      let _ = tx.send(CaptureEvent::Samples(mono));
     },
     |err| eprintln!("cpal input error: {err}"),
     None,
@@ -172,19 +393,31 @@ fn spawn_speaker(
   Ok(stream)
 }
 
+/// Everything the voice actor needs to own and drive a call's audio path. The
+/// channels and rates are kept so the actor can rebuild the mic or speaker
+/// stream live when the user switches device.
+pub struct CallSetup {
+  pub pc: RTCPeerConnection,
+  pub offer: RTCSessionDescription,
+  pub mic: cpal::Stream,
+  pub speaker: cpal::Stream,
+  pub mixer: Mixer,
+  pub in_rate: u32,
+  pub out_rate: u32,
+  pub cap_tx: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
+  pub rnd_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn setup_client(
   voice_channel_id: Uuid,
   conn: WebRTCConnection,
   muted: Arc<std::sync::atomic::AtomicBool>,
   deafened: Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<(
-  RTCPeerConnection,
-  RTCSessionDescription,
-  cpal::Stream,
-  cpal::Stream,
-  Mixer,
-  u32,
-)> {
+  gate_threshold: Arc<std::sync::atomic::AtomicU32>,
+  input_name: Option<String>,
+  output_name: Option<String>,
+) -> anyhow::Result<CallSetup> {
   let mut media_engine = MediaEngine::default();
 
   media_engine.register_default_codecs()?;
@@ -222,34 +455,27 @@ pub async fn setup_client(
     while sender.read(&mut buf).await.is_ok() {}
   });
 
-  let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+  let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel::<CaptureEvent>();
   let (rnd_tx, rnd_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
-  let host = cpal::default_host();
-  let in_dev = host
-    .default_input_device()
-    .ok_or_else(|| anyhow::anyhow!("no input device"))?;
+  // The output rate is fixed here for the life of the call: the mixer's jitter
+  // buffer, every per-peer resampler, and the APM render config are all sized to
+  // it. A live speaker swap is only seamless when the new device shares this rate.
+  let (cpal_stream_output, out_rate, mixer) = {
+    // Build the mixer against the chosen device's rate, then the speaker on top.
+    let host = cpal::default_host();
+    let out_dev = resolve_output_device(&host, output_name.as_deref())?;
+    let out_cfg = pick_config(
+      out_dev.default_output_config()?,
+      out_dev.supported_output_configs()?,
+    )?;
+    let out_rate = out_cfg.sample_rate();
+    let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
+    let stream = spawn_speaker(mixer.clone(), rnd_tx.clone(), out_cfg, out_dev)?; // playback + render tee
+    (stream, out_rate, mixer)
+  };
 
-  let out_dev = host
-    .default_output_device()
-    .ok_or_else(|| anyhow::anyhow!("no output device"))?;
-
-  let in_cfg = pick_config(
-    in_dev.default_input_config()?,
-    in_dev.supported_input_configs()?,
-  )?;
-  let out_cfg = pick_config(
-    out_dev.default_output_config()?,
-    out_dev.supported_output_configs()?,
-  )?;
-  println!("in cfg: {in_cfg:?}  out cfg: {out_cfg:?}");
-  let in_rate = in_cfg.sample_rate();
-  let out_rate = out_cfg.sample_rate();
-
-  let mixer = Mixer::new(out_rate, deafened.clone()); // jitter buffer sized in device-rate samples
-
-  let cpal_stream_input = spawn_mic(cap_tx, in_cfg, in_dev)?; // capture only
-  let cpal_stream_output = spawn_speaker(mixer.clone(), rnd_tx, out_cfg, out_dev)?; // playback + render tee
+  let (cpal_stream_input, in_rate) = build_mic(cap_tx.clone(), input_name.as_deref())?; // capture only
   spawn_audio_processor(
     cap_rx,
     rnd_rx,
@@ -260,6 +486,7 @@ pub async fn setup_client(
     conn,
     muted,
     deafened,
+    gate_threshold,
   )?; // APM + Opus, owns the middle
 
   let offer = client.create_offer(None).await?;
@@ -271,19 +498,22 @@ pub async fn setup_client(
     .await
     .ok_or(anyhow::anyhow!("Client has no local description"))?;
 
-  Ok((
-    client,
+  Ok(CallSetup {
+    pc: client,
     offer,
-    cpal_stream_input,
-    cpal_stream_output,
+    mic: cpal_stream_input,
+    speaker: cpal_stream_output,
     mixer,
+    in_rate,
     out_rate,
-  ))
+    cap_tx,
+    rnd_tx,
+  })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_audio_processor(
-  mut cap_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+  mut cap_rx: tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>,
   mut rnd_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
   track: Arc<TrackLocalStaticSample>,
   in_rate: SampleRate,
@@ -292,6 +522,7 @@ fn spawn_audio_processor(
   mut conn: WebRTCConnection,
   muted: Arc<std::sync::atomic::AtomicBool>,
   deafened: Arc<std::sync::atomic::AtomicBool>,
+  gate_threshold: Arc<std::sync::atomic::AtomicU32>,
 ) -> anyhow::Result<()> {
   let mut cap_rs = Resampler::new(in_rate, TARGET_RATE)?;
 
@@ -325,10 +556,11 @@ fn spawn_audio_processor(
     let mut rnd_sink = vec![0f32; 480];
     let mut pcm_20ms: Vec<f32> = Vec::with_capacity(960);
     let mut out = vec![0u8; 1500];
-    // for a noise gate in the future:
-    // let mut gate_hang = 0u32;
-    // const GATE_THRESHOLD: f32 = 0.01; // tune by ear
-    // const GATE_HANGOVER: u32 = 30;
+    // noise gate: closes (mutes the published frame) once the post-NS RMS stays
+    // below the live-tunable threshold for GATE_HANGOVER frames. The threshold is
+    // read each frame from a shared atomic (f32 bits); 0.0 disables the gate.
+    let mut gate_hang = 0u32;
+    const GATE_HANGOVER: u32 = 30; // ~300ms tail so word gaps don't clip
 
     // state above the loop:
     let mut speaking = false;
@@ -348,7 +580,19 @@ fn spawn_audio_processor(
             }
           }
         }
-        Some(chunk) = cap_rx.recv() => {
+        Some(event) = cap_rx.recv() => {
+          let chunk = match event {
+            // input device switched live: rebuild the resampler for the new
+            // device's native rate and drop any half-converted tail.
+            CaptureEvent::Rate(rate) => {
+              match Resampler::new(rate, TARGET_RATE) {
+                Ok(rs) => { cap_rs = rs; cap_buf.clear(); }
+                Err(e) => eprintln!("cap resampler rebuild ({rate}->48k): {e:?}"),
+              }
+              continue;
+            }
+            CaptureEvent::Samples(chunk) => chunk,
+          };
           let mut at48k = Vec::new();
           if let Err(e) = cap_rs.push(&chunk, &mut at48k) { eprintln!("cap resample: {e:?}"); continue; }
           cap_buf.extend_from_slice(&at48k);     // now genuinely 48k
@@ -365,9 +609,12 @@ fn spawn_audio_processor(
               apm.process_capture_f32(&[&frame], &mut [&mut clean[..]])
             }));
 
+            // leave the 10ms frame to publish in `clean`; the raw branches fall
+            // back to the un-processed frame (raw > silence). Gating + encode
+            // happen uniformly below.
             match result {
-                Ok(Ok(())) => pcm_20ms.extend_from_slice(&clean),
-                Ok(Err(e)) => { eprintln!("apm capture err: {e:?}"); pcm_20ms.extend_from_slice(&frame); }
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => { eprintln!("apm capture err: {e:?}"); clean.copy_from_slice(&frame); }
                 Err(_) => {
                     eprintln!("AEC3 PANICKED — rebuilding APM, passing frame raw");
                     let config = Config {
@@ -382,7 +629,7 @@ fn spawn_audio_processor(
                       .render_config(sonora::StreamConfig::new(out_rate, 1))
                       .build();
 
-                    pcm_20ms.extend_from_slice(&frame);   // raw > silence
+                    clean.copy_from_slice(&frame);   // raw > silence
                 }
             }
 
@@ -403,15 +650,25 @@ fn spawn_audio_processor(
                 last_sent = speaking;
             }
 
-            // let rms = (clean.iter().map(|s| s * s).sum::<f32>() / clean.len() as f32).sqrt();
-
-            // if rms > GATE_THRESHOLD {
-            //     gate_hang = GATE_HANGOVER;
-            // } else if gate_hang > 0 {
-            //     gate_hang -= 1;
-            // } else {
-            //     clean.fill(0.0);                // gate closed
-            // }
+            // noise gate: keep the frame while above threshold (or within the
+            // hangover tail), otherwise mute it. Read live so the settings slider
+            // takes effect mid-call; 0.0 disables the gate entirely.
+            let gate_t = f32::from_bits(gate_threshold.load(std::sync::atomic::Ordering::Relaxed));
+            let gate_open = if gate_t <= 0.0 {
+              true
+            } else if rms > gate_t {
+              gate_hang = GATE_HANGOVER;
+              true
+            } else if gate_hang > 0 {
+              gate_hang -= 1;
+              true
+            } else {
+              false
+            };
+            if !gate_open {
+              clean.fill(0.0); // gate closed → publish silence
+            }
+            pcm_20ms.extend_from_slice(&clean);
 
             if pcm_20ms.len() >= 960 {
               // while gated we still drain the accumulator (so it can't grow

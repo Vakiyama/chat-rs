@@ -1,28 +1,23 @@
-use std::str::FromStr;
-
-use crate::colors::AccentsExt;
+use crate::colors::{AccentsExt, NeutralsExt};
 use crate::screens::chat::View::NoneSelected;
+use crate::types::async_data::AsyncData;
 use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
-
-use crate::types::async_data::AsyncData;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
-use chat_shared::domain::stream::{ClientText, DisplayVoiceUser, ServerText, User};
+use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
-use iced::advanced::Widget;
-use iced::border::Radius;
 use iced::font::Weight;
 use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, column, operation, scrollable, text, text_input};
+use iced::widget::{button, column, operation, rule, scrollable, space, text, text_input};
 use iced::widget::{container, row};
 use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
-use iced_aw::style::colors::BLACK;
 use indexmap::IndexMap;
+use std::str::FromStr;
 use uuid::Uuid;
 
 // --------------------------------- MODEL ---------------------------------
@@ -99,6 +94,7 @@ pub enum Message {
   // voice handle). Not handled inside chat::update.
   ToggleMute,
   ToggleDeafen,
+  GoToSettings,
   None,
 }
 
@@ -375,7 +371,8 @@ pub fn update(
     | Message::LeaveVoice
     | Message::ActiveServerChanged { .. }
     | Message::ToggleMute
-    | Message::ToggleDeafen => Task::none(),
+    | Message::ToggleDeafen
+    | Message::GoToSettings => Task::none(),
   }
 }
 
@@ -479,18 +476,6 @@ fn view_channels<'a>(
         NoneSelected => false,
         View::TextChannel(text_channel_view) => text_channel.id == text_channel_view.id,
       };
-
-      // let selected_button_style = move |theme: &Theme| -> container::Style {
-      //   container::Style {
-      //     background: Some(theme.extended_palette().background.weak.color.into()),
-      //     text_color: if is_selected {
-      //       Some(theme.extended_palette().background.neutral.text)
-      //     } else {
-      //       None
-      //     },
-      //     ..container::Style::default()
-      //   }
-      // };
 
       button(
         row![
@@ -723,9 +708,12 @@ fn view_channels<'a>(
         .size(16)
     )
     .center(Length::Fill)
-    .height((SPACE_GRID * 6) as u32 - 2)
+    .height((SPACE_GRID * 6) as u32 - 1)
     .width(Length::Fill),
-    iced::widget::rule::horizontal(2),
+    iced::widget::rule::horizontal(1).style(|theme: &Theme| rule::Style {
+      color: theme.neutrals().crust,
+      ..rule::default(theme)
+    }),
     column![
       column![
         row![
@@ -765,28 +753,154 @@ fn view_channels<'a>(
   .width(Length::Fill)
   .height(Length::Fill);
 
-  let mut sidebar = column![channel_list]
-    .height(Length::Fill)
-    .spacing((SPACE_GRID / 2) as u32);
+  let mut sidebar = column![channel_list].height(Length::Fill);
 
-  if let Some(leave_call) = view_leave_call(active_voice_channel_id, channels, main_model) {
+  if let Some(leave_call) = view_call_controller(active_voice_channel_id, channels, main_model) {
     sidebar = sidebar.push(leave_call);
   }
 
-  container(sidebar)
-    .width(290)
-    .style(|theme| -> container::Style {
-      let palette = theme.extended_palette();
+  sidebar = sidebar.push(view_user_controller(main_model));
 
-      container::Style {
-        background: Some(palette.background.weakest.color.into()),
-        text_color: Some(palette.background.weakest.text),
-        border: border::rounded(2),
-        ..container::Style::default()
-      }
+  row![
+    container(sidebar)
+      .width(290)
+      .style(|theme| -> container::Style {
+        let palette = theme.extended_palette();
+
+        container::Style {
+          background: Some(palette.background.weakest.color.into()),
+          text_color: Some(palette.background.weakest.text),
+          border: border::rounded(2),
+          ..container::Style::default()
+        }
+      })
+      .height(Length::Fill),
+    iced::widget::rule::vertical(1).style(|theme: &Theme| rule::Style {
+      color: theme.neutrals().crust,
+      ..rule::default(theme)
     })
-    .height(Length::Fill)
-    .into()
+  ]
+  .into()
+}
+
+fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Message> {
+  let username = match &model.user {
+    crate::model::Auth::LoggedIn(user) => &user.name,
+    crate::model::Auth::NotLoggedIn => "User", // no sense crashing the client; should go to
+                                               // login screen
+  };
+
+  // mute/deafen persist across calls, so they live in the always-present user
+  // controller (Discord-style) rather than only inside the active-call panel.
+  let (muted, deafened) = model
+    .voice
+    .as_ref()
+    .map(|voice| (voice.muted, voice.deafened))
+    .unwrap_or((false, false));
+
+  let mute_button = voice_toggle_button(
+    if muted {
+      GoogleMaterialSymbols::MicOff
+    } else {
+      GoogleMaterialSymbols::Mic
+    },
+    muted,
+    Message::ToggleMute,
+  );
+
+  let deafen_button = voice_toggle_button(
+    if deafened {
+      GoogleMaterialSymbols::HeadsetOff
+    } else {
+      GoogleMaterialSymbols::HeadsetMic
+    },
+    deafened,
+    Message::ToggleDeafen,
+  );
+
+  container(
+    row![
+      container(
+        text(username.get(0..1).unwrap_or("U"))
+          .font(Font {
+            weight: Weight::Bold,
+            ..SOURCE_SANS_REGULAR
+          })
+          .size(14)
+      )
+      .style(|theme: &Theme| {
+        container::Style {
+          text_color: Some(theme.neutrals().crust),
+          background: Some(theme.accents().rosewater.into()),
+          border: Border {
+            color: theme.accents().rosewater,
+            width: 3.0,
+            radius: border::radius(999),
+          },
+          ..container::Style::default()
+        }
+      })
+      .center(Length::Fill)
+      .width(32)
+      .height(32),
+      column![
+        text(username)
+          .font(Font {
+            weight: Weight::Semibold,
+            ..SOURCE_SANS_REGULAR
+          })
+          .style(|theme: &Theme| text::Style {
+            color: Some(theme.extended_palette().background.neutral.text)
+          })
+          .size(14)
+          .line_height(1.0),
+        text("Online")
+          .font(Font {
+            weight: Weight::Light,
+            ..SOURCE_SANS_REGULAR
+          })
+          .size(12)
+      ]
+      .spacing(0),
+      space::horizontal(),
+      mute_button,
+      deafen_button,
+      button(icon(GoogleMaterialSymbols::Settings).size(20))
+        .on_press(Message::GoToSettings)
+        .style(move |theme: &Theme, status| {
+          let palette = theme.extended_palette();
+          let text_color = palette.background.weakest.text;
+          let background = match status {
+            button::Status::Hovered | button::Status::Pressed => {
+              Some(palette.background.weakest.color.into())
+            }
+            _ => None,
+          };
+          button::Style {
+            background,
+            text_color,
+            border: Border {
+              radius: (SPACE_GRID as u32 / 2).into(),
+              ..Default::default()
+            },
+            ..button::Style::default()
+          }
+        })
+    ]
+    .align_y(Center)
+    .spacing(SPACE_GRID as u32),
+  )
+  .width(Length::Fill)
+  .padding(SPACE_GRID)
+  .style(|theme: &Theme| {
+    let neutrals = theme.neutrals();
+    container::Style {
+      background: Some(neutrals.mantle.into()),
+      border: border::rounded(2),
+      ..container::Style::default()
+    }
+  })
+  .into()
 }
 
 // for when we display online text_chat members
@@ -890,11 +1004,12 @@ fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
     )
     .width(Length::Fill)
     .center_y(Length::Fill)
-    .height((SPACE_GRID * 6) as u32 - 2),
+    .height((SPACE_GRID * 6) as u32 - 1),
     // .style(container::primary),
-    iced::widget::rule::horizontal(2) // .style(|theme| iced::widget::rule::Style {
-                                      //   ..iced::widget::rule::default(theme)
-                                      // })
+    iced::widget::rule::horizontal(1).style(|theme: &Theme| rule::Style {
+      color: theme.neutrals().crust,
+      ..rule::default(theme)
+    })
   ]
   .into()
 }
@@ -1019,7 +1134,7 @@ fn describe_voice(
     Unstable => ("Voice Connected - Unstable".into(), Tone::Warn, None),
     Live => match media {
       MediaHealth::TransportDegraded => ("Voice Connected - Unstable".into(), Tone::Warn, None),
-      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, Some("no audio")),
+      MediaHealth::NoAudio => ("Voice Connected".into(), Tone::Good, None),
       MediaHealth::Flowing | MediaHealth::Unknown => ("Voice Connected".into(), Tone::Good, None),
     },
   }
@@ -1035,7 +1150,7 @@ fn latency_tone(ms: u32) -> Tone {
 
 // renders a "voice connected" footer pinned to the bottom of the sidebar.
 // returns None when there's no active call, so the caller can skip pushing it.
-fn view_leave_call<'a>(
+fn view_call_controller<'a>(
   active_voice_channel_id: Option<&'a Uuid>,
   channels: &'a [Channel],
   main_model: &'a crate::model::Model,
@@ -1100,27 +1215,9 @@ fn view_leave_call<'a>(
   .spacing(2)
   .width(Length::Fill);
 
-  let mute_button = voice_toggle_button(
-    if voice.muted {
-      GoogleMaterialSymbols::MicOff
-    } else {
-      GoogleMaterialSymbols::Mic
-    },
-    voice.muted,
-    Message::ToggleMute,
-  );
-
-  let deafen_button = voice_toggle_button(
-    if voice.deafened {
-      GoogleMaterialSymbols::HeadsetOff
-    } else {
-      GoogleMaterialSymbols::HeadsetMic
-    },
-    voice.deafened,
-    Message::ToggleDeafen,
-  );
-
-  let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(16))
+  // mute/deafen now live in the user controller; the call panel keeps the
+  // status readout and the leave button.
+  let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(20))
     .on_press(Message::LeaveVoice)
     .style(|theme: &Theme, status| {
       let palette = theme.extended_palette();
@@ -1147,19 +1244,28 @@ fn view_leave_call<'a>(
       }
     });
 
-  let panel = container(row![status, mute_button, deafen_button, leave_button].align_y(Center))
+  let panel = container(row![status, leave_button].align_y(Center))
     .width(Length::Fill)
     .padding(SPACE_GRID)
     .style(|theme: &Theme| {
-      let palette = theme.extended_palette();
+      let neutrals = theme.neutrals();
       container::Style {
-        background: Some(palette.background.weak.color.into()),
+        background: Some(neutrals.base.into()),
         border: border::rounded(2),
         ..container::Style::default()
       }
     });
 
-  Some(panel.into())
+  Some(
+    column![
+      rule::horizontal(1).style(|theme: &Theme| rule::Style {
+        color: theme.neutrals().crust,
+        ..rule::default(theme)
+      }),
+      panel
+    ]
+    .into(),
+  )
 }
 
 // A small icon toggle for the in-call controls (mute / deafen). When `active`
@@ -1169,7 +1275,7 @@ fn voice_toggle_button<'a>(
   active: bool,
   on_press: Message,
 ) -> Element<'a, Message> {
-  button(icon(symbol).size(16))
+  button(icon(symbol).size(20))
     .on_press(on_press)
     .style(move |theme: &Theme, status| {
       let palette = theme.extended_palette();

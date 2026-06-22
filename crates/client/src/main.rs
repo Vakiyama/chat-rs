@@ -18,13 +18,14 @@ pub mod audio_processing;
 mod chat_stream;
 pub mod colors;
 pub mod config;
+pub mod voice_settings;
 pub mod webrtc_stream;
 
 use crate::audio_processing::call_handler::spawn_voice;
 use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
-use crate::screens::{auth, chat};
+use crate::screens::{auth, chat, settings};
 use crate::webrtc_stream::WebRTCConnection;
 
 mod client;
@@ -133,7 +134,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
         None => Subscription::none(),
       };
 
-      Subscription::batch([
+      let mut subs = vec![
         voice_call_sub,
         Subscription::run(chat_stream::connect).map(|event| event.into()),
         Subscription::run(webrtc_stream::connect).map(|event| event.into()),
@@ -151,7 +152,27 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
           }
           _ => None,
         }),
-      ])
+      ];
+
+      // Settings-only subscriptions: Esc closes back to chat, and a timer drives
+      // the live mic-level meter. Scoped so they can't fire on chat/auth.
+      if matches!(model.screen, Screen::Settings(_)) {
+        subs.push(iced::event::listen_with(|event, _status, _window| {
+          match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+              key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+              ..
+            }) => Some(Message::Settings(settings::Message::Close)),
+            _ => None,
+          }
+        }));
+        subs.push(
+          iced::time::every(Duration::from_millis(50))
+            .map(|_| Message::Settings(settings::Message::Tick)),
+        );
+      }
+
+      Subscription::batch(subs)
     }
     Auth::NotLoggedIn => Subscription::none(),
   }
@@ -161,6 +182,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
 pub enum Message {
   Chat(chat::Message),
   Auth(auth::Message),
+  Settings(settings::Message),
   Loaded(Option<MeReturn>),
   ChatStreamConnected(ChatConnection),
   ChatStreamDisconnected,
@@ -187,15 +209,73 @@ pub enum Message {
     epoch: u32,
     health: MediaHealth,
   },
+  // a voice setting (output device at a new sample rate) needs the whole audio
+  // path rebuilt; rejoin on a fresh, model-owned epoch.
+  VoiceRejoinForSettings {
+    voice_channel_id: Uuid,
+  },
   LoggedIn(User),
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
   match message {
+    Message::Settings(msg) => match msg {
+      // back to chat (close button / Esc). The chat model was dropped on the way
+      // in, so rebuild it and re-init like a fresh login does.
+      settings::Message::Close => match model.stashed_chat.take() {
+        // restore the chat model we stashed on the way in — instant, no reload.
+        Some(chat_model) => {
+          model.screen = Screen::Chat(chat_model);
+          iced::Task::none()
+        }
+        // no stash (e.g. we opened straight into settings): build + init fresh.
+        None => {
+          model.screen = Screen::Chat(Default::default());
+          iced::Task::done(Message::Chat(chat::Message::Init))
+        }
+      },
+      settings::Message::LogOut => {
+        // tear down voice + streams (subscriptions gate on LoggedIn, so they
+        // stop once user flips to NotLoggedIn) and return to the auth screen.
+        model.voice = None;
+        model.webrtc_stream = Stream::Disconnected;
+        model.chat_stream = Stream::Disconnected;
+        model.active_server_id = None;
+        model.room_presence.clear();
+        model.stashed_chat = None;
+        model.user = Auth::NotLoggedIn;
+        model.screen = Screen::Auth(auth::Model::new());
+        Task::future(async {
+          client::get().await.clear_tokens().await;
+          Message::None
+        })
+      }
+      msg => {
+        // forward live audio changes to the running voice handle (if any); the
+        // settings model owns display state + persistence to disk.
+        if let Some(voice) = &model.voice {
+          match &msg {
+            settings::Message::NoiseGateChanged(threshold) => {
+              voice.handle.set_noise_gate(*threshold)
+            }
+            settings::Message::InputDeviceSelected(name) => {
+              voice.handle.set_input_device(Some(name.clone()))
+            }
+            settings::Message::OutputDeviceSelected(name) => {
+              voice.handle.set_output_device(Some(name.clone()))
+            }
+            _ => {}
+          }
+        }
+        if let Screen::Settings(settings_model) = &mut model.screen {
+          settings::update(settings_model, msg).map(Message::Settings)
+        } else {
+          iced::Task::none()
+        }
+      }
+    },
     Message::Chat(msg) => {
-      if let Auth::LoggedIn(user) = &model.user
-        && let Screen::Chat(chat_model) = &mut model.screen
-      {
+      if let Auth::LoggedIn(user) = &model.user {
         match msg {
           chat::Message::JoinVoice { voice_channel_id } => {
             if let Some(voice) = &mut model.voice {
@@ -257,8 +337,27 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             }
             Task::none()
           }
+          chat::Message::GoToSettings => {
+            // stash the live chat model so returning from settings is instant.
+            // (chat_model isn't borrowed in this arm, so replacing screen is fine.)
+            let prev = std::mem::replace(&mut model.screen, Screen::Settings(Default::default()));
+            if let Screen::Chat(chat_model) = prev {
+              model.stashed_chat = Some(chat_model);
+            }
+            Task::none()
+          }
           other => {
-            chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+            // apply to whichever chat model is live: the on-screen one, or the
+            // stashed one while we're in settings (so it stays current).
+            let chat_model = match &mut model.screen {
+              Screen::Chat(chat_model) => Some(chat_model),
+              _ => model.stashed_chat.as_mut(),
+            };
+            if let Some(chat_model) = chat_model {
+              chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+            } else {
+              iced::Task::none()
+            }
           }
         }
       } else {
@@ -301,13 +400,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::None => iced::Task::none(),
     Message::Loaded(me_return) => match me_return {
       Some(response) => {
-        model.screen = Screen::Chat(Default::default());
+        // model.screen = Screen::Chat(Default::default());
+        model.screen = Screen::Settings(Default::default());
         model.user = Auth::LoggedIn(User {
           id: response.user_id,
           name: response.username.clone(),
         });
 
-        iced::Task::done(Message::Chat(chat::Message::Init))
+        //iced::Task::done(Message::Chat(chat::Message::Init))
+        Task::none()
       }
       None => Task::none(),
     },
@@ -469,6 +570,16 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 
       Task::none()
     }
+    Message::VoiceRejoinForSettings { voice_channel_id } => {
+      // bump the model-owned epoch so the dying pc's late callbacks are filtered
+      // while the rebuilt call's callbacks are accepted (same contract as join).
+      if let Some(voice) = &mut model.voice {
+        voice.epoch += 1;
+        voice.link_state = LinkState::Connecting;
+        voice.handle.join(voice_channel_id, voice.epoch);
+      }
+      Task::none()
+    }
     Message::ServerSentPresenceSnapshot {
       voice_channel_id,
       peers,
@@ -535,6 +646,9 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
       model,
     )
     .map(Message::Chat),
+    model::Screen::Settings(settings_model) => {
+      screens::settings::view(settings_model).map(Message::Settings)
+    }
   };
 
   container(container(view).style(container::rounded_box)).into()

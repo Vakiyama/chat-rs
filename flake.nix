@@ -35,7 +35,15 @@
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             name = "chat-rs-source";
-            filter = path: type: (pkgs.lib.hasSuffix ".proto" path) || (craneLib.filterCargoSources path type);
+            # crane's cargo filter keeps only Rust/manifest sources, so non-.rs
+            # assets the client embeds with include_bytes! (audio cues, fonts)
+            # must be allowed through explicitly — same as the .proto files.
+            filter =
+              path: type:
+              (pkgs.lib.hasSuffix ".proto" path)
+              || (pkgs.lib.hasSuffix ".wav" path)
+              || (pkgs.lib.hasSuffix ".ttf" path)
+              || (craneLib.filterCargoSources path type);
           };
 
           commonArgs = {
@@ -46,12 +54,15 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
+              # cmake is a build-time tool (some -sys build scripts invoke it), so it
+              # must be on PATH. With strictDeps only nativeBuildInputs land there —
+              # in buildInputs it's treated as a target lib and never found.
+              pkgs.cmake
             ];
             buildInputs = [
               pkgs.openssl
               pkgs.alsa-lib
               pkgs.libopus
-              pkgs.cmake
             ];
           };
 
