@@ -435,10 +435,6 @@ pub fn update(
       }
     }
     Message::ApiReturnedInitialPosts(res) => {
-      let View::TextChannel(ref mut text_channel) = model.view else {
-        return Task::none();
-      };
-
       if let Ok(ref res) = res {
         model.posts.insert(
           res.text_channel_id,
