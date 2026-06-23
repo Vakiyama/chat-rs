@@ -8,7 +8,7 @@ use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 use std::time::{Duration, SystemTime};
 
-use crate::client;
+use chat_core::client;
 
 #[derive(Debug, Clone)]
 pub struct ChatConnection {

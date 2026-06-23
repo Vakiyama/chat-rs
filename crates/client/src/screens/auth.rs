@@ -18,10 +18,8 @@ use iced::{
   },
 };
 
-use crate::{
-  SPACE_GRID,
-  client::{self},
-};
+use crate::SPACE_GRID;
+use chat_core::client;
 
 // -------------------- MODEL --------------------
 

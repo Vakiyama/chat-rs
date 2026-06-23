@@ -21,14 +21,17 @@ pub mod config;
 pub mod voice_settings;
 pub mod webrtc_stream;
 
-use crate::audio_processing::call_handler::spawn_voice;
 use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
-use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
+use crate::model::{Auth, LinkState, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat, settings};
-use crate::webrtc_stream::WebRTCConnection;
+use crate::voice_settings::FileVoiceSettingsStore;
+use chat_core::client;
+use chat_core::rtc::WebRTCConnection;
+use chat_core::voice::{MediaHealth, VoiceEvent, spawn_voice};
+use chat_core::voice_settings::VoiceSettingsStore;
 
-mod client;
+mod credentials;
 mod model;
 mod screens;
 mod types;
@@ -39,6 +42,16 @@ const SPACE_GRID: u16 = 8;
 pub const SOURCE_SANS_REGULAR: Font = Font::with_name("Source Sans 3");
 
 fn main() -> iced::Result {
+  // wire the grpc client to this platform's config + credential store before any
+  // request runs; core reads neither env nor the keyring itself.
+  client::init(
+    config::CONFIG.server_url.clone(),
+    std::sync::Arc::new(credentials::KeyringCredentialStore::new(
+      config::CONFIG.keyring_service_name.clone(),
+      config::CONFIG.keyring_user.clone(),
+    )),
+  );
+
   iced::application(new, update, view)
     .theme(CatppuccinFrappe)
     .font(google_material_symbols::GoogleMaterialSymbols::FONT_BYTES)
@@ -100,7 +113,7 @@ fn new() -> (model::Model, Task<Message>) {
 
 struct VoiceSub {
   call_id: Option<Uuid>,
-  rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Message>>>,
+  rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<VoiceEvent>>>,
 }
 
 impl std::hash::Hash for VoiceSub {
@@ -125,7 +138,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
               let mut rx = rx.lock().await;
 
               while let Some(event) = rx.recv().await {
-                if output.send(event).await.is_err() {
+                if output.send(event.into()).await.is_err() {
                   break;
                 }
               }
@@ -226,15 +239,44 @@ pub enum Message {
   LoggedIn(User),
 }
 
+// Map the core voice actor's events onto this client's iced messages. The core
+// stays UI-agnostic and emits `VoiceEvent`; the subscription converts on the way
+// in (see the VoiceSub stream).
+impl From<VoiceEvent> for Message {
+  fn from(event: VoiceEvent) -> Self {
+    match event {
+      VoiceEvent::JoinSuccessful { voice_channel_id } => {
+        Message::JoinVoiceSuccessful { voice_channel_id }
+      }
+      VoiceEvent::DeviceHealth {
+        epoch,
+        input_ok,
+        output_ok,
+      } => Message::VoiceDeviceHealth {
+        epoch,
+        input_ok,
+        output_ok,
+      },
+      VoiceEvent::PeerConnectionChanged { state, epoch } => {
+        Message::VoiceHandlePeerConnectionChanged { state, epoch }
+      }
+      VoiceEvent::MediaHealth { epoch, health } => Message::VoiceMediaHealth { epoch, health },
+      VoiceEvent::MicActivity { epoch, receiving } => {
+        Message::VoiceMicActivity { epoch, receiving }
+      }
+    }
+  }
+}
+
 // Mirror the in-memory per-user mixer levels into the persisted voice settings.
 // Load-modify-save so we only overwrite this one field and keep the gate/device
 // choices the settings screen owns. Failure is logged (inside save), never fatal.
 fn persist_user_audio(
-  per_user_audio: &std::collections::HashMap<Uuid, crate::voice_settings::UserAudioPref>,
+  per_user_audio: &std::collections::HashMap<Uuid, chat_core::voice_settings::UserAudioPref>,
 ) {
-  let mut settings = crate::voice_settings::VoiceSettings::load();
+  let mut settings = FileVoiceSettingsStore.load();
   settings.per_user_volumes = per_user_audio.clone();
-  settings.save();
+  FileVoiceSettingsStore.save(&settings);
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
@@ -523,9 +565,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::WebRTCSignalStreamConnected(conn) => {
       let voice = VoiceCall {
-        handle: spawn_voice(conn),
+        handle: spawn_voice(conn, FileVoiceSettingsStore.load()),
         link_state: model::LinkState::Connecting,
-        media: model::MediaHealth::Unknown,
+        media: MediaHealth::Unknown,
         latency_ms: 0,
         voice_call_id: None,
         epoch: 1,
@@ -560,7 +602,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         // A join is a good moment to retry against the currently-saved device so
         // the join/leave/peer cues come back to life without a restart.
         if model.audio_cues.is_none() {
-          let device = crate::voice_settings::VoiceSettings::load().output_device;
+          let device = FileVoiceSettingsStore.load().output_device;
           model.audio_cues = crate::audio_processing::cues::AudioCues::new(device.as_deref())
             .map(|mut cues| {
               cues.set_volume(0.1);

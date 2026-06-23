@@ -2,8 +2,9 @@ use crate::colors::{AccentsExt, NeutralsExt};
 use crate::screens::chat::View::NoneSelected;
 use crate::types::async_data::AsyncData;
 use crate::widgets::context_menu::ContextMenu;
-use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
+use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, icon};
 use crate::{SPACE_GRID, model::Stream};
+use chat_core::client;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
 use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
@@ -1554,12 +1555,14 @@ impl Tone {
 /// "Voice Connected" line because it's the most actionable thing on screen.
 fn describe_voice(
   link: &crate::model::LinkState,
-  media: crate::model::MediaHealth,
+  media: chat_core::voice::MediaHealth,
   input_ok: bool,
   output_ok: bool,
   mic_receiving: bool,
 ) -> (String, Tone, Option<String>) {
-  use crate::model::{LinkState::*, MediaHealth};
+  use chat_core::voice::MediaHealth;
+
+  use crate::model::LinkState::*;
 
   // a dead device is only meaningful once we're actually in the call. The mic
   // counts as down either when its device failed to open (`!input_ok`) or when
@@ -1797,7 +1800,7 @@ fn voice_toggle_button<'a>(
 fn user_mixer_overlay<'a>(
   user_id: Uuid,
   name: String,
-  pref: crate::voice_settings::UserAudioPref,
+  pref: chat_core::voice_settings::UserAudioPref,
 ) -> Element<'a, Message> {
   let percent = (pref.volume * 100.0).round() as u32;
 

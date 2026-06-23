@@ -278,6 +278,69 @@
             ];
           };
 
+          # android cross-compile shell for chat-core (aarch64-linux-android).
+          # `nix develop .#android` then `cargo ndk -t arm64-v8a build -p chat-core`.
+          devshells.android =
+            let
+              rustAndroid =
+                (inputs.rust-overlay.lib.mkRustBin { } pkgs).stable.latest.default.override {
+                  targets = [ "aarch64-linux-android" ];
+                };
+              androidNixpkgs = import inputs.nixpkgs {
+                inherit system;
+                config = {
+                  allowUnfree = true;
+                  android_sdk.accept_license = true;
+                };
+              };
+              androidSdk = androidNixpkgs.androidenv.composeAndroidPackages { includeNDK = true; };
+              # audiopus_sys can't autotools-cross-build opus (same failure as the
+              # windows path), so hand it a prebuilt static libopus for the target.
+              opusStatic = androidNixpkgs.pkgsCross.aarch64-android-prebuilt.libopus.overrideAttrs (o: {
+                mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Ddefault_library=static" ];
+              });
+            in
+            {
+              packages = [
+                rustAndroid
+                pkgs.cargo-ndk
+                pkgs.protobuf
+                pkgs.cmake
+                pkgs.android-tools
+                androidSdk.ndk-bundle
+              ];
+              env = [
+                {
+                  # the default shell forces -fuse-ld=mold, which can't link the
+                  # android target (undefined bionic symbols); let cargo-ndk's
+                  # ndk clang use its own lld + sysroot instead.
+                  name = "RUSTFLAGS";
+                  value = "";
+                }
+                {
+                  name = "PROTOC";
+                  eval = "${pkgs.protobuf}/bin/protoc";
+                }
+                {
+                  # nixpkgs nests the ndk under a versioned dir; cargo-ndk reads this
+                  name = "ANDROID_NDK_HOME";
+                  eval = "$(echo ${androidSdk.ndk-bundle}/libexec/android-sdk/ndk/*)";
+                }
+                {
+                  name = "OPUS_STATIC";
+                  value = "1";
+                }
+                {
+                  name = "OPUS_NO_PKG";
+                  value = "1";
+                }
+                {
+                  name = "OPUS_LIB_DIR";
+                  value = "${opusStatic}/lib";
+                }
+              ];
+            };
+
           packages = {
             server = craneLib.buildPackage (
               commonArgs
