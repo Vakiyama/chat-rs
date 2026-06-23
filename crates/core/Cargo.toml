@@ -21,3 +21,7 @@ futures-channel = "0.3.31"
 cpal = "0.18.1"
 audiopus = "0.2.0"
 sonora = "0.1.0"
+tonic.workspace = true
+tower.workspace = true
+http.workspace = true
+http-body-util = { version = "0.1.3", features = ["full"] }

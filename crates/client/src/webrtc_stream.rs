@@ -3,7 +3,7 @@
 //! `chat_core::rtc`; this file only bridges the grpc transport to iced messages
 //! and hands the engine a [`WebRTCConnection`] to send outbound signaling.
 
-use crate::client;
+use chat_core::client;
 use chat_core::rtc::WebRTCConnection;
 use chat_shared::convert::TryIntoDomain;
 use chat_shared::convert::stream::proto::ClientVoiceMessage;

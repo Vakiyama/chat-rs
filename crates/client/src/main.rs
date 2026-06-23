@@ -26,11 +26,12 @@ use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, LinkState, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat, settings};
 use crate::voice_settings::FileVoiceSettingsStore;
+use chat_core::client;
 use chat_core::rtc::WebRTCConnection;
 use chat_core::voice::{MediaHealth, VoiceEvent, spawn_voice};
 use chat_core::voice_settings::VoiceSettingsStore;
 
-mod client;
+mod credentials;
 mod model;
 mod screens;
 mod types;
@@ -41,6 +42,16 @@ const SPACE_GRID: u16 = 8;
 pub const SOURCE_SANS_REGULAR: Font = Font::with_name("Source Sans 3");
 
 fn main() -> iced::Result {
+  // wire the grpc client to this platform's config + credential store before any
+  // request runs; core reads neither env nor the keyring itself.
+  client::init(
+    config::CONFIG.server_url.clone(),
+    std::sync::Arc::new(credentials::KeyringCredentialStore::new(
+      config::CONFIG.keyring_service_name.clone(),
+      config::CONFIG.keyring_user.clone(),
+    )),
+  );
+
   iced::application(new, update, view)
     .theme(CatppuccinFrappe)
     .font(google_material_symbols::GoogleMaterialSymbols::FONT_BYTES)

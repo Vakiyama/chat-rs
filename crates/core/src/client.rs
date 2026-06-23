@@ -1,4 +1,9 @@
-use crate::config::CONFIG;
+//! The grpc client shared by every front end: the five tonic service clients, a
+//! tower middleware that attaches the access token and transparently refreshes +
+//! replays on a 401, and a lazy global connection that retries until the server
+//! is reachable. The platform wires its server url and a [`CredentialStore`] via
+//! [`init`] before the first [`get`]; core never reads env vars or the keyring.
+
 use chat_shared::convert::IntoProto;
 use chat_shared::convert::auth::proto::auth_service_client::AuthServiceClient;
 use chat_shared::convert::post::proto::posts_service_client::PostsServiceClient;
@@ -9,44 +14,59 @@ use chat_shared::domain::auth::RefreshCommand;
 use chat_shared::domain::auth::Token;
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use keyring::Entry;
-use std::{pin::Pin, sync::Arc};
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{Mutex, OnceCell};
 use tonic::transport::Channel;
 use tower::Service;
 
-pub async fn store_refresh_token(refresh_token: String) -> keyring::Result<()> {
-  let service = CONFIG.keyring_service_name.clone();
-  let user = CONFIG.keyring_user.clone();
-  on_keyring_thread(move || Entry::new(&service, &user)?.set_password(&refresh_token)).await
+/// Platform persistence for the rotating refresh token: desktop uses the OS
+/// keyring, android the keystore. Methods are blocking; the client calls them on
+/// a blocking thread. `load_refresh_token` errors when nothing is stored.
+pub trait CredentialStore: Send + Sync {
+  fn store_refresh_token(&self, token: &str) -> anyhow::Result<()>;
+  fn load_refresh_token(&self) -> anyhow::Result<String>;
+  fn clear_refresh_token(&self) -> anyhow::Result<()>;
 }
 
-pub async fn load_refresh_token() -> keyring::Result<String> {
-  let service = CONFIG.keyring_service_name.clone();
-  let user = CONFIG.keyring_user.clone();
-  on_keyring_thread(move || Entry::new(&service, &user)?.get_password()).await
+static SERVER_URL: OnceLock<String> = OnceLock::new();
+static CREDENTIALS: OnceLock<Arc<dyn CredentialStore>> = OnceLock::new();
+
+/// Wire the server url and credential store before the first [`get`]. Each front
+/// end reads its own config (desktop: env/.env; android: app config) and calls
+/// this once at startup.
+pub fn init(server_url: String, credentials: Arc<dyn CredentialStore>) {
+  let _ = SERVER_URL.set(server_url);
+  let _ = CREDENTIALS.set(credentials);
 }
 
-pub async fn clear_refresh_token() -> keyring::Result<()> {
-  let service = CONFIG.keyring_service_name.clone();
-  let user = CONFIG.keyring_user.clone();
-  on_keyring_thread(move || Entry::new(&service, &user)?.delete_credential()).await
+fn credentials() -> Arc<dyn CredentialStore> {
+  CREDENTIALS
+    .get()
+    .expect("chat_core::client::init must be called before use")
+    .clone()
 }
 
-async fn on_keyring_thread<F, T>(f: F) -> T
-where
-  F: FnOnce() -> T + Send + 'static,
-  T: Send + 'static,
-{
-  let (tx, rx) = tokio::sync::oneshot::channel();
-  std::thread::spawn(move || {
-    let _ = tx.send(f());
-  });
-  rx.await.expect("keyring thread panicked")
+async fn store_refresh_token(refresh_token: String) -> anyhow::Result<()> {
+  let store = credentials();
+  tokio::task::spawn_blocking(move || store.store_refresh_token(&refresh_token)).await?
 }
 
+async fn load_refresh_token() -> anyhow::Result<String> {
+  let store = credentials();
+  tokio::task::spawn_blocking(move || store.load_refresh_token()).await?
+}
+
+async fn clear_refresh_token() -> anyhow::Result<()> {
+  let store = credentials();
+  tokio::task::spawn_blocking(move || store.clear_refresh_token()).await?
+}
+
+// In-memory access + refresh tokens for the live session. The refresh token is
+// mirrored to the platform credential store so it survives restarts; the access
+// token is short-lived and kept in memory only.
 #[derive(Default)]
-pub struct TokenStore {
+struct TokenCache {
   access_token: Option<Token>,
   refresh_token: Option<Token>,
 }
@@ -54,14 +74,14 @@ pub struct TokenStore {
 #[derive(Clone)]
 pub struct AuthService {
   inner: tonic::transport::Channel,
-  tokens: Arc<Mutex<TokenStore>>,
+  tokens: Arc<Mutex<TokenCache>>,
   with_buffer_replay: bool,
 }
 
 impl AuthService {
-  pub fn new(
+  fn new(
     inner: tonic::transport::Channel,
-    tokens: Arc<Mutex<TokenStore>>,
+    tokens: Arc<Mutex<TokenCache>>,
     with_buffer_replay: bool,
   ) -> Self {
     Self {
@@ -98,7 +118,7 @@ impl Service<http::Request<tonic::body::Body>> for AuthService {
       if with_replay {
         let (parts, body) = req.into_parts();
         let body_bytes = body.collect().await?.to_bytes();
-        let make_req = async |tokens: &Arc<Mutex<TokenStore>>| {
+        let make_req = async |tokens: &Arc<Mutex<TokenCache>>| {
           let mut builder = http::Request::builder()
             .method(parts.method.clone())
             .uri(parts.uri.clone())
@@ -192,7 +212,7 @@ pub struct GrpcClient {
   pub user: UserServiceClient<AuthService>,
   pub server: ServerServiceClient<AuthService>,
   pub posts: PostsServiceClient<AuthService>,
-  tokens: Arc<Mutex<TokenStore>>,
+  tokens: Arc<Mutex<TokenCache>>,
 }
 
 impl GrpcClient {
@@ -249,7 +269,7 @@ impl GrpcClient {
   }
 
   /// Log out: drop the in-memory access/refresh tokens and erase the persisted
-  /// refresh token from the system credential store.
+  /// refresh token from the platform credential store.
   pub async fn clear_tokens(&self) {
     {
       let mut tokens = self.tokens.lock().await;
@@ -267,10 +287,13 @@ static GRPC_CLIENT: tokio::sync::OnceCell<GrpcClient> = OnceCell::const_new();
 pub async fn get() -> GrpcClient {
   GRPC_CLIENT
     .get_or_init(|| async {
+      let server_url = SERVER_URL
+        .get()
+        .expect("chat_core::client::init must be called before use")
+        .to_string();
       let channel: Channel;
 
       loop {
-        let server_url = CONFIG.server_url.to_string();
         let channel_connect = tonic::transport::Endpoint::new(server_url.clone())
           .unwrap_or_else(|_| panic!("Failed to parse server url {}", &server_url))
           .connect()
@@ -283,7 +306,7 @@ pub async fn get() -> GrpcClient {
             break;
           }
           Err(_) => {
-            println!("Could not connect to grpc server at {}", CONFIG.server_url);
+            println!("Could not connect to grpc server at {}", server_url);
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             println!("Retrying...");
             continue;
@@ -291,7 +314,7 @@ pub async fn get() -> GrpcClient {
         }
       }
 
-      let tokens: Arc<Mutex<TokenStore>> = Default::default();
+      let tokens: Arc<Mutex<TokenCache>> = Default::default();
 
       let auth_channel_no_replay = AuthService::new(channel.clone(), tokens.clone(), false);
       let auth_channel = AuthService::new(channel.clone(), tokens.clone(), true);
