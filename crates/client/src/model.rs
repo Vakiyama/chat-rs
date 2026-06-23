@@ -2,7 +2,8 @@ use crate::audio_processing::{call_handler::VoiceHandle, cues::AudioCues};
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use crate::screens::settings::Model as SettingsModel;
-use crate::voice_settings::UserAudioPref;
+use crate::voice_settings::FileVoiceSettingsStore;
+use chat_core::voice_settings::{UserAudioPref, VoiceSettingsStore};
 use chat_shared::domain::stream::{DisplayVoiceUser, User};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -105,22 +106,18 @@ impl Default for Model {
       voice: None,
       active_server_id: None,
       room_presence: HashMap::new(),
-      per_user_audio: crate::voice_settings::VoiceSettings::load().per_user_volumes,
+      per_user_audio: FileVoiceSettingsStore.load().per_user_volumes,
       stashed_chat: None,
       // Bind cues to the saved output device so they share the device the call
       // uses. If this fails (e.g. no working device at startup) we leave it None
       // and recover later via AudioCues::rebuild when a device appears/changes.
-      audio_cues: AudioCues::new(
-        crate::voice_settings::VoiceSettings::load()
-          .output_device
-          .as_deref(),
-      )
-      .map(|mut cues| {
-        cues.set_volume(0.1);
-        cues
-      })
-      .map_err(|err| eprintln!("Warning: audio cues failed to initialize: {err:?}"))
-      .ok(),
+      audio_cues: AudioCues::new(FileVoiceSettingsStore.load().output_device.as_deref())
+        .map(|mut cues| {
+          cues.set_volume(0.1);
+          cues
+        })
+        .map_err(|err| eprintln!("Warning: audio cues failed to initialize: {err:?}"))
+        .ok(),
     }
   }
 }

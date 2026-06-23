@@ -26,7 +26,9 @@ use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
 use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat, settings};
+use crate::voice_settings::FileVoiceSettingsStore;
 use crate::webrtc_stream::WebRTCConnection;
+use chat_core::voice_settings::VoiceSettingsStore;
 
 mod client;
 mod model;
@@ -230,11 +232,11 @@ pub enum Message {
 // Load-modify-save so we only overwrite this one field and keep the gate/device
 // choices the settings screen owns. Failure is logged (inside save), never fatal.
 fn persist_user_audio(
-  per_user_audio: &std::collections::HashMap<Uuid, crate::voice_settings::UserAudioPref>,
+  per_user_audio: &std::collections::HashMap<Uuid, chat_core::voice_settings::UserAudioPref>,
 ) {
-  let mut settings = crate::voice_settings::VoiceSettings::load();
+  let mut settings = FileVoiceSettingsStore.load();
   settings.per_user_volumes = per_user_audio.clone();
-  settings.save();
+  FileVoiceSettingsStore.save(&settings);
 }
 
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
@@ -560,7 +562,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         // A join is a good moment to retry against the currently-saved device so
         // the join/leave/peer cues come back to life without a restart.
         if model.audio_cues.is_none() {
-          let device = crate::voice_settings::VoiceSettings::load().output_device;
+          let device = FileVoiceSettingsStore.load().output_device;
           model.audio_cues = crate::audio_processing::cues::AudioCues::new(device.as_deref())
             .map(|mut cues| {
               cues.set_volume(0.1);

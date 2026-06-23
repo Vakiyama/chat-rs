@@ -11,3 +11,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow.workspace = true
 rubato = "0.15"
+serde = { workspace = true, features = ["derive"] }
+uuid.workspace = true

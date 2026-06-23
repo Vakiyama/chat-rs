@@ -14,9 +14,10 @@ use crate::{
   MATERIAL, SOURCE_SANS_REGULAR, SPACE_GRID,
   colors::TextExt,
   icon,
-  voice_settings::VoiceSettings,
+  voice_settings::FileVoiceSettingsStore,
   webrtc_stream::{MicMonitor, list_input_devices, list_output_devices},
 };
+use chat_core::voice_settings::VoiceSettingsStore;
 
 // The gate threshold is a linear RMS value, but voice levels bunch up near the
 // bottom of 0..1 — speech RMS typically lives around 0.01..0.05 — so an
@@ -89,7 +90,7 @@ pub struct Model {
 impl Default for Model {
   fn default() -> Self {
     // mirror the persisted settings + enumerate the devices to offer.
-    let settings = VoiceSettings::load();
+    let settings = FileVoiceSettingsStore.load();
     let mic_monitor = Some(MicMonitor::start(settings.input_device.clone()));
     Self {
       view: View::Voice,
@@ -108,11 +109,11 @@ impl Model {
   fn persist(&self) {
     // Load-modify-save so we only touch the fields this screen owns and leave
     // others (e.g. the in-call mixer's per-user volumes) intact.
-    let mut settings = VoiceSettings::load();
+    let mut settings = FileVoiceSettingsStore.load();
     settings.gate_threshold = self.gate_threshold;
     settings.input_device = self.input_device.clone();
     settings.output_device = self.output_device.clone();
-    settings.save();
+    FileVoiceSettingsStore.save(&settings);
   }
 }
 

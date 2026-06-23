@@ -1,7 +1,9 @@
 use crate::model::MediaHealth;
+use crate::voice_settings::FileVoiceSettingsStore;
 use crate::webrtc_stream::{
   CallSetup, CaptureEvent, WebRTCConnection, build_mic, build_speaker, setup_client,
 };
+use chat_core::voice_settings::VoiceSettingsStore;
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -233,7 +235,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
   // audio processor); device choices are owned by the actor and read at join
   // time, updated live by Set*Device. Loading here means saved settings take
   // effect the moment voice connects, before the settings screen is ever opened.
-  let settings = crate::voice_settings::VoiceSettings::load();
+  let settings = FileVoiceSettingsStore.load();
   let gate_threshold = Arc::new(AtomicU32::new(settings.gate_threshold.to_bits()));
 
   let per_user_gain: UserGainMap = Arc::new(RwLock::new(

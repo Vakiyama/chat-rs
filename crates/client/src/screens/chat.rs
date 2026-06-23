@@ -1763,7 +1763,7 @@ fn voice_toggle_button<'a>(
 fn user_mixer_overlay<'a>(
   user_id: Uuid,
   name: String,
-  pref: crate::voice_settings::UserAudioPref,
+  pref: chat_core::voice_settings::UserAudioPref,
 ) -> Element<'a, Message> {
   let percent = (pref.volume * 100.0).round() as u32;
 
