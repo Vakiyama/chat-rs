@@ -25,3 +25,12 @@ tonic.workspace = true
 tower.workspace = true
 http.workspace = true
 http-body-util = { version = "0.1.3", features = ["full"] }
+thiserror.workspace = true
+uniffi = { version = "0.29", features = ["cli", "tokio"] }
+
+# host tool: generates the kotlin (and other) bindings from the built .so in
+# library mode. living in-crate guarantees its version matches the uniffi we
+# compiled against. run: cargo run --bin uniffi-bindgen -- generate --library ...
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
