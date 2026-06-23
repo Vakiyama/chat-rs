@@ -1,14 +1,15 @@
-use crate::audio_processing::{call_handler::VoiceHandle, cues::AudioCues};
+use crate::audio_processing::cues::AudioCues;
 use crate::screens::auth::Model as AuthModel;
 use crate::screens::chat::Model as ChatModel;
 use crate::screens::settings::Model as SettingsModel;
 use crate::voice_settings::FileVoiceSettingsStore;
+use chat_core::voice::{MediaHealth, VoiceHandle};
 use chat_core::voice_settings::{UserAudioPref, VoiceSettingsStore};
 use chat_shared::domain::stream::{DisplayVoiceUser, User};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{chat_stream, webrtc_stream};
+use crate::chat_stream;
 
 #[derive(Clone)]
 pub enum Stream<T> {
@@ -29,14 +30,6 @@ pub enum LinkState {
   Unstable,                      // raw: Disconnected — grace window, may recover
   Reconnecting { attempt: u32 }, // you're driving recovery (ICE restart / rejoin)
   Lost { reason: String },       // gave up <- update to non string value if we can
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum MediaHealth {
-  Unknown,           // no baseline yet
-  Flowing,           // inbound audio bytes climbing
-  NoAudio,           // connected but no inbound audio for a while (see DTX caveat)
-  TransportDegraded, // nominated pair stopped getting STUN responses — link dying
 }
 
 pub struct VoiceCall {
@@ -74,7 +67,7 @@ pub struct Model {
   pub screen: Screen,
   pub user: Auth,
   pub chat_stream: Stream<chat_stream::ChatConnection>,
-  pub webrtc_stream: Stream<webrtc_stream::WebRTCConnection>,
+  pub webrtc_stream: Stream<chat_core::rtc::WebRTCConnection>,
   pub voice: Option<VoiceCall>,
   pub active_server_id: Option<Uuid>,
   pub room_presence: HashMap<Uuid, Vec<DisplayVoiceUser>>,

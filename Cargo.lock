@@ -1244,9 +1244,17 @@ name = "chat-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "audiopus",
+ "bytes",
+ "chat-shared",
+ "cpal 0.18.1",
+ "futures-channel",
  "rubato",
  "serde",
+ "sonora",
+ "tokio",
  "uuid",
+ "webrtc",
 ]
 
 [[package]]

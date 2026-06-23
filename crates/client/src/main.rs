@@ -21,13 +21,13 @@ pub mod config;
 pub mod voice_settings;
 pub mod webrtc_stream;
 
-use crate::audio_processing::call_handler::spawn_voice;
 use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
-use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
+use crate::model::{Auth, LinkState, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat, settings};
 use crate::voice_settings::FileVoiceSettingsStore;
-use crate::webrtc_stream::WebRTCConnection;
+use chat_core::rtc::WebRTCConnection;
+use chat_core::voice::{MediaHealth, VoiceEvent, spawn_voice};
 use chat_core::voice_settings::VoiceSettingsStore;
 
 mod client;
@@ -102,7 +102,7 @@ fn new() -> (model::Model, Task<Message>) {
 
 struct VoiceSub {
   call_id: Option<Uuid>,
-  rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Message>>>,
+  rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<VoiceEvent>>>,
 }
 
 impl std::hash::Hash for VoiceSub {
@@ -127,7 +127,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
               let mut rx = rx.lock().await;
 
               while let Some(event) = rx.recv().await {
-                if output.send(event).await.is_err() {
+                if output.send(event.into()).await.is_err() {
                   break;
                 }
               }
@@ -226,6 +226,35 @@ pub enum Message {
     receiving: bool,
   },
   LoggedIn(User),
+}
+
+// Map the core voice actor's events onto this client's iced messages. The core
+// stays UI-agnostic and emits `VoiceEvent`; the subscription converts on the way
+// in (see the VoiceSub stream).
+impl From<VoiceEvent> for Message {
+  fn from(event: VoiceEvent) -> Self {
+    match event {
+      VoiceEvent::JoinSuccessful { voice_channel_id } => {
+        Message::JoinVoiceSuccessful { voice_channel_id }
+      }
+      VoiceEvent::DeviceHealth {
+        epoch,
+        input_ok,
+        output_ok,
+      } => Message::VoiceDeviceHealth {
+        epoch,
+        input_ok,
+        output_ok,
+      },
+      VoiceEvent::PeerConnectionChanged { state, epoch } => {
+        Message::VoiceHandlePeerConnectionChanged { state, epoch }
+      }
+      VoiceEvent::MediaHealth { epoch, health } => Message::VoiceMediaHealth { epoch, health },
+      VoiceEvent::MicActivity { epoch, receiving } => {
+        Message::VoiceMicActivity { epoch, receiving }
+      }
+    }
+  }
 }
 
 // Mirror the in-memory per-user mixer levels into the persisted voice settings.
@@ -525,9 +554,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     }
     Message::WebRTCSignalStreamConnected(conn) => {
       let voice = VoiceCall {
-        handle: spawn_voice(conn),
+        handle: spawn_voice(conn, FileVoiceSettingsStore.load()),
         link_state: model::LinkState::Connecting,
-        media: model::MediaHealth::Unknown,
+        media: MediaHealth::Unknown,
         latency_ms: 0,
         voice_call_id: None,
         epoch: 1,

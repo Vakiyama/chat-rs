@@ -1,9 +1,13 @@
-use crate::model::MediaHealth;
-use crate::voice_settings::FileVoiceSettingsStore;
-use crate::webrtc_stream::{
+//! The voice actor: a command-driven task that owns the active call, runs the
+//! peer connection, reads inbound tracks into the mixer, and handles signaling.
+//! It is platform-neutral. Commands come in via [`VoiceHandle`]; status flows
+//! back out as [`VoiceEvent`]s, which each client maps to its own UI messages.
+
+use crate::mixer::Mixer;
+use crate::rtc::{
   CallSetup, CaptureEvent, WebRTCConnection, build_mic, build_speaker, setup_client,
 };
-use chat_core::voice_settings::VoiceSettingsStore;
+use crate::voice_settings::VoiceSettings;
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -17,6 +21,41 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::stats::{StatsReport, StatsReportType};
 
 pub type UserGainMap = Arc<RwLock<HashMap<Uuid, f32>>>;
+
+/// Inbound-audio health for the current call, derived from RTCP stats.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MediaHealth {
+  Unknown,           // no baseline yet
+  Flowing,           // inbound audio bytes climbing
+  NoAudio,           // connected but no inbound audio for a while (see DTX caveat)
+  TransportDegraded, // nominated pair stopped getting STUN responses — link dying
+}
+
+/// Status the actor emits back to the client. The client maps these to its own
+/// UI messages; `epoch` lets it discard reports from a call it has moved on from.
+#[derive(Clone, Debug)]
+pub enum VoiceEvent {
+  JoinSuccessful {
+    voice_channel_id: Uuid,
+  },
+  DeviceHealth {
+    epoch: u32,
+    input_ok: bool,
+    output_ok: bool,
+  },
+  PeerConnectionChanged {
+    state: RTCPeerConnectionState,
+    epoch: u32,
+  },
+  MediaHealth {
+    epoch: u32,
+    health: MediaHealth,
+  },
+  MicActivity {
+    epoch: u32,
+    receiving: bool,
+  },
+}
 
 pub enum VoiceCommand {
   Join { voice_channel_id: Uuid, epoch: u32 },
@@ -33,7 +72,7 @@ pub enum VoiceCommand {
 
 pub struct VoiceHandle {
   sender: tokio::sync::mpsc::UnboundedSender<VoiceCommand>,
-  pub receiver: Arc<Mutex<tokio::sync::mpsc::Receiver<crate::Message>>>,
+  pub receiver: Arc<Mutex<tokio::sync::mpsc::Receiver<VoiceEvent>>>,
 }
 
 impl VoiceHandle {
@@ -84,7 +123,7 @@ struct ActiveCall {
   mic: Option<cpal::Stream>,
   speaker: Option<cpal::Stream>,
   stats_task: tokio::task::JoinHandle<()>,
-  mixer: chat_core::mixer::Mixer,
+  mixer: Mixer,
   in_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
   // kept so a live device swap can feed the running audio path without a rejoin.
@@ -127,7 +166,7 @@ fn inbound_audio(r: &StatsReport) -> (u32, u64) {
 pub fn spawn_stats_poller(
   pc: Arc<RTCPeerConnection>,
   epoch: u32,
-  tx: tokio::sync::mpsc::Sender<crate::Message>,
+  tx: tokio::sync::mpsc::Sender<VoiceEvent>,
   capture_signal_frames: Arc<AtomicU64>,
   fec_loss_perc: Arc<AtomicU32>,
 ) -> tokio::task::JoinHandle<()> {
@@ -171,9 +210,7 @@ pub fn spawn_stats_poller(
       let receiving = silent_ticks < SILENT_TICKS_LIMIT;
       if last_emitted_receiving != Some(receiving) {
         last_emitted_receiving = Some(receiving);
-        let _ = tx
-          .send(crate::Message::VoiceMicActivity { epoch, receiving })
-          .await;
+        let _ = tx.send(VoiceEvent::MicActivity { epoch, receiving }).await;
       }
 
       let report = pc.get_stats().await;
@@ -211,17 +248,15 @@ pub fn spawn_stats_poller(
 
       if last_emitted != Some(health) {
         last_emitted = Some(health);
-        let _ = tx
-          .send(crate::Message::VoiceMediaHealth { epoch, health })
-          .await;
+        let _ = tx.send(VoiceEvent::MediaHealth { epoch, health }).await;
       }
     }
   })
 }
 
-pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
+pub fn spawn_voice(mut conn: WebRTCConnection, settings: VoiceSettings) -> VoiceHandle {
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-  let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel::<crate::Message>(32);
+  let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel::<VoiceEvent>(32);
 
   let room_id = Arc::new(Mutex::new(None));
   let cloned_room_id = room_id.clone();
@@ -231,11 +266,9 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
   let muted = Arc::new(AtomicBool::new(false));
   let deafened = Arc::new(AtomicBool::new(false));
 
-  // Persisted voice settings. The gate threshold is shared (read live by the
-  // audio processor); device choices are owned by the actor and read at join
-  // time, updated live by Set*Device. Loading here means saved settings take
-  // effect the moment voice connects, before the settings screen is ever opened.
-  let settings = FileVoiceSettingsStore.load();
+  // Persisted voice settings, loaded by the caller. The gate threshold is shared
+  // (read live by the audio processor); device choices are owned by the actor and
+  // read at join time, updated live by Set*Device.
   let gate_threshold = Arc::new(AtomicU32::new(settings.gate_threshold.to_bits()));
 
   let per_user_gain: UserGainMap = Arc::new(RwLock::new(
@@ -319,12 +352,12 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 voice_channel_id,
               });
               let _ = outbound_tx
-                .send(crate::Message::JoinVoiceSuccessful { voice_channel_id })
+                .send(VoiceEvent::JoinSuccessful { voice_channel_id })
                 .await;
               // surface whether each direction actually came up so the UI can
               // tell the user they joined but have no mic and/or no speaker.
               let _ = outbound_tx
-                .send(crate::Message::VoiceDeviceHealth {
+                .send(VoiceEvent::DeviceHealth {
                   epoch,
                   input_ok: mic.is_some(),
                   output_ok: speaker.is_some(),
@@ -336,7 +369,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
                 let cb_tx = cb_tx.clone();
                 Box::pin(async move {
                   let _ = cb_tx
-                    .send(crate::Message::VoiceHandlePeerConnectionChanged {
+                    .send(VoiceEvent::PeerConnectionChanged {
                       state: new_state,
                       epoch,
                     })
@@ -459,7 +492,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               }
             }
             let _ = outbound_tx
-              .send(crate::Message::VoiceDeviceHealth {
+              .send(VoiceEvent::DeviceHealth {
                 epoch: active.epoch,
                 input_ok: active.mic.is_some(),
                 output_ok: active.speaker.is_some(),
@@ -487,7 +520,7 @@ pub fn spawn_voice(mut conn: WebRTCConnection) -> VoiceHandle {
               }
             }
             let _ = outbound_tx
-              .send(crate::Message::VoiceDeviceHealth {
+              .send(VoiceEvent::DeviceHealth {
                 epoch: active.epoch,
                 input_ok: active.mic.is_some(),
                 output_ok: active.speaker.is_some(),
@@ -524,7 +557,7 @@ async fn apply_signal(
   pc: &Arc<RTCPeerConnection>,
   conn: &mut WebRTCConnection,
   msg: ServerVoice,
-  mixer: &chat_core::mixer::Mixer,
+  mixer: &Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   per_user_gain: UserGainMap,
 ) -> anyhow::Result<()> {
@@ -586,7 +619,7 @@ fn parse_track_user_id(track_id: &str) -> Option<Uuid> {
 
 async fn read_track(
   track: Arc<webrtc::track::track_remote::TrackRemote>,
-  mixer: chat_core::mixer::Mixer,
+  mixer: Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   per_user_gain: UserGainMap,
 ) {

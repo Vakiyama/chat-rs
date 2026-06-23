@@ -1520,12 +1520,14 @@ impl Tone {
 /// "Voice Connected" line because it's the most actionable thing on screen.
 fn describe_voice(
   link: &crate::model::LinkState,
-  media: crate::model::MediaHealth,
+  media: chat_core::voice::MediaHealth,
   input_ok: bool,
   output_ok: bool,
   mic_receiving: bool,
 ) -> (String, Tone, Option<String>) {
-  use crate::model::{LinkState::*, MediaHealth};
+  use chat_core::voice::MediaHealth;
+
+  use crate::model::LinkState::*;
 
   // a dead device is only meaningful once we're actually in the call. The mic
   // counts as down either when its device failed to open (`!input_ok`) or when

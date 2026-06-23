@@ -3,4 +3,6 @@
 // platform couplings (token storage, config paths) behind injected traits.
 pub mod mixer;
 pub mod resampler;
+pub mod rtc;
+pub mod voice;
 pub mod voice_settings;

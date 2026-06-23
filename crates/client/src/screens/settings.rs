@@ -11,12 +11,10 @@ use iced::{
 };
 
 use crate::{
-  MATERIAL, SOURCE_SANS_REGULAR, SPACE_GRID,
-  colors::TextExt,
-  icon,
+  MATERIAL, SOURCE_SANS_REGULAR, SPACE_GRID, colors::TextExt, icon,
   voice_settings::FileVoiceSettingsStore,
-  webrtc_stream::{MicMonitor, list_input_devices, list_output_devices},
 };
+use chat_core::rtc::{MicMonitor, list_input_devices, list_output_devices};
 use chat_core::voice_settings::VoiceSettingsStore;
 
 // The gate threshold is a linear RMS value, but voice levels bunch up near the

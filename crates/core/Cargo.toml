@@ -13,3 +13,11 @@ anyhow.workspace = true
 rubato = "0.15"
 serde = { workspace = true, features = ["derive"] }
 uuid.workspace = true
+chat-shared.workspace = true
+tokio.workspace = true
+webrtc.workspace = true
+bytes.workspace = true
+futures-channel = "0.3.31"
+cpal = "0.18.1"
+audiopus = "0.2.0"
+sonora = "0.1.0"
