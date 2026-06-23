@@ -1,6 +1,6 @@
-use crate::audio_processing::mixer::Mixer;
-use crate::audio_processing::resampler::Resampler;
 use crate::client;
+use chat_core::mixer::Mixer;
+use chat_core::resampler::Resampler;
 use chat_shared::convert::stream::proto::ClientVoiceMessage;
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::stream::{ClientVoice, ServerVoice};

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/shared", "crates/server", "crates/client", "crates/android-spike"]
+members = ["crates/shared", "crates/server", "crates/client", "crates/chat-core"]
 
 [workspace.dependencies]
 # one place to pin versions everything inherits
@@ -21,6 +21,7 @@ tracing = "0.1.44"
 async-trait = "0.1.89"
 dotenvy = "0.15"
 chat-shared = { path = "crates/shared" }
+chat-core = { path = "crates/chat-core" }
 jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
 tower = "0.5.3"
 http = "1.4.0"

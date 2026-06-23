@@ -1,0 +1,13 @@
+[package]
+name = "chat-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# cdylib for the android jni lib, rlib so the desktop client links it normally.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+rubato = "0.15"

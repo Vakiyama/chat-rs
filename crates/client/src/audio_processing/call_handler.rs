@@ -82,7 +82,7 @@ struct ActiveCall {
   mic: Option<cpal::Stream>,
   speaker: Option<cpal::Stream>,
   stats_task: tokio::task::JoinHandle<()>,
-  mixer: crate::audio_processing::mixer::Mixer,
+  mixer: chat_core::mixer::Mixer,
   in_rate: u32,
   started: Arc<Mutex<HashSet<String>>>,
   // kept so a live device swap can feed the running audio path without a rejoin.
@@ -522,7 +522,7 @@ async fn apply_signal(
   pc: &Arc<RTCPeerConnection>,
   conn: &mut WebRTCConnection,
   msg: ServerVoice,
-  mixer: &crate::audio_processing::mixer::Mixer,
+  mixer: &chat_core::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   per_user_gain: UserGainMap,
 ) -> anyhow::Result<()> {
@@ -584,7 +584,7 @@ fn parse_track_user_id(track_id: &str) -> Option<Uuid> {
 
 async fn read_track(
   track: Arc<webrtc::track::track_remote::TrackRemote>,
-  mixer: crate::audio_processing::mixer::Mixer,
+  mixer: chat_core::mixer::Mixer,
   started: Arc<Mutex<HashSet<String>>>,
   per_user_gain: UserGainMap,
 ) {

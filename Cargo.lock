@@ -201,19 +201,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
-name = "android-spike"
-version = "0.0.0"
-dependencies = [
- "audiopus",
- "ring",
- "rubato",
- "sonora",
- "tokio",
- "tonic",
- "webrtc",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1217,6 +1204,7 @@ dependencies = [
  "anyhow",
  "audiopus",
  "bytes",
+ "chat-core",
  "chat-shared",
  "chrono",
  "cpal 0.17.3",
@@ -1249,6 +1237,14 @@ dependencies = [
  "tracing",
  "uuid",
  "webrtc",
+]
+
+[[package]]
+name = "chat-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "rubato",
 ]
 
 [[package]]

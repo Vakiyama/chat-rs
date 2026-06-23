@@ -278,8 +278,8 @@
             ];
           };
 
-          # CHA-33 spike shell: cross-compile the rust core to aarch64-android.
-          # `nix develop .#android` then `cargo ndk -t arm64-v8a build -p android-spike`.
+          # android cross-compile shell for chat-core (aarch64-linux-android).
+          # `nix develop .#android` then `cargo ndk -t arm64-v8a build -p chat-core`.
           devshells.android =
             let
               rustAndroid =

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chat-shared.workspace = true
+chat-core.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tokio-stream.workspace = true
