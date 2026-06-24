@@ -624,7 +624,10 @@ fn spawn_audio_processor(
   tokio::spawn(async move {
     let config = Config {
       echo_canceller: Some(EchoCanceller::default()),
-      noise_suppression: Some(NoiseSuppression::default()),
+      noise_suppression: Some(NoiseSuppression {
+        level: sonora::config::NoiseSuppressionLevel::High,
+        ..NoiseSuppression::default()
+      }),
       // adaptive digital AGC: normalizes quiet vs. loud mics toward a target
       // loudness post-AEC/NS. The noise cap (max_output_noise_level_dbfs, -50
       // default) keeps it from pumping the silent-room floor up to speech level.
