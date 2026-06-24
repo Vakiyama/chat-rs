@@ -51,6 +51,12 @@ pub struct Participant {
   pub speaking: AtomicBool,
   pub muted: AtomicBool,
   pub deafened: AtomicBool,
+  // the voice-stream connection that created this participant. PeerId is the user
+  // id, so a network-blip reconnect replaces a stale participant with a fresh one
+  // under the same key; this distinguishes them so the OLD connection's teardown
+  // (when its dead stream is finally detected) can't evict the peer the user has
+  // since rejoined with on a new connection. See handle_leave_if_owner.
+  pub conn_id: Uuid,
 }
 
 #[derive(Default)]
@@ -109,6 +115,7 @@ pub fn unregister_presence_subscriber(conn_id: &Uuid) {
   PRESENCE_REGISTRY.lock().unwrap().remove(conn_id);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_offer(
   offer: RTCSessionDescription,
   room: Arc<Room>,
@@ -117,6 +124,7 @@ pub async fn handle_offer(
   api: &API,
   voice_channel_id: Uuid,
   user: User,
+  conn_id: Uuid,
 ) -> anyhow::Result<()> {
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
@@ -153,6 +161,7 @@ pub async fn handle_offer(
     speaking: false.into(),
     muted: false.into(),
     deafened: false.into(),
+    conn_id,
   });
 
   let track_room = room.clone();
@@ -429,7 +438,42 @@ pub async fn handle_leave(
   let Some(leaving) = room.peers.write().await.remove(&me) else {
     return Ok(());
   };
+  teardown_peer(room, me, leaving, voice_channel_id).await
+}
 
+// Leave, but only if the room's participant for `me` is still the one created by
+// `conn_id`. Used by the implicit stream-teardown cleanup: on a network-blip
+// reconnect the user rejoins under the same PeerId on a fresh connection, so when
+// the OLD (dead) connection's stream is finally detected and its cleanup runs, it
+// must NOT evict the freshly-rejoined participant. The check-and-remove happens
+// under one write lock so a rejoin landing concurrently can't be clobbered.
+pub async fn handle_leave_if_owner(
+  room: Arc<Room>,
+  me: PeerId,
+  conn_id: Uuid,
+  voice_channel_id: Uuid,
+) -> anyhow::Result<()> {
+  let leaving = {
+    let mut peers = room.peers.write().await;
+    match peers.get(&me) {
+      Some(p) if p.conn_id == conn_id => peers.remove(&me).expect("peer present under lock"),
+      // no peer, or it belongs to a newer connection → leave it alone
+      _ => return Ok(()),
+    }
+  };
+  teardown_peer(room, me, leaving, voice_channel_id).await
+}
+
+// Tear down a participant that has already been removed from the room: close its
+// pc, drop its relay from every subscriber (renegotiating them), and purge its key
+// from remaining publishers' fan-out maps. Split from handle_leave so the removal
+// can be gated (see handle_leave_if_owner) without duplicating the teardown.
+async fn teardown_peer(
+  room: Arc<Room>,
+  me: PeerId,
+  leaving: Arc<Participant>,
+  voice_channel_id: Uuid,
+) -> anyhow::Result<()> {
   // snapshot the fan-out before closing anything
   let outbound: Vec<(PeerId, Arc<RTCRtpSender>)> = {
     let map = leaving.outbound_senders.read().await;
@@ -686,6 +730,7 @@ mod tests {
         id: Uuid::new_v4(),
         name: "test".into(),
       },
+      Uuid::new_v4(),
     )
     .await?;
     let answer = expect_answer(rx).await?;
@@ -1117,6 +1162,70 @@ mod tests {
 
     tokio::time::timeout(Duration::from_secs(10), b2_hears_a).await??;
     tokio::time::timeout(Duration::from_secs(10), a_hears_rejoin).await??;
+    Ok(())
+  }
+
+  // Network-blip reconnect race: a user rejoins under the same PeerId on a fresh
+  // connection (new conn_id), then the OLD connection's dead stream is finally
+  // detected and its teardown fires. That teardown (handle_leave_if_owner with the
+  // OLD conn_id) must be a no-op — it must NOT evict the freshly-rejoined peer —
+  // while a teardown carrying the CURRENT conn_id still removes it normally.
+  #[tokio::test]
+  async fn stale_connection_teardown_does_not_evict_rejoined_peer() -> anyhow::Result<()> {
+    use crate::library::webrtc::{handle_leave_if_owner, handle_offer};
+
+    let room_id = Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+    let user_id = Uuid::new_v4();
+
+    let offer_for = async |conn_id: Uuid| -> anyhow::Result<()> {
+      let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+      let client = make_client_pc().await?;
+      start_fake_mic(make_fake_mic(&client).await?);
+      let offer = client.create_offer(None).await?;
+      let mut gather = client.gathering_complete_promise().await;
+      client.set_local_description(offer).await?;
+      let _ = gather.recv().await;
+      handle_offer(
+        client.local_description().await.unwrap(),
+        room.clone(),
+        user_id,
+        tx,
+        &api,
+        room_id,
+        User {
+          id: user_id,
+          name: "test".into(),
+        },
+        conn_id,
+      )
+      .await?;
+      let answer = expect_answer(&mut rx).await?;
+      client.set_remote_description(answer).await?;
+      Ok(())
+    };
+
+    // join on conn 1, then "rejoin" on conn 2 (the new Offer overwrites the peer).
+    let conn1 = Uuid::new_v4();
+    let conn2 = Uuid::new_v4();
+    offer_for(conn1).await?;
+    offer_for(conn2).await?;
+
+    // the dead conn-1 stream's teardown must NOT remove the conn-2 participant.
+    handle_leave_if_owner(room.clone(), user_id, conn1, room_id).await?;
+    {
+      let peers = room.peers.read().await;
+      let peer = peers.get(&user_id).expect("rejoined peer must survive");
+      assert_eq!(peer.conn_id, conn2, "surviving peer is the conn-2 rejoin");
+    }
+
+    // the owning connection's teardown still removes it.
+    handle_leave_if_owner(room.clone(), user_id, conn2, room_id).await?;
+    assert!(
+      room.peers.read().await.get(&user_id).is_none(),
+      "owning teardown removes the peer"
+    );
     Ok(())
   }
 

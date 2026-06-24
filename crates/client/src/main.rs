@@ -592,6 +592,13 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       // them stuck on screen — empty rooms send no snapshot, so they stay cleared.
       model.room_presence.clear();
 
+      // The signaling stream coming back proves the server is reachable again, so
+      // clear the app-level "reconnecting"/"no connection" surface now rather than
+      // waiting on the chat heartbeat — which may still be mid-backoff (up to 30s).
+      // Otherwise the overlay lingers while the call audibly resumes behind it (the
+      // rejoin's Join cue plays before the splash clears).
+      model.chat_disconnected_since = None;
+
       model.voice = Some(voice);
 
       Task::none()
@@ -629,7 +636,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       // Arm a give-up timer: if the stream hasn't reconnected and re-joined us by
       // the deadline, CallReconnectTimedOut drops us from the call client-side.
       Task::perform(
-        async { tokio::time::sleep(Duration::from_secs(30)).await },
+        async { tokio::time::sleep(Duration::from_secs(15)).await },
         move |_| Message::CallReconnectTimedOut { id },
       )
     }
@@ -651,6 +658,12 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       model.pending_rejoin = None;
       if let Some(ref mut voice) = model.voice {
         voice.voice_call_id = Some(voice_channel_id);
+        // JoinVoiceSuccessful fires the moment local PC setup completes and the
+        // offer is sent — before ICE has actually (re)connected. For a reconnect
+        // (link is still Reconnecting here) that's too early to ding "joined": we
+        // haven't recovered yet. Defer the cue to the Connected transition below,
+        // where the link is genuinely back. A fresh join keeps the instant cue.
+        let reconnecting = matches!(voice.link_state, LinkState::Reconnecting { .. });
         // Cues may have failed to initialize at startup (no working device then).
         // A join is a good moment to retry against the currently-saved device so
         // the join/leave/peer cues come back to life without a restart.
@@ -664,9 +677,11 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             .map_err(|e| eprintln!("audio cues init failed: {e:?}"))
             .ok();
         }
-        if let Some(ref mut cues) = model.audio_cues {
-          cues.play(Cue::Join);
-        };
+        if !reconnecting {
+          if let Some(ref mut cues) = model.audio_cues {
+            cues.play(Cue::Join);
+          };
+        }
       };
       Task::none()
     }
@@ -693,6 +708,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           Task::none()
         }
         RTCPeerConnectionState::Connected => {
+          // Reaching Connected out of a reconnect is the real "we're back"
+          // moment — play the Join cue here, the one we deferred from
+          // JoinVoiceSuccessful so it wouldn't fire while still Reconnecting.
+          if matches!(call.link_state, LinkState::Reconnecting { .. }) {
+            if let Some(ref mut cues) = model.audio_cues {
+              cues.play(Cue::Join);
+            }
+          }
           call.link_state = LinkState::Live;
           Task::none()
         }

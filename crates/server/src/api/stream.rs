@@ -45,7 +45,7 @@ use crate::{
     database,
     webrtc::{
       Room, broadcast_presence, broadcast_server_presence, handle_answer, handle_leave,
-      handle_offer, membership_snapshot, register_presence_subscriber,
+      handle_leave_if_owner, handle_offer, membership_snapshot, register_presence_subscriber,
       unregister_presence_subscriber,
     },
   },
@@ -284,6 +284,7 @@ impl StreamService for StreamServer {
                 id: request_user_id,
                 name: user.username.clone(),
               },
+              voice_conn_id,
             )
             .await
             {
@@ -395,7 +396,11 @@ impl StreamService for StreamServer {
           .collect()
       };
       for (id, room) in rooms {
-        let _ = handle_leave(room.clone(), request_user_id, id)
+        // Only evict if this connection still owns the user's participant. If the
+        // user already rejoined on a newer connection (network-blip reconnect), the
+        // participant now belongs to that connection and this stale teardown must
+        // leave it intact — otherwise we'd drop a peer that's actively in the call.
+        let _ = handle_leave_if_owner(room.clone(), request_user_id, voice_conn_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
       }
