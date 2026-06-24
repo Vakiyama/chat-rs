@@ -1,4 +1,5 @@
 use crate::colors::{AccentsExt, NeutralsExt};
+use crate::model::{LinkState::*, MediaHealth};
 use crate::screens::chat::View::NoneSelected;
 use crate::types::async_data::AsyncData;
 use crate::widgets::context_menu::ContextMenu;
@@ -118,24 +119,15 @@ pub enum Message {
     voice_channel_id: Uuid,
   },
   LeaveVoice,
-  // Intercepted in the top-level update to (re)subscribe voice-call presence for
-  // the active server. Not handled inside chat::update.
   ActiveServerChanged {
     server_id: Uuid,
   },
-  // Mute/deafen toggles, also intercepted by the top-level update (they need the
-  // voice handle). Not handled inside chat::update.
   ToggleMute,
   ToggleDeafen,
-  // Per-user mixer, set from a participant's right-click menu. Both are
-  // intercepted by the top-level update (they touch persisted prefs + the voice
-  // handle). `volume` is a linear 0.0..=2.0 multiplier. Not handled in chat::update.
   SetUserVolume {
     user_id: Uuid,
     volume: f32,
   },
-  // Slider released: persist the level once, instead of writing the file on
-  // every drag step (mirrors the noise-gate slider in the settings screen).
   UserVolumeReleased {
     user_id: Uuid,
   },
@@ -764,14 +756,6 @@ fn view_channels<'a>(
       .align_y(Center)
       .clip(true);
 
-      // The header is the join affordance — a button only while we're NOT in this
-      // call. Once joined it becomes a plain row, so clicking it can't trigger a
-      // redundant rejoin, and only the header (not the whole call card with its
-      // participant list) reacts to hover.
-      // Always a button so the header keeps identical padding/layout whether or
-      // not we're in the call. When joined we just omit `on_press`, which makes
-      // the button inert — it can't trigger a redundant rejoin and shows no hover
-      // highlight (its status stays Disabled).
       let header_button = button(header_row)
         .style(|theme: &Theme, status| -> button::Style {
           let palette = theme.extended_palette();
@@ -791,6 +775,7 @@ fn view_channels<'a>(
             ..button::Style::default()
           }
         })
+        .padding(SPACE_GRID / 2)
         .width(Length::Fill);
 
       let header: Element<'a, Message> = if is_selected {
@@ -803,13 +788,6 @@ fn view_channels<'a>(
           .into()
       };
 
-      // NON-keyed column on purpose: rows are heterogeneous (our own row is a
-      // plain container, peers are stateful ContextMenus). A keyed column
-      // reconciles reordered children with a non-tag-checking diff, which can
-      // pair a ContextMenu element with a leftover stateless tree when the
-      // roster changes — and then panics ("Downcast on stateless state") on the
-      // overlay pass. A plain Column tag-checks each child and rebuilds state on
-      // a type mismatch, so it stays correct as people join/leave.
       let participants = iced::widget::Column::with_children({
         main_model
           .room_presence
@@ -952,19 +930,19 @@ fn view_channels<'a>(
             element
           })
       })
-      .spacing((SPACE_GRID as u32) / 2)
-      .padding([
-        if main_model
-          .room_presence
-          .get(&voice_channel.id)
-          .is_some_and(|presence| !presence.is_empty())
-        {
-          SPACE_GRID / 2
-        } else {
-          0
-        },
-        0,
-      ]);
+      .spacing((SPACE_GRID as u32) / 2);
+      //      .padding([
+      //        if main_model
+      //          .room_presence
+      //          .get(&voice_channel.id)
+      //          .is_some_and(|presence| !presence.is_empty())
+      //        {
+      //          SPACE_GRID / 2
+      //        } else {
+      //          0
+      //        },
+      //        0,
+      //      ]);
 
       column![header, participants].width(Length::Fill).into()
     })
@@ -1063,7 +1041,7 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
   };
 
   // mute/deafen persist across calls, so they live in the always-present user
-  // controller (Discord-style) rather than only inside the active-call panel.
+  // controller rather than only inside the active-call panel.
   let (muted, deafened) = model
     .voice
     .as_ref()
@@ -1203,8 +1181,6 @@ fn view_text_chat_window<'a>(
     .placeholder(format!("Message #{name}"))
     .id(make_text_input_id(text_channel_id))
     .on_action(Message::EditorAction)
-    // Enter submits; Shift+Enter inserts a newline (the editor's default Enter).
-    // Custom skips the buffer edit, so the submit newline never lands in `input`.
     .key_binding(|key_press| {
       use iced::keyboard::Key;
       use iced::keyboard::key::Named;
@@ -1216,8 +1192,6 @@ fn view_text_chat_window<'a>(
         text_editor::Binding::from_key_press(key_press)
       }
     })
-    // grows with content (Shrink height) up to a cap, then scrolls internally —
-    // so a long multi-line draft can't push the message list off-screen.
     .max_height((SPACE_GRID * 24) as f32)
     .padding(SPACE_GRID * 2)
     .style(|theme, status| {
@@ -1234,11 +1208,6 @@ fn view_text_chat_window<'a>(
   container(column![
     // top - channel name
     view_text_chat_title(name),
-    // The message list fills the space above the input. The Discord-style typing
-    // line is floated transparently over the *bottom* of this list (just above
-    // the input) rather than taking its own row — so it reserves no gap and the
-    // messages scroll behind it. It's non-interactive, so scrolling the list
-    // beneath is unaffected.
     stack![
       row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
       container(view_typing_indicator(&typing_names))
@@ -1251,8 +1220,6 @@ fn view_text_chat_window<'a>(
           left: (SPACE_GRID * 2).into(),
         }),
     ],
-    // bottom - the message input. Fill width so the editor is bounded and wraps
-    // long lines (a Shrink container would give it unbounded width = no wrap).
     container(editor).width(Length::Fill).padding(Padding {
       top: 0.0,
       right: (SPACE_GRID * 2).into(),
@@ -1264,8 +1231,6 @@ fn view_text_chat_window<'a>(
   .into()
 }
 
-/// The "X is typing…" line above the input. Returns a fixed-height element even
-/// when nobody's typing, so the input doesn't jump as it appears/disappears.
 fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
   let line = match names {
     [] => None,
@@ -1276,9 +1241,6 @@ fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
   };
 
   match line {
-    // Active: an opaque "pill" behind the text so it reads cleanly instead of
-    // clipping with the messages scrolling behind it. Background matches the
-    // chat area (root `base`), so it occludes without looking like a foreign box.
     Some(line) => container(text(line).size(12).style(|theme: &Theme| text::Style {
       color: Some(theme.extended_palette().background.weak.text),
     }))
@@ -1371,10 +1333,6 @@ fn view_posts<'a>(
     ));
   };
 
-  // A run of consecutive messages from the same author only shows the name on its
-  // first message. We start a fresh run (and re-show the name) on a new day, a
-  // change of author, a gap of `MESSAGE_GROUP_GAP` or more, or once a run reaches
-  // `MESSAGE_GROUP_MAX` messages — both to keep long monologues readable.
   const MESSAGE_GROUP_GAP: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
   const MESSAGE_GROUP_MAX: usize = 10;
 
@@ -1444,9 +1402,6 @@ fn view_posts<'a>(
       })
       .wrapping(text::Wrapping::WordOrGlyph);
 
-    // On a continuation line the name is omitted entirely (not just blanked) so
-    // the content sits one gap from the time — lining up with where the name
-    // starts on a header line, instead of carrying an extra empty-name gap.
     let body: Element<'a, Message> = if display_name.is_empty() {
       content_text.into()
     } else {
@@ -1466,8 +1421,6 @@ fn view_posts<'a>(
       .into()
     };
 
-    // Breathe a little above a new group (a name reappears), but not when a day
-    // divider already sits above it.
     let top_pad = if show_name && !is_new_day {
       SPACE_GRID as f32
     } else {
@@ -1539,10 +1492,6 @@ impl Tone {
   }
 }
 
-/// folds link + media into one displayed status. Media only refines `Live`.
-/// `input_ok`/`output_ok` flag a dead mic/speaker: the user joined, but that
-/// direction is silent until they fix it. A dead device wins over the normal
-/// "Voice Connected" line because it's the most actionable thing on screen.
 fn describe_voice(
   link: &crate::model::LinkState,
   media: crate::model::MediaHealth,
@@ -1550,12 +1499,6 @@ fn describe_voice(
   output_ok: bool,
   mic_receiving: bool,
 ) -> (String, Tone, Option<String>) {
-  use crate::model::{LinkState::*, MediaHealth};
-
-  // a dead device is only meaningful once we're actually in the call. The mic
-  // counts as down either when its device failed to open (`!input_ok`) or when
-  // it opened but no frames are arriving (`!mic_receiving`) — unplugged, muted
-  // at the OS, or broken. Same warning for both: the user knows the context.
   let connected = matches!(link, Live | Unstable);
   let mic_down = !input_ok || !mic_receiving;
   let speaker_down = !output_ok;
@@ -1595,8 +1538,6 @@ fn latency_tone(ms: u32) -> Tone {
   }
 }
 
-// renders a "voice connected" footer pinned to the bottom of the sidebar.
-// returns None when there's no active call, so the caller can skip pushing it.
 fn view_call_controller<'a>(
   active_voice_channel_id: Option<&'a Uuid>,
   channels: &'a [Channel],
@@ -1610,11 +1551,6 @@ fn view_call_controller<'a>(
     .map(|channel| channel.name.as_str())
     .unwrap_or("Voice");
 
-  // Two render modes share the same card chrome. Live call: voice is Some, drive
-  // the status off its link/media health. Reconnecting placeholder: the signaling
-  // stream dropped (voice gone) but a pending_rejoin for this channel is keeping
-  // us "in" the call while we retry — show a plain "Reconnecting…" until we either
-  // recover or the give-up timer drops us. Bail only when neither applies.
   let reconnecting = main_model
     .pending_rejoin
     .as_ref()
@@ -1796,10 +1732,6 @@ fn voice_toggle_button<'a>(
     .into()
 }
 
-/// The right-click mixer popup for one remote participant: a name header, a
-/// 0–200% volume slider, and a mute toggle. The displayed values come from the
-/// caller's persisted pref; each interaction emits a message the top-level
-/// update persists and forwards to the voice actor.
 fn user_mixer_overlay<'a>(
   user_id: Uuid,
   name: String,

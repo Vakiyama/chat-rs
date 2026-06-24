@@ -5,7 +5,10 @@ use chat_shared::{
 use futures_util::future::join_all;
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex, atomic::AtomicBool},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize},
+  },
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -67,6 +70,14 @@ pub struct Room {
   // construct rooms via Room::default()); production rooms are built with Room::new.
   pub voice_channel_id: Uuid,
   pub server_id: Uuid,
+  // Count of joins currently negotiating against this room. A joiner holds the
+  // room Arc (and may have evicted a stale prior participant of its own) for the
+  // whole offer/answer handshake before its participant lands in `peers`. Empty-
+  // room eviction must skip a room with any join in flight, or it would drop the
+  // room from the manager between handing out the Arc and the participant being
+  // inserted — splitting the joiner off into an orphaned room. See
+  // reserve_room_for_join / evict_room_if_empty in api/stream.rs.
+  pub pending_joins: AtomicUsize,
 }
 
 impl Room {
@@ -75,6 +86,7 @@ impl Room {
       peers: Default::default(),
       voice_channel_id,
       server_id,
+      pending_joins: AtomicUsize::new(0),
     }
   }
 }

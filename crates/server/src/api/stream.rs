@@ -1,7 +1,10 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::Ordering,
+  },
 };
 
 use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
@@ -141,8 +144,27 @@ static ROOM_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<VoiceRoomManager>> =
 // the DB) on first use. The lock is held across the DB lookup so two concurrent
 // joiners can't each create a separate Room for the same channel.
 async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
+  get_or_create_room_inner(voice_channel_id, false).await
+}
+
+// Like get_or_create_room, but registers an in-flight join (`pending_joins += 1`)
+// under the same manager-lock acquisition that hands back the room. Registering it
+// atomically with the get/create is what makes eviction safe: a concurrent
+// evict_room_if_empty can only observe the room as empty-and-unreserved if it takes
+// the manager lock before this reservation is recorded — in which case the room is
+// genuinely idle — never in the window where this joiner holds the Arc but hasn't
+// inserted its participant yet. The returned guard releases the reservation on drop.
+async fn reserve_room_for_join(voice_channel_id: Uuid) -> JoinReservation {
+  let room = get_or_create_room_inner(voice_channel_id, true).await;
+  JoinReservation { room }
+}
+
+async fn get_or_create_room_inner(voice_channel_id: Uuid, reserve: bool) -> Arc<Room> {
   let mut room_manager = ROOM_MANAGER.lock().await;
   if let Some(room) = room_manager.rooms.get(&voice_channel_id) {
+    if reserve {
+      room.pending_joins.fetch_add(1, Ordering::SeqCst);
+    }
     return room.clone();
   }
 
@@ -156,8 +178,42 @@ async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
     .unwrap_or_default();
 
   let room: Arc<Room> = Room::new(voice_channel_id, server_id).into();
+  if reserve {
+    room.pending_joins.fetch_add(1, Ordering::SeqCst);
+  }
   room_manager.rooms.insert(voice_channel_id, room.clone());
   room
+}
+
+// RAII marker for a join negotiating against a room. Holds the room alive in the
+// manager (via pending_joins) for the whole handshake; the reservation is released
+// when the guard drops, regardless of whether the join succeeded.
+struct JoinReservation {
+  room: Arc<Room>,
+}
+
+impl Drop for JoinReservation {
+  fn drop(&mut self) {
+    self.room.pending_joins.fetch_sub(1, Ordering::SeqCst);
+  }
+}
+
+// Drop a room from the manager once it has no participants and no joins in flight,
+// so empty rooms don't accumulate for the life of the process. Call after any leave.
+// The manager lock is held across the emptiness check (and the pending_joins read)
+// so it serializes against reserve_room_for_join / get_or_create_room — a room with
+// a join in flight, or one a concurrent joiner is about to be handed, is left intact.
+async fn evict_room_if_empty(voice_channel_id: Uuid) {
+  let mut room_manager = ROOM_MANAGER.lock().await;
+  let Some(room) = room_manager.rooms.get(&voice_channel_id) else {
+    return;
+  };
+  if room.pending_joins.load(Ordering::SeqCst) > 0 {
+    return;
+  }
+  if room.peers.read().await.is_empty() {
+    room_manager.rooms.remove(&voice_channel_id);
+  }
 }
 
 static WEBRTC_API: OnceCell<API> = OnceCell::const_new();
@@ -259,7 +315,10 @@ impl StreamService for StreamServer {
             description: offer,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            // Held for the whole handshake so eviction can't drop the room while we
+            // negotiate; released when `reservation` drops at the end of this arm.
+            let reservation = reserve_room_for_join(voice_channel_id).await;
+            let room = reservation.room.clone();
 
             // A new offer from a user already present is a reconnect: their old
             // signaling stream dropped (possibly not yet detected by keepalive) and
@@ -311,6 +370,8 @@ impl StreamService for StreamServer {
             let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
               .await
               .map_err(|err| println!("Error handling leave: {err}"));
+
+            evict_room_if_empty(voice_channel_id).await;
           }
           Ok(ClientVoice::SetMuted {
             muted,
@@ -403,6 +464,8 @@ impl StreamService for StreamServer {
         let _ = handle_leave_if_owner(room.clone(), request_user_id, voice_conn_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
+
+        evict_room_if_empty(id).await;
       }
     });
 
