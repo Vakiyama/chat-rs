@@ -1619,21 +1619,36 @@ fn view_call_controller<'a>(
     .map(|channel| channel.name.as_str())
     .unwrap_or("Voice");
 
-  let voice = main_model.voice.as_ref()?;
-  let (status_text, tone, media_hint) = describe_voice(
-    &voice.link_state,
-    voice.media,
-    voice.input_ok,
-    voice.output_ok,
-    voice.mic_receiving,
-  );
+  // Two render modes share the same card chrome. Live call: voice is Some, drive
+  // the status off its link/media health. Reconnecting placeholder: the signaling
+  // stream dropped (voice gone) but a pending_rejoin for this channel is keeping
+  // us "in" the call while we retry — show a plain "Reconnecting…" until we either
+  // recover or the give-up timer drops us. Bail only when neither applies.
+  let reconnecting = main_model
+    .pending_rejoin
+    .as_ref()
+    .is_some_and(|r| &r.voice_channel_id == voice_channel_id);
+
+  let (status_text, tone, media_hint, connected, latency_ms) = match main_model.voice.as_ref() {
+    Some(voice) => {
+      let (status_text, tone, media_hint) = describe_voice(
+        &voice.link_state,
+        voice.media,
+        voice.input_ok,
+        voice.output_ok,
+        voice.mic_receiving,
+      );
+      let connected = matches!(
+        voice.link_state,
+        crate::model::LinkState::Live | crate::model::LinkState::Unstable
+      );
+      (status_text, tone, media_hint, connected, voice.latency_ms)
+    }
+    None if reconnecting => ("Reconnecting…".to_string(), Tone::Warn, None, false, 0),
+    None => return None,
+  };
 
   // secondary line: channel name, then latency + media hint only while connected
-  let connected = matches!(
-    voice.link_state,
-    crate::model::LinkState::Live | crate::model::LinkState::Unstable
-  );
-
   let mut meta = row![
     text(channel_name)
       .size(12)
@@ -1643,11 +1658,11 @@ fn view_call_controller<'a>(
   .spacing(6)
   .align_y(Center);
 
-  if connected && voice.latency_ms > 0 {
-    let lt = latency_tone(voice.latency_ms);
+  if connected && latency_ms > 0 {
+    let lt = latency_tone(latency_ms);
     meta = meta.push(text("·").size(12).style(text::secondary));
     meta = meta.push(
-      text(format!("{} ms", voice.latency_ms))
+      text(format!("{latency_ms} ms"))
         .size(12)
         .style(move |t: &Theme| text::Style {
           color: Some(lt.color(t)),

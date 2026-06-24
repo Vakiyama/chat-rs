@@ -261,29 +261,37 @@ impl StreamService for StreamServer {
           }) => {
             let room = get_or_create_room(voice_channel_id).await;
 
-            if !room.peers.read().await.contains_key(&request_user_id) {
-              match handle_offer(
-                offer,
-                room.clone(),
-                request_user_id,
-                tx.clone(),
-                api,
-                voice_channel_id,
-                User {
-                  id: request_user_id,
-                  name: user.username.clone(),
-                },
-              )
-              .await
-              {
-                Ok(()) => {
-                  println!("Success handling session description offer from client");
-                }
-                // todo; tear down clients if err
-                Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
+            // A new offer from a user already present is a reconnect: their old
+            // signaling stream dropped (possibly not yet detected by keepalive) and
+            // they're rejoining on a fresh connection. Evict the stale participant
+            // first so the rejoin isn't rejected and they don't linger as a ghost.
+            // handle_leave is idempotent and renegotiates remaining peers to drop
+            // the stale relay track.
+            if room.peers.read().await.contains_key(&request_user_id) {
+              let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
+                .await
+                .map_err(|err| eprintln!("evicting stale participant on rejoin: {err}"));
+            }
+
+            match handle_offer(
+              offer,
+              room.clone(),
+              request_user_id,
+              tx.clone(),
+              api,
+              voice_channel_id,
+              User {
+                id: request_user_id,
+                name: user.username.clone(),
+              },
+            )
+            .await
+            {
+              Ok(()) => {
+                println!("Success handling session description offer from client");
               }
-            } else {
-              eprintln!("User offer rejected; already in room.");
+              // todo; tear down clients if err
+              Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
             }
           }
           Ok(ClientVoice::Answer {

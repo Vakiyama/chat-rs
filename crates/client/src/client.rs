@@ -273,6 +273,13 @@ pub async fn get() -> GrpcClient {
         let server_url = CONFIG.server_url.to_string();
         let channel_connect = tonic::transport::Endpoint::new(server_url.clone())
           .unwrap_or_else(|_| panic!("Failed to parse server url {}", &server_url))
+          // Keepalive so a dead/restarted server is noticed quickly: the voice and
+          // text streams then error and reconnect in seconds rather than waiting on
+          // the OS TCP timeout. `while_idle` keeps pinging even with no active RPC.
+          .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+          .keep_alive_timeout(std::time::Duration::from_secs(20))
+          .keep_alive_while_idle(true)
+          .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
           .connect()
           .await;
 

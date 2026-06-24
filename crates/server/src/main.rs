@@ -75,6 +75,13 @@ async fn main() {
     .service(PostsServiceServer::new(PostsServer));
 
   let grpc = Server::builder()
+    // Detect dead client connections (network drops) promptly so the voice
+    // stream's task ends and runs its presence cleanup, instead of leaving the
+    // disconnected user as a ghost in the room. Without keepalive an ungraceful
+    // drop isn't noticed until the OS TCP timeout, which can be minutes.
+    .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
+    .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+    .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
     .layer(
       TraceLayer::new_for_grpc().make_span_with(|request: &http::Request<_>| {
         tracing::info_span!(

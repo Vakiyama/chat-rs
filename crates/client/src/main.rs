@@ -9,8 +9,8 @@ use futures_util::SinkExt;
 use google_material_symbols::GoogleMaterialSymbols as Icon;
 use iced::Theme::CatppuccinFrappe;
 use iced::futures::channel::mpsc::Sender;
-use iced::widget::{Text, container, text};
-use iced::{Element, Font, Subscription, Task, stream};
+use iced::widget::{Text, column, container, row, text};
+use iced::{Center, Element, Font, Length, Subscription, Task, Theme, stream};
 use uuid::Uuid;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
@@ -24,7 +24,7 @@ pub mod webrtc_stream;
 use crate::audio_processing::call_handler::spawn_voice;
 use crate::audio_processing::cues::Cue;
 use crate::chat_stream::ChatConnection;
-use crate::model::{Auth, LinkState, MediaHealth, Screen, Stream, VoiceCall};
+use crate::model::{Auth, LinkState, MediaHealth, PendingRejoin, Screen, Stream, VoiceCall};
 use crate::screens::{auth, chat, settings};
 use crate::webrtc_stream::WebRTCConnection;
 
@@ -155,6 +155,14 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
         }),
       ];
 
+      // While the heartbeat is down, tick once a second so the connection-loss
+      // banner/overlay thresholds cross even during the chat stream's backoff
+      // silence (it can sit quiet for up to 30s between retries). Message::None
+      // just re-runs view, which recomputes elapsed from chat_disconnected_since.
+      if model.chat_disconnected_since.is_some() {
+        subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::None));
+      }
+
       // Settings-only subscriptions: Esc closes back to chat, and a timer drives
       // the live mic-level meter. Scoped so they can't fire on chat/auth.
       if matches!(model.screen, Screen::Settings(_)) {
@@ -203,6 +211,11 @@ pub enum Message {
     voice_channel_id: Uuid,
   },
   None,
+  // the in-call signaling reconnect window elapsed; if `id` still matches the
+  // active pending_rejoin we give up and drop the user from the call UI.
+  CallReconnectTimedOut {
+    id: u32,
+  },
   VoiceGraceExpired {
     epoch: u32,
   },
@@ -258,6 +271,8 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         // tear down voice + streams (subscriptions gate on LoggedIn, so they
         // stop once user flips to NotLoggedIn) and return to the auth screen.
         model.voice = None;
+        model.pending_rejoin = None;
+        model.chat_disconnected_since = None;
         model.webrtc_stream = Stream::Disconnected;
         model.chat_stream = Stream::Disconnected;
         model.active_server_id = None;
@@ -335,13 +350,19 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::LeaveVoice => {
+            // Leaving while "Reconnecting..." (voice is None, only pending_rejoin
+            // is set) must cancel the auto-rejoin so the stream coming back doesn't
+            // surprise-rejoin us. The stale give-up timer no-ops once this is None.
+            let was_reconnecting = model.pending_rejoin.take().is_some();
             if let Some(ref mut voice) = model.voice {
               voice.handle.leave();
               voice.voice_call_id = None;
               voice.link_state = model::LinkState::Idle;
-              if let Some(ref mut cues) = model.audio_cues {
-                cues.play(Cue::Leave);
-              };
+            }
+            if (model.voice.is_some() || was_reconnecting)
+              && let Some(ref mut cues) = model.audio_cues
+            {
+              cues.play(Cue::Leave);
             }
             Task::none()
           }
@@ -488,11 +509,16 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     },
     Message::ChatStreamDisconnected => {
       model.chat_stream = Stream::Disconnected;
+      // Stamp the moment we lost the heartbeat (first drop only, so a flapping
+      // stream keeps the original elapsed). Drives the banner/overlay timing.
+      model
+        .chat_disconnected_since
+        .get_or_insert_with(std::time::Instant::now);
       Task::none()
     }
     Message::ChatStreamConnected(connection) => {
       model.chat_stream = Stream::Connected(connection);
-
+      model.chat_disconnected_since = None;
       Task::none()
     }
     Message::ChatLatencyUpdated(latency_ms) => {
@@ -522,7 +548,7 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       }
     }
     Message::WebRTCSignalStreamConnected(conn) => {
-      let voice = VoiceCall {
+      let mut voice = VoiceCall {
         handle: spawn_voice(conn),
         link_state: model::LinkState::Connecting,
         media: model::MediaHealth::Unknown,
@@ -544,16 +570,85 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         voice.handle.subscribe_server(server_id);
       }
 
+      // Auto-rejoin the call we were dropped from. Restore mute/deafen onto the
+      // fresh handle's atomics (set_* just stores them while no call is active),
+      // then join — which re-announces them to the server, the same way a normal
+      // fresh join does. We leave pending_rejoin set (so the card keeps showing
+      // "Reconnecting…" with no flicker until voice_call_id lands) and clear it in
+      // JoinVoiceSuccessful once the rejoin is confirmed. Until then the give-up
+      // timer still guards us if the join never completes.
+      if let Some(rejoin) = &model.pending_rejoin {
+        voice.muted = rejoin.muted;
+        voice.deafened = rejoin.deafened;
+        voice.handle.set_deafened(rejoin.deafened);
+        voice.handle.set_muted(rejoin.muted);
+        voice.link_state = model::LinkState::Reconnecting { attempt: 1 };
+        voice.handle.join(rejoin.voice_channel_id, voice.epoch);
+      }
+
+      // Drop any presence we were showing for this server's rooms; it's rebuilt
+      // from the fresh SubscribeServer / in-call snapshots. This clears ghosts
+      // (e.g. a peer that vanished while we were disconnected) instead of leaving
+      // them stuck on screen — empty rooms send no snapshot, so they stay cleared.
+      model.room_presence.clear();
+
       model.voice = Some(voice);
 
       Task::none()
     }
     Message::WebRTCSignalStreamDisconnected => {
-      model.voice = None; // drops the handle → actor loop ends
       model.webrtc_stream = Stream::Disconnected;
+
+      // If we were in a call, remember it (and our mute/deafen state) so we can
+      // auto-rejoin once the stream reconnects, instead of silently dropping the
+      // user. A manual leave clears voice_call_id, so this won't surprise-rejoin.
+      // The card keeps showing "Reconnecting..." off this pending_rejoin until we
+      // either recover or the give-up timer below fires. Capture before dropping
+      // the handle below (which ends the actor loop and tears down audio).
+      let in_call = model
+        .voice
+        .as_ref()
+        .and_then(|v| v.voice_call_id.map(|id| (id, v.muted, v.deafened)));
+      model.voice = None; // drops the handle → actor loop ends
+
+      let Some((voice_channel_id, muted, deafened)) =
+        in_call.filter(|_| model.pending_rejoin.is_none())
+      else {
+        return Task::none();
+      };
+
+      model.reconnect_seq = model.reconnect_seq.wrapping_add(1);
+      let id = model.reconnect_seq;
+      model.pending_rejoin = Some(PendingRejoin {
+        voice_channel_id,
+        muted,
+        deafened,
+        id,
+      });
+
+      // Arm a give-up timer: if the stream hasn't reconnected and re-joined us by
+      // the deadline, CallReconnectTimedOut drops us from the call client-side.
+      Task::perform(
+        async { tokio::time::sleep(Duration::from_secs(30)).await },
+        move |_| Message::CallReconnectTimedOut { id },
+      )
+    }
+    Message::CallReconnectTimedOut { id } => {
+      // Only give up if this is still the same pending reconnect we armed the timer
+      // for. A successful rejoin (or a newer disconnect) leaves a different/empty
+      // pending_rejoin, in which case this is a stale tick and we do nothing.
+      if model.pending_rejoin.as_ref().is_some_and(|r| r.id == id) {
+        model.pending_rejoin = None;
+        if let Some(ref mut cues) = model.audio_cues {
+          cues.play(Cue::Leave);
+        }
+      }
       Task::none()
     }
     Message::JoinVoiceSuccessful { voice_channel_id } => {
+      // The rejoin (if any) is confirmed; drop the pending state so its give-up
+      // timer no-ops. voice_call_id below now drives the card.
+      model.pending_rejoin = None;
       if let Some(ref mut voice) = model.voice {
         voice.voice_call_id = Some(voice_channel_id);
         // Cues may have failed to initialize at startup (no working device then).
@@ -746,15 +841,23 @@ fn reconnect(call: &mut VoiceCall, id: Uuid) {
   call.handle.join(id, call.epoch);
 }
 
+// How long the heartbeat must be down before we surface it: a slim banner first,
+// then a full "no connection" overlay once it's clearly not a momentary blip.
+const BANNER_AFTER: Duration = Duration::from_secs(2);
+const OVERLAY_AFTER: Duration = Duration::from_secs(10);
+
 fn view(model: &'_ model::Model) -> Element<'_, Message> {
-  let view = match &model.screen {
+  let content = match &model.screen {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
     model::Screen::Chat(chat_model) => screens::chat::view(
       chat_model,
+      // keep the joined channel highlighted while we're reconnecting: fall back to
+      // the pending_rejoin channel when the live voice handle is gone.
       model
         .voice
         .as_ref()
-        .and_then(|voice| voice.voice_call_id.as_ref()),
+        .and_then(|voice| voice.voice_call_id.as_ref())
+        .or_else(|| model.pending_rejoin.as_ref().map(|r| &r.voice_channel_id)),
       model,
     )
     .map(Message::Chat),
@@ -763,5 +866,66 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
     }
   };
 
+  // App-level connection loss. Only meaningful once logged in (the streams only
+  // run then). The 1s tick subscription keeps this re-evaluating while down so the
+  // thresholds actually fire during the chat stream's quiet backoff windows.
+  let down_for = matches!(model.user, Auth::LoggedIn(_))
+    .then(|| model.chat_disconnected_since.map(|t| t.elapsed()))
+    .flatten();
+
+  let view: Element<'_, Message> = match down_for {
+    Some(elapsed) if elapsed >= OVERLAY_AFTER => no_connection_overlay(),
+    Some(elapsed) if elapsed >= BANNER_AFTER => column![reconnecting_banner(), content].into(),
+    _ => content,
+  };
+
   container(container(view).style(container::rounded_box)).into()
+}
+
+// Slim full-width strip pinned above the app while the heartbeat is down but we
+// haven't yet given up — reassures the user we're actively retrying.
+fn reconnecting_banner<'a>() -> Element<'a, Message> {
+  container(
+    row![
+      icon(Icon::Sync).size(16),
+      text("Reconnecting to server…").size(14),
+    ]
+    .spacing(SPACE_GRID as u32)
+    .align_y(Center),
+  )
+  .width(Length::Fill)
+  .padding(SPACE_GRID)
+  .style(|theme: &Theme| {
+    let warning = theme.extended_palette().warning;
+    container::Style {
+      background: Some(warning.weak.color.into()),
+      text_color: Some(warning.weak.text),
+      ..container::Style::default()
+    }
+  })
+  .into()
+}
+
+// Full-screen takeover once we've been disconnected long enough that the app is
+// effectively unusable; replaces the normal content until the server is back.
+fn no_connection_overlay<'a>() -> Element<'a, Message> {
+  container(
+    column![
+      icon(Icon::CloudOff).size(48),
+      text("No connection").size(22).font(Font {
+        weight: iced::font::Weight::Bold,
+        ..SOURCE_SANS_REGULAR
+      }),
+      text("Trying to reach the server…")
+        .size(14)
+        .style(text::secondary),
+    ]
+    .spacing(SPACE_GRID as u32)
+    .align_x(Center),
+  )
+  .width(Length::Fill)
+  .height(Length::Fill)
+  .center_x(Length::Fill)
+  .center_y(Length::Fill)
+  .into()
 }
