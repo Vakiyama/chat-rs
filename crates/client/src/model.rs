@@ -20,6 +20,18 @@ pub enum Auth {
   NotLoggedIn,
 }
 
+// The call to restore after the voice signaling stream drops and reconnects.
+// Captured the moment the stream disconnects (while we still know which call we
+// were in and our mute/deafen state), then drained on reconnect to auto-rejoin.
+pub struct PendingRejoin {
+  pub voice_channel_id: Uuid,
+  pub muted: bool,
+  pub deafened: bool,
+  // generation stamp (from Model::reconnect_seq) so a stale give-up timer only
+  // drops the call it was armed for, not one we've since recovered or re-dropped.
+  pub id: u32,
+}
+
 #[derive(Debug)]
 pub enum LinkState {
   Idle,                          // closed / never started
@@ -75,6 +87,16 @@ pub struct Model {
   pub chat_stream: Stream<chat_stream::ChatConnection>,
   pub webrtc_stream: Stream<webrtc_stream::WebRTCConnection>,
   pub voice: Option<VoiceCall>,
+  // set when the voice signaling stream drops mid-call; drained on reconnect to
+  // auto-rejoin the same channel with the same mute/deafen state. While set (and
+  // voice is None) the call card shows "Reconnecting...".
+  pub pending_rejoin: Option<PendingRejoin>,
+  // monotonic counter minting PendingRejoin::id, so each disconnect arms a give-up
+  // timer that only fires for that specific reconnect attempt.
+  pub reconnect_seq: u32,
+  // when the chat stream (our always-on heartbeat) went down, cleared on connect.
+  // Drives the app-level "reconnecting" banner and "no connection" overlay timing.
+  pub chat_disconnected_since: Option<std::time::Instant>,
   pub active_server_id: Option<Uuid>,
   pub room_presence: HashMap<Uuid, Vec<DisplayVoiceUser>>,
   // Per-remote-user playback levels set from the in-call right-click mixer,
@@ -103,6 +125,9 @@ impl Default for Model {
       chat_stream: Stream::Disconnected,
       webrtc_stream: Stream::Disconnected,
       voice: None,
+      pending_rejoin: None,
+      reconnect_seq: 0,
+      chat_disconnected_since: None,
       active_server_id: None,
       room_presence: HashMap::new(),
       per_user_audio: crate::voice_settings::VoiceSettings::load().per_user_volumes,

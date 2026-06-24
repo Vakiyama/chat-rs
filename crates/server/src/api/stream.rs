@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, atomic::Ordering},
 };
 
 use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
@@ -45,7 +45,7 @@ use crate::{
     database,
     webrtc::{
       Room, broadcast_presence, broadcast_server_presence, handle_answer, handle_leave,
-      handle_offer, membership_snapshot, register_presence_subscriber,
+      handle_leave_if_owner, handle_offer, membership_snapshot, register_presence_subscriber,
       unregister_presence_subscriber,
     },
   },
@@ -137,12 +137,17 @@ struct VoiceRoomManager {
 static ROOM_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<VoiceRoomManager>> =
   std::sync::LazyLock::new(|| tokio::sync::Mutex::new(VoiceRoomManager::default()));
 
-// Fetch the room for a voice channel, creating it (with its server_id resolved from
-// the DB) on first use. The lock is held across the DB lookup so two concurrent
-// joiners can't each create a separate Room for the same channel.
-async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
+async fn reserve_room_for_join(voice_channel_id: Uuid) -> JoinReservation {
+  let room = get_or_create_room(voice_channel_id, true).await;
+  JoinReservation { room }
+}
+
+async fn get_or_create_room(voice_channel_id: Uuid, reserve: bool) -> Arc<Room> {
   let mut room_manager = ROOM_MANAGER.lock().await;
   if let Some(room) = room_manager.rooms.get(&voice_channel_id) {
+    if reserve {
+      room.pending_joins.fetch_add(1, Ordering::SeqCst);
+    }
     return room.clone();
   }
 
@@ -156,8 +161,34 @@ async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
     .unwrap_or_default();
 
   let room: Arc<Room> = Room::new(voice_channel_id, server_id).into();
+  if reserve {
+    room.pending_joins.fetch_add(1, Ordering::SeqCst);
+  }
   room_manager.rooms.insert(voice_channel_id, room.clone());
   room
+}
+
+struct JoinReservation {
+  room: Arc<Room>,
+}
+
+impl Drop for JoinReservation {
+  fn drop(&mut self) {
+    self.room.pending_joins.fetch_sub(1, Ordering::SeqCst);
+  }
+}
+
+async fn evict_room_if_empty(voice_channel_id: Uuid) {
+  let mut room_manager = ROOM_MANAGER.lock().await;
+  let Some(room) = room_manager.rooms.get(&voice_channel_id) else {
+    return;
+  };
+  if room.pending_joins.load(Ordering::SeqCst) > 0 {
+    return;
+  }
+  if room.peers.read().await.is_empty() {
+    room_manager.rooms.remove(&voice_channel_id);
+  }
 }
 
 static WEBRTC_API: OnceCell<API> = OnceCell::const_new();
@@ -187,8 +218,6 @@ impl StreamService for StreamServer {
     let mut inner_stream = request.into_inner();
 
     let (tx, rx) = mpsc::channel::<Result<ServerVoiceMessage, tonic::Status>>(128);
-
-    // identifies this voice-stream connection in the server-wide presence registry
     let voice_conn_id = Uuid::new_v4();
 
     tokio::spawn(async move {
@@ -197,15 +226,10 @@ impl StreamService for StreamServer {
 
         let api = WEBRTC_API
           .get_or_init(async || {
-            // Create a_client MediaEngine object to configure the supported codec
             let mut media_engine = MediaEngine::default();
 
             media_engine.register_default_codecs().unwrap();
 
-            // Create a_client InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
-            // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
-            // this is enabled by default. If you are manually managing You MUST create a_client InterceptorRegistry
-            // for each PeerConnection.
             let mut registry = Registry::new();
 
             registry = register_default_interceptors(registry, &mut media_engine).unwrap();
@@ -239,7 +263,7 @@ impl StreamService for StreamServer {
             speaking,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let mut peers = room.peers.write().await;
@@ -259,31 +283,35 @@ impl StreamService for StreamServer {
             description: offer,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let reservation = reserve_room_for_join(voice_channel_id).await;
+            let room = reservation.room.clone();
 
-            if !room.peers.read().await.contains_key(&request_user_id) {
-              match handle_offer(
-                offer,
-                room.clone(),
-                request_user_id,
-                tx.clone(),
-                api,
-                voice_channel_id,
-                User {
-                  id: request_user_id,
-                  name: user.username.clone(),
-                },
-              )
-              .await
-              {
-                Ok(()) => {
-                  println!("Success handling session description offer from client");
-                }
-                // todo; tear down clients if err
-                Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
+            if room.peers.read().await.contains_key(&request_user_id) {
+              let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
+                .await
+                .map_err(|err| eprintln!("evicting stale participant on rejoin: {err}"));
+            }
+
+            match handle_offer(
+              offer,
+              room.clone(),
+              request_user_id,
+              tx.clone(),
+              api,
+              voice_channel_id,
+              User {
+                id: request_user_id,
+                name: user.username.clone(),
+              },
+              voice_conn_id,
+            )
+            .await
+            {
+              Ok(()) => {
+                println!("Success handling session description offer from client");
               }
-            } else {
-              eprintln!("User offer rejected; already in room.");
+              // todo; tear down clients if err
+              Err(_) => eprintln!("Error when handling initial RTCSessionDescription offer..."),
             }
           }
           Ok(ClientVoice::Answer {
@@ -292,22 +320,24 @@ impl StreamService for StreamServer {
           }) => {
             println!("received answer from peer {request_user_id}");
 
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
           }
           Ok(ClientVoice::LeaveRoom { voice_channel_id }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
               .await
               .map_err(|err| println!("Error handling leave: {err}"));
+
+            evict_room_if_empty(voice_channel_id).await;
           }
           Ok(ClientVoice::SetMuted {
             muted,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let peers = room.peers.read().await;
@@ -326,7 +356,7 @@ impl StreamService for StreamServer {
             deafened,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let peers = room.peers.read().await;
@@ -342,9 +372,6 @@ impl StreamService for StreamServer {
             broadcast_server_presence(room.clone()).await;
           }
           Ok(ClientVoice::SubscribeServer { server_id }) => {
-            // register this connection's interest in the server, then dump a
-            // snapshot of every active call in it so the client loads current
-            // presence immediately.
             register_presence_subscriber(voice_conn_id, request_user_id, server_id, tx.clone());
 
             let rooms: Vec<Arc<Room>> = {
@@ -358,8 +385,6 @@ impl StreamService for StreamServer {
               }
               {
                 let peers = room.peers.read().await;
-                // skip empty rooms, and rooms we're in (we get the richer in-call
-                // snapshot there, which the membership snapshot would clobber).
                 if peers.is_empty() || peers.contains_key(&request_user_id) {
                   continue;
                 }
@@ -387,9 +412,11 @@ impl StreamService for StreamServer {
           .collect()
       };
       for (id, room) in rooms {
-        let _ = handle_leave(room.clone(), request_user_id, id)
+        let _ = handle_leave_if_owner(room.clone(), request_user_id, voice_conn_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
+
+        evict_room_if_empty(id).await;
       }
     });
 
@@ -491,8 +518,6 @@ impl StreamService for StreamServer {
               .await;
           }
           Ok(ClientText::Typing { text_channel_id }) => {
-            // fan out to everyone else; the sender is excluded so they don't see
-            // themselves typing. Transient — not persisted, no DB work.
             let targets = manager.lock().unwrap().targets_without_self(&socket_id);
             let server_msg = ServerText::Typing {
               from: User {

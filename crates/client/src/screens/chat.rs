@@ -1,4 +1,5 @@
 use crate::colors::{AccentsExt, NeutralsExt};
+use crate::model::{LinkState::*, MediaHealth};
 use crate::screens::chat::View::NoneSelected;
 use crate::types::async_data::AsyncData;
 use crate::widgets::context_menu::ContextMenu;
@@ -18,16 +19,13 @@ use iced::widget::{
   button, column, operation, rule, scrollable, slider, space, stack, text, text_editor,
 };
 use iced::widget::{container, row};
-use iced::{Border, Color, Font, Length, Padding, Pixels, Task, Theme, border, padding};
+use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-/// How often, at most, we announce our own typing to the server while editing.
 const TYPING_SEND_THROTTLE: Duration = Duration::from_millis(2500);
-/// How long a received typing indicator lingers before it's expired locally.
-/// Must exceed `TYPING_SEND_THROTTLE` so a steadily-typing peer never flickers.
 const TYPING_TIMEOUT: Duration = Duration::from_secs(5);
 use uuid::Uuid;
 
@@ -38,15 +36,9 @@ pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
   posts: HashMap<Uuid, Posts>,
-  // multi-line editor buffer (Shift+Enter inserts a newline; Enter submits).
   input: text_editor::Content,
-  // peers currently typing, keyed channel -> (user id -> entry). The IndexMap
-  // keeps a stable "who started first" order for the indicator. Entries expire
-  // via delayed ExpireTyping tasks; `seq` lets a stale expiry skip a peer who
-  // has typed again since it was scheduled.
   typing: HashMap<Uuid, IndexMap<Uuid, TypingPeer>>,
   typing_seq: u64,
-  // when we last announced our own typing, so editing doesn't spam the server.
   last_typing_sent: Option<Instant>,
 }
 
@@ -101,20 +93,12 @@ impl RenderedPost {
       | RenderedPost::Sent(Post { created_at, .. }) => created_at,
     }
   }
-
-  fn author_name(&self) -> &str {
-    match self {
-      RenderedPost::Sending { name, .. } | RenderedPost::Errored { name, .. } => name,
-      RenderedPost::Sent(Post { author_name, .. }) => author_name,
-    }
-  }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
   EditorAction(text_editor::Action),
   UserSubmittedChatInput,
-  // a received typing indicator timed out; clear it if not refreshed since.
   ExpireTyping {
     text_channel_id: Uuid,
     user_id: Uuid,
@@ -135,24 +119,15 @@ pub enum Message {
     voice_channel_id: Uuid,
   },
   LeaveVoice,
-  // Intercepted in the top-level update to (re)subscribe voice-call presence for
-  // the active server. Not handled inside chat::update.
   ActiveServerChanged {
     server_id: Uuid,
   },
-  // Mute/deafen toggles, also intercepted by the top-level update (they need the
-  // voice handle). Not handled inside chat::update.
   ToggleMute,
   ToggleDeafen,
-  // Per-user mixer, set from a participant's right-click menu. Both are
-  // intercepted by the top-level update (they touch persisted prefs + the voice
-  // handle). `volume` is a linear 0.0..=2.0 multiplier. Not handled in chat::update.
   SetUserVolume {
     user_id: Uuid,
     volume: f32,
   },
-  // Slider released: persist the level once, instead of writing the file on
-  // every drag step (mirrors the noise-gate slider in the settings screen).
   UserVolumeReleased {
     user_id: Uuid,
   },
@@ -781,14 +756,6 @@ fn view_channels<'a>(
       .align_y(Center)
       .clip(true);
 
-      // The header is the join affordance — a button only while we're NOT in this
-      // call. Once joined it becomes a plain row, so clicking it can't trigger a
-      // redundant rejoin, and only the header (not the whole call card with its
-      // participant list) reacts to hover.
-      // Always a button so the header keeps identical padding/layout whether or
-      // not we're in the call. When joined we just omit `on_press`, which makes
-      // the button inert — it can't trigger a redundant rejoin and shows no hover
-      // highlight (its status stays Disabled).
       let header_button = button(header_row)
         .style(|theme: &Theme, status| -> button::Style {
           let palette = theme.extended_palette();
@@ -808,6 +775,7 @@ fn view_channels<'a>(
             ..button::Style::default()
           }
         })
+        .padding(SPACE_GRID / 2)
         .width(Length::Fill);
 
       let header: Element<'a, Message> = if is_selected {
@@ -820,13 +788,6 @@ fn view_channels<'a>(
           .into()
       };
 
-      // NON-keyed column on purpose: rows are heterogeneous (our own row is a
-      // plain container, peers are stateful ContextMenus). A keyed column
-      // reconciles reordered children with a non-tag-checking diff, which can
-      // pair a ContextMenu element with a leftover stateless tree when the
-      // roster changes — and then panics ("Downcast on stateless state") on the
-      // overlay pass. A plain Column tag-checks each child and rebuilds state on
-      // a type mismatch, so it stays correct as people join/leave.
       let participants = iced::widget::Column::with_children({
         main_model
           .room_presence
@@ -969,19 +930,19 @@ fn view_channels<'a>(
             element
           })
       })
-      .spacing((SPACE_GRID as u32) / 2)
-      .padding([
-        if main_model
-          .room_presence
-          .get(&voice_channel.id)
-          .is_some_and(|presence| !presence.is_empty())
-        {
-          SPACE_GRID / 2
-        } else {
-          0
-        },
-        0,
-      ]);
+      .spacing((SPACE_GRID as u32) / 2);
+      //      .padding([
+      //        if main_model
+      //          .room_presence
+      //          .get(&voice_channel.id)
+      //          .is_some_and(|presence| !presence.is_empty())
+      //        {
+      //          SPACE_GRID / 2
+      //        } else {
+      //          0
+      //        },
+      //        0,
+      //      ]);
 
       column![header, participants].width(Length::Fill).into()
     })
@@ -1080,7 +1041,7 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
   };
 
   // mute/deafen persist across calls, so they live in the always-present user
-  // controller (Discord-style) rather than only inside the active-call panel.
+  // controller rather than only inside the active-call panel.
   let (muted, deafened) = model
     .voice
     .as_ref()
@@ -1135,7 +1096,7 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
       column![
         text(username)
           .font(Font {
-            weight: Weight::Semibold,
+            weight: Weight::Bold,
             ..SOURCE_SANS_REGULAR
           })
           .style(|theme: &Theme| text::Style {
@@ -1220,8 +1181,6 @@ fn view_text_chat_window<'a>(
     .placeholder(format!("Message #{name}"))
     .id(make_text_input_id(text_channel_id))
     .on_action(Message::EditorAction)
-    // Enter submits; Shift+Enter inserts a newline (the editor's default Enter).
-    // Custom skips the buffer edit, so the submit newline never lands in `input`.
     .key_binding(|key_press| {
       use iced::keyboard::Key;
       use iced::keyboard::key::Named;
@@ -1233,8 +1192,6 @@ fn view_text_chat_window<'a>(
         text_editor::Binding::from_key_press(key_press)
       }
     })
-    // grows with content (Shrink height) up to a cap, then scrolls internally —
-    // so a long multi-line draft can't push the message list off-screen.
     .max_height((SPACE_GRID * 24) as f32)
     .padding(SPACE_GRID * 2)
     .style(|theme, status| {
@@ -1251,11 +1208,6 @@ fn view_text_chat_window<'a>(
   container(column![
     // top - channel name
     view_text_chat_title(name),
-    // The message list fills the space above the input. The Discord-style typing
-    // line is floated transparently over the *bottom* of this list (just above
-    // the input) rather than taking its own row — so it reserves no gap and the
-    // messages scroll behind it. It's non-interactive, so scrolling the list
-    // beneath is unaffected.
     stack![
       row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
       container(view_typing_indicator(&typing_names))
@@ -1268,8 +1220,6 @@ fn view_text_chat_window<'a>(
           left: (SPACE_GRID * 2).into(),
         }),
     ],
-    // bottom - the message input. Fill width so the editor is bounded and wraps
-    // long lines (a Shrink container would give it unbounded width = no wrap).
     container(editor).width(Length::Fill).padding(Padding {
       top: 0.0,
       right: (SPACE_GRID * 2).into(),
@@ -1281,8 +1231,6 @@ fn view_text_chat_window<'a>(
   .into()
 }
 
-/// The "X is typing…" line above the input. Returns a fixed-height element even
-/// when nobody's typing, so the input doesn't jump as it appears/disappears.
 fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
   let line = match names {
     [] => None,
@@ -1293,9 +1241,6 @@ fn view_typing_indicator<'a>(names: &[&str]) -> Element<'a, Message> {
   };
 
   match line {
-    // Active: an opaque "pill" behind the text so it reads cleanly instead of
-    // clipping with the messages scrolling behind it. Background matches the
-    // chat area (root `base`), so it occludes without looking like a foreign box.
     Some(line) => container(text(line).size(12).style(|theme: &Theme| text::Style {
       color: Some(theme.extended_palette().background.weak.text),
     }))
@@ -1376,21 +1321,6 @@ fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>)
   )
 }
 
-// The author-name column is sized to the widest name present in the channel so
-// message content always starts at the same horizontal offset, just past the
-// longest name. Names are truncated to `NAME_MAX_CHARS` first, so one very long
-// name can't push the whole column across the screen.
-const NAME_MAX_CHARS: usize = 22;
-
-fn truncate_name(name: &str) -> String {
-  if name.chars().count() <= NAME_MAX_CHARS {
-    name.to_string()
-  } else {
-    let truncated: String = name.chars().take(NAME_MAX_CHARS - 1).collect();
-    format!("{truncated}…")
-  }
-}
-
 fn view_posts<'a>(
   posts: &'a IndexMap<Uuid, RenderedPost>,
   loading_more: bool,
@@ -1403,15 +1333,13 @@ fn view_posts<'a>(
     ));
   };
 
-  // Widest (truncated) name in the channel — drives the name-column width below.
-  let longest_name = posts
-    .values()
-    .map(|post| truncate_name(post.author_name()))
-    .max_by_key(|name| name.chars().count())
-    .unwrap_or_default();
+  const MESSAGE_GROUP_GAP: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+  const MESSAGE_GROUP_MAX: usize = 10;
 
   let mut previous_date: Option<chrono::NaiveDate> = None;
   let mut previous_author: Option<&str> = None;
+  let mut previous_created: Option<chrono::DateTime<Utc>> = None;
+  let mut run_length: usize = 0;
   for post in posts.iter() {
     let (id, content, created_at, name) = match post.1 {
       RenderedPost::Sending {
@@ -1443,20 +1371,60 @@ fn view_posts<'a>(
       previous_date = Some(date);
     }
 
-    // Hide the name when this message continues a run from the same author (but
-    // always show it after a day divider). The sizer below keeps content aligned.
-    let display_name = if !is_new_day && previous_author == Some(name.as_str()) {
-      String::new()
+    let gap_exceeded = previous_created
+      .map(|prev| *created_at - prev >= MESSAGE_GROUP_GAP)
+      .unwrap_or(true);
+    let show_name = is_new_day
+      || previous_author != Some(name.as_str())
+      || gap_exceeded
+      || run_length >= MESSAGE_GROUP_MAX;
+
+    run_length = if show_name { 1 } else { run_length + 1 };
+    let display_name = if show_name {
+      name.clone()
     } else {
-      truncate_name(name)
+      String::new()
     };
     previous_author = Some(name);
+    previous_created = Some(*created_at);
 
-    let display_time = local.format("%H:%M").to_string();
+    let display_time = local.format("%I:%M %p").to_string();
     let text_color = match post.1 {
       RenderedPost::Sending { .. } => text::secondary,
       RenderedPost::Errored { .. } => text::danger,
       RenderedPost::Sent(_) => text::default,
+    };
+
+    let content_text = iced_selection::text(content)
+      .style(move |theme| iced_selection::text::Style {
+        color: text_color(theme).color,
+        selection: theme.extended_palette().secondary.strong.text,
+      })
+      .wrapping(text::Wrapping::WordOrGlyph);
+
+    let body: Element<'a, Message> = if display_name.is_empty() {
+      content_text.into()
+    } else {
+      row![
+        iced_selection::text(display_name)
+          .style(|theme| iced_selection::text::Style {
+            color: text::base(theme).color,
+            selection: theme.extended_palette().secondary.strong.text
+          })
+          .font(Font {
+            weight: Weight::Semibold,
+            ..SOURCE_SANS_REGULAR
+          }),
+        content_text
+      ]
+      .spacing(Pixels(SPACE_GRID.into()))
+      .into()
+    };
+
+    let top_pad = if show_name && !is_new_day {
+      SPACE_GRID as f32
+    } else {
+      0.0
     };
 
     children.push((
@@ -1466,34 +1434,10 @@ fn view_posts<'a>(
           color: text::secondary(theme).color,
           selection: theme.extended_palette().secondary.strong.text
         }), //.align_x(Alignment::Start),
-        stack![
-          // invisible sizer reserving the width of the widest name in the channel,
-          // plus a little left padding so right-aligned names don't clip
-          container(
-            text(longest_name.clone())
-              .wrapping(text::Wrapping::None)
-              .style(|_theme| text::Style {
-                color: Some(Color::TRANSPARENT)
-              })
-          )
-          .padding(padding::left(SPACE_GRID as f32 * 2.0)),
-          iced_selection::text(display_name)
-            .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .wrapping(text::Wrapping::None)
-            .style(|theme| iced_selection::text::Style {
-              color: text::base(theme).color,
-              selection: theme.extended_palette().secondary.strong.text
-            }),
-        ],
-        iced_selection::text(content)
-          .style(move |theme| iced_selection::text::Style {
-            color: text_color(theme).color,
-            selection: theme.extended_palette().secondary.strong.text
-          })
-          .wrapping(text::Wrapping::WordOrGlyph)
+        body
       ]
       .spacing(Pixels(SPACE_GRID.into()))
+      .padding(padding::top(top_pad))
       .into(),
     ));
   }
@@ -1548,10 +1492,6 @@ impl Tone {
   }
 }
 
-/// folds link + media into one displayed status. Media only refines `Live`.
-/// `input_ok`/`output_ok` flag a dead mic/speaker: the user joined, but that
-/// direction is silent until they fix it. A dead device wins over the normal
-/// "Voice Connected" line because it's the most actionable thing on screen.
 fn describe_voice(
   link: &crate::model::LinkState,
   media: crate::model::MediaHealth,
@@ -1559,12 +1499,6 @@ fn describe_voice(
   output_ok: bool,
   mic_receiving: bool,
 ) -> (String, Tone, Option<String>) {
-  use crate::model::{LinkState::*, MediaHealth};
-
-  // a dead device is only meaningful once we're actually in the call. The mic
-  // counts as down either when its device failed to open (`!input_ok`) or when
-  // it opened but no frames are arriving (`!mic_receiving`) — unplugged, muted
-  // at the OS, or broken. Same warning for both: the user knows the context.
   let connected = matches!(link, Live | Unstable);
   let mic_down = !input_ok || !mic_receiving;
   let speaker_down = !output_ok;
@@ -1578,7 +1512,7 @@ fn describe_voice(
   let (status, tone, media_hint): (String, Tone, Option<String>) = match link {
     Idle => ("Idle...".into(), Tone::Idle, None),
     Connecting => ("Connecting...".into(), Tone::Pending, None),
-    Reconnecting { attempt } => (format!("Reconnecting... - {attempt}"), Tone::Warn, None),
+    Reconnecting { attempt: _ } => ("Reconnecting...".into(), Tone::Warn, None),
     Lost { reason } => (format!("Voice Lost: {reason}"), Tone::Bad, None),
     Unstable => ("Voice Connected - Unstable".into(), Tone::Warn, None),
     Live => match media {
@@ -1604,8 +1538,6 @@ fn latency_tone(ms: u32) -> Tone {
   }
 }
 
-// renders a "voice connected" footer pinned to the bottom of the sidebar.
-// returns None when there's no active call, so the caller can skip pushing it.
 fn view_call_controller<'a>(
   active_voice_channel_id: Option<&'a Uuid>,
   channels: &'a [Channel],
@@ -1619,21 +1551,31 @@ fn view_call_controller<'a>(
     .map(|channel| channel.name.as_str())
     .unwrap_or("Voice");
 
-  let voice = main_model.voice.as_ref()?;
-  let (status_text, tone, media_hint) = describe_voice(
-    &voice.link_state,
-    voice.media,
-    voice.input_ok,
-    voice.output_ok,
-    voice.mic_receiving,
-  );
+  let reconnecting = main_model
+    .pending_rejoin
+    .as_ref()
+    .is_some_and(|r| &r.voice_channel_id == voice_channel_id);
+
+  let (status_text, tone, media_hint, connected, latency_ms) = match main_model.voice.as_ref() {
+    Some(voice) => {
+      let (status_text, tone, media_hint) = describe_voice(
+        &voice.link_state,
+        voice.media,
+        voice.input_ok,
+        voice.output_ok,
+        voice.mic_receiving,
+      );
+      let connected = matches!(
+        voice.link_state,
+        crate::model::LinkState::Live | crate::model::LinkState::Unstable
+      );
+      (status_text, tone, media_hint, connected, voice.latency_ms)
+    }
+    None if reconnecting => ("Reconnecting…".to_string(), Tone::Warn, None, false, 0),
+    None => return None,
+  };
 
   // secondary line: channel name, then latency + media hint only while connected
-  let connected = matches!(
-    voice.link_state,
-    crate::model::LinkState::Live | crate::model::LinkState::Unstable
-  );
-
   let mut meta = row![
     text(channel_name)
       .size(12)
@@ -1643,11 +1585,11 @@ fn view_call_controller<'a>(
   .spacing(6)
   .align_y(Center);
 
-  if connected && voice.latency_ms > 0 {
-    let lt = latency_tone(voice.latency_ms);
+  if connected && latency_ms > 0 {
+    let lt = latency_tone(latency_ms);
     meta = meta.push(text("·").size(12).style(text::secondary));
     meta = meta.push(
-      text(format!("{} ms", voice.latency_ms))
+      text(format!("{latency_ms} ms"))
         .size(12)
         .style(move |t: &Theme| text::Style {
           color: Some(lt.color(t)),
@@ -1790,10 +1732,6 @@ fn voice_toggle_button<'a>(
     .into()
 }
 
-/// The right-click mixer popup for one remote participant: a name header, a
-/// 0–200% volume slider, and a mute toggle. The displayed values come from the
-/// caller's persisted pref; each interaction emits a message the top-level
-/// update persists and forwards to the voice actor.
 fn user_mixer_overlay<'a>(
   user_id: Uuid,
   name: String,

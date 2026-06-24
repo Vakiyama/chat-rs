@@ -5,7 +5,10 @@ use chat_shared::{
 use futures_util::future::join_all;
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex, atomic::AtomicBool},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize},
+  },
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -25,15 +28,6 @@ use webrtc::{
 
 pub type PeerId = Uuid;
 
-// per-peer signaling state: an offer is in flight, and/or another reneg is queued.
-// all fields live under one mutex so "queue a follow-up reneg" and "finish + drain
-// the queue" are atomic against each other — two independent atomics race into a lost
-// wakeup where a reneg is queued but its drain check has already passed.
-//
-// `gen` increments every time a fresh offer goes in flight. The renegotiation timeout
-// task captures the gen of the offer it guards and only acts if that exact negotiation
-// is still in flight — otherwise a timeout from an already-answered round would fire
-// 3s later and clobber a newer, unrelated round (offer glare).
 #[derive(Default)]
 struct NegState {
   in_flight: bool,
@@ -51,16 +45,15 @@ pub struct Participant {
   pub speaking: AtomicBool,
   pub muted: AtomicBool,
   pub deafened: AtomicBool,
+  pub conn_id: Uuid,
 }
 
 #[derive(Default)]
 pub struct Room {
   pub peers: RwLock<HashMap<PeerId, Arc<Participant>>>,
-  // identity of the room, copied onto every presence snapshot so server-wide
-  // subscribers can bucket presence per channel/server. Defaults to nil (tests
-  // construct rooms via Room::default()); production rooms are built with Room::new.
   pub voice_channel_id: Uuid,
   pub server_id: Uuid,
+  pub pending_joins: AtomicUsize,
 }
 
 impl Room {
@@ -69,23 +62,17 @@ impl Room {
       peers: Default::default(),
       voice_channel_id,
       server_id,
+      pending_joins: AtomicUsize::new(0),
     }
   }
 }
 
-// A voice-stream connection watching one server's call presence. `user_id` lets a
-// server-wide broadcast skip a subscriber who is themselves a participant in the
-// room that changed — that participant already gets the richer in-call snapshot
-// (which carries speaking state), so the membership-only snapshot must not clobber it.
 struct PresenceSubscriber {
   user_id: Uuid,
   server_id: Uuid,
   tx: tokio::sync::mpsc::Sender<Result<ServerVoiceMessage, tonic::Status>>,
 }
 
-// conn_id -> subscriber. Keyed per connection (not per user) so a user with two
-// clients open each get their own snapshots, and so cleanup is unambiguous on
-// stream teardown.
 static PRESENCE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<Uuid, PresenceSubscriber>>> =
   std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -109,6 +96,7 @@ pub fn unregister_presence_subscriber(conn_id: &Uuid) {
   PRESENCE_REGISTRY.lock().unwrap().remove(conn_id);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_offer(
   offer: RTCSessionDescription,
   room: Arc<Room>,
@@ -117,6 +105,7 @@ pub async fn handle_offer(
   api: &API,
   voice_channel_id: Uuid,
   user: User,
+  conn_id: Uuid,
 ) -> anyhow::Result<()> {
   let config = RTCConfiguration {
     ice_servers: vec![RTCIceServer {
@@ -153,6 +142,7 @@ pub async fn handle_offer(
     speaking: false.into(),
     muted: false.into(),
     deafened: false.into(),
+    conn_id,
   });
 
   let track_room = room.clone();
@@ -162,19 +152,10 @@ pub async fn handle_offer(
     let room = track_room.clone();
     let me_weak = me_weak.clone();
     Box::pin(async move {
-      // grab our own participant directly via a weak ref, not the room map: on_track
-      // can fire before we're inserted into the room (it only fires once, so a miss is
-      // unrecoverable), and the weak ref breaks the pc -> on_track -> participant -> pc
-      // cycle so leave()'s pc.close() can actually drop the connection.
       let Some(me_p) = me_weak.upgrade() else {
         return;
       };
 
-      // Unique track id per join. Clients dedup inbound tracks by track id; a peer that
-      // leaves and rejoins keeps the same PeerId, so a peer-stable id ("audio-{me}")
-      // collides with the id a staying client already has cached from the previous
-      // session, and the rejoiner's audio is silently dropped until that client also
-      // rejoins. A fresh id every time keeps the rejoiner distinct.
       let relay = Arc::new(TrackLocalStaticRTP::new(
         track.codec().capability,
         format!("audio-{me}-{}", Uuid::new_v4()),
@@ -316,11 +297,6 @@ pub async fn handle_offer(
   Ok(())
 }
 
-// claim the right to send an offer. if one is already in flight, queue exactly one
-// follow-up and return None — the next offer reflects all accumulated track changes,
-// so any number of queued requests collapse into a single round. On a successful
-// claim, returns Some(gen) identifying this negotiation so its timeout can tell
-// whether it is still the round in flight.
 fn try_begin_negotiation(peer: &Participant) -> Option<u64> {
   let mut s = peer.neg.lock().unwrap();
   if s.in_flight {
@@ -332,14 +308,6 @@ fn try_begin_negotiation(peer: &Participant) -> Option<u64> {
   Some(s.generation)
 }
 
-// an offer/answer round finished: release the in-flight claim and report whether a
-// follow-up reneg was queued while it was in flight.
-//
-// This only releases — it must NOT re-claim. The caller drains queued work by calling
-// renegotiate() (which re-claims cleanly and spawns its own timeout). If this re-claimed
-// itself, renegotiate() would then see in_flight already set, queue `pending`, and send
-// nothing — wedging the peer with a queued change that never goes out, which silently
-// kills audio in both directions after a join/leave burst.
 fn finish_negotiation(peer: &Participant) -> bool {
   let mut s = peer.neg.lock().unwrap();
   s.in_flight = false;
@@ -351,12 +319,6 @@ async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::
     return Ok(());
   };
 
-  // Spawn a watchdog that resends the offer if the client never answers, otherwise a
-  // peer that drops a renegotiation offer would permanently block all subsequent track
-  // changes from reaching it. The watchdog owns the in-flight claim until the answer
-  // arrives (handle_answer clears in_flight) or we exhaust our retries. It only acts on
-  // the generation it started with, so once a newer negotiation supersedes this one the
-  // watchdog exits instead of clobbering it with a stale duplicate offer (glare).
   let timeout = tokio::time::Duration::from_secs(3);
   const MAX_RESENDS: u32 = 3;
   let watchdog_peer = peer.clone();
@@ -367,12 +329,9 @@ async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::
       tokio::time::sleep(timeout).await;
       {
         let mut s = watchdog_peer.neg.lock().unwrap();
-        // answered (in_flight cleared) or superseded by a newer round → stop.
         if !s.in_flight || s.generation != generation {
           return;
         }
-        // still unanswered: resend under a fresh generation so a late answer to the
-        // previous offer can't be mistaken for an answer to this resend.
         s.generation = s.generation.wrapping_add(1);
         s.pending = false;
         generation = s.generation;
@@ -383,8 +342,6 @@ async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::
         return;
       }
     }
-    // gave up: release the claim so a future track change can start a fresh round
-    // instead of the peer wedging with in_flight stuck true forever.
     let mut s = watchdog_peer.neg.lock().unwrap();
     if s.in_flight && s.generation == generation {
       s.in_flight = false;
@@ -392,7 +349,6 @@ async fn renegotiate(peer: Arc<Participant>, voice_channel_id: Uuid) -> anyhow::
   });
 
   if let Err(e) = send_offer(&peer, voice_channel_id).await {
-    // release the claim so a later trigger can retry instead of wedging forever.
     finish_negotiation(&peer);
     return Err(e);
   }
@@ -416,7 +372,7 @@ async fn send_offer(peer: &Participant, voice_channel_id: Uuid) -> anyhow::Resul
       }
       .into_proto(),
     ))
-    .await?; // push to that peer's stream
+    .await?;
   Ok(())
 }
 
@@ -425,12 +381,34 @@ pub async fn handle_leave(
   me: PeerId,
   voice_channel_id: Uuid,
 ) -> anyhow::Result<()> {
-  // idempotent: second call finds nothing and returns
   let Some(leaving) = room.peers.write().await.remove(&me) else {
     return Ok(());
   };
+  teardown_peer(room, me, leaving, voice_channel_id).await
+}
 
-  // snapshot the fan-out before closing anything
+pub async fn handle_leave_if_owner(
+  room: Arc<Room>,
+  me: PeerId,
+  conn_id: Uuid,
+  voice_channel_id: Uuid,
+) -> anyhow::Result<()> {
+  let leaving = {
+    let mut peers = room.peers.write().await;
+    match peers.get(&me) {
+      Some(p) if p.conn_id == conn_id => peers.remove(&me).expect("peer present under lock"),
+      _ => return Ok(()),
+    }
+  };
+  teardown_peer(room, me, leaving, voice_channel_id).await
+}
+
+async fn teardown_peer(
+  room: Arc<Room>,
+  me: PeerId,
+  leaving: Arc<Participant>,
+  voice_channel_id: Uuid,
+) -> anyhow::Result<()> {
   let outbound: Vec<(PeerId, Arc<RTCRtpSender>)> = {
     let map = leaving.outbound_senders.read().await;
     map.iter().map(|(id, s)| (*id, s.clone())).collect()
@@ -451,8 +429,6 @@ pub async fn handle_leave(
     }
   }
 
-  // reverse bookkeeping: senders ON my pc died with pc.close(),
-  // so purge my key from every remaining publisher's map
   for (_, p) in room.peers.read().await.iter() {
     p.outbound_senders.write().await.remove(&me);
   }
@@ -463,8 +439,6 @@ pub async fn handle_leave(
   Ok(())
 }
 
-// In-call presence: the rich snapshot (includes live speaking state) sent to the
-// peers actually in the call. Triggered on join/leave/speaking changes.
 pub async fn broadcast_presence(room: Arc<Room>) {
   let msg = ServerVoice::PresenceSnapshot {
     voice_channel_id: room.voice_channel_id,
@@ -509,9 +483,6 @@ pub async fn broadcast_presence(room: Arc<Room>) {
   let _ = result.map_err(|e| eprintln!("Error sending presence snapshot: {e}"));
 }
 
-// Membership-only snapshot (speaking forced false) of a room — what users who are
-// NOT in the call see. Empty `peers` is how a server-wide subscriber learns a call
-// emptied out and should be cleared.
 pub async fn membership_snapshot(room: &Room) -> ServerVoiceMessage {
   ServerVoice::PresenceSnapshot {
     voice_channel_id: room.voice_channel_id,
@@ -532,12 +503,8 @@ pub async fn membership_snapshot(room: &Room) -> ServerVoiceMessage {
   .into_proto()
 }
 
-// Server-wide presence: push a room's membership snapshot to every connection
-// watching that room's server, except participants already in the room (they get
-// the richer in-call snapshot via broadcast_presence). Triggered on join/leave.
 pub async fn broadcast_server_presence(room: Arc<Room>) {
-  let in_room: std::collections::HashSet<Uuid> =
-    room.peers.read().await.keys().copied().collect();
+  let in_room: std::collections::HashSet<Uuid> = room.peers.read().await.keys().copied().collect();
 
   let txs: Vec<_> = {
     let registry = PRESENCE_REGISTRY.lock().unwrap();
@@ -638,9 +605,6 @@ mod tests {
     Ok(msg.try_into_domain()?)
   }
 
-  // Presence snapshots are broadcast on the same signal channel and can arrive at
-  // any point between negotiation messages, so the negotiation-focused helpers skip
-  // them rather than treating them as an unexpected frame.
   async fn expect_answer(rx: &mut SignalRx) -> anyhow::Result<RTCSessionDescription> {
     loop {
       match recv_signal(rx).await? {
@@ -686,6 +650,7 @@ mod tests {
         id: Uuid::new_v4(),
         name: "test".into(),
       },
+      Uuid::new_v4(),
     )
     .await?;
     let answer = expect_answer(rx).await?;
@@ -1117,6 +1082,70 @@ mod tests {
 
     tokio::time::timeout(Duration::from_secs(10), b2_hears_a).await??;
     tokio::time::timeout(Duration::from_secs(10), a_hears_rejoin).await??;
+    Ok(())
+  }
+
+  // Network-blip reconnect race: a user rejoins under the same PeerId on a fresh
+  // connection (new conn_id), then the OLD connection's dead stream is finally
+  // detected and its teardown fires. That teardown (handle_leave_if_owner with the
+  // OLD conn_id) must be a no-op — it must NOT evict the freshly-rejoined peer —
+  // while a teardown carrying the CURRENT conn_id still removes it normally.
+  #[tokio::test]
+  async fn stale_connection_teardown_does_not_evict_rejoined_peer() -> anyhow::Result<()> {
+    use crate::library::webrtc::{handle_leave_if_owner, handle_offer};
+
+    let room_id = Uuid::new_v4();
+    let room: Arc<Room> = Room::default().into();
+    let api = make_server_api()?;
+    let user_id = Uuid::new_v4();
+
+    let offer_for = async |conn_id: Uuid| -> anyhow::Result<()> {
+      let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+      let client = make_client_pc().await?;
+      start_fake_mic(make_fake_mic(&client).await?);
+      let offer = client.create_offer(None).await?;
+      let mut gather = client.gathering_complete_promise().await;
+      client.set_local_description(offer).await?;
+      let _ = gather.recv().await;
+      handle_offer(
+        client.local_description().await.unwrap(),
+        room.clone(),
+        user_id,
+        tx,
+        &api,
+        room_id,
+        User {
+          id: user_id,
+          name: "test".into(),
+        },
+        conn_id,
+      )
+      .await?;
+      let answer = expect_answer(&mut rx).await?;
+      client.set_remote_description(answer).await?;
+      Ok(())
+    };
+
+    // join on conn 1, then "rejoin" on conn 2 (the new Offer overwrites the peer).
+    let conn1 = Uuid::new_v4();
+    let conn2 = Uuid::new_v4();
+    offer_for(conn1).await?;
+    offer_for(conn2).await?;
+
+    // the dead conn-1 stream's teardown must NOT remove the conn-2 participant.
+    handle_leave_if_owner(room.clone(), user_id, conn1, room_id).await?;
+    {
+      let peers = room.peers.read().await;
+      let peer = peers.get(&user_id).expect("rejoined peer must survive");
+      assert_eq!(peer.conn_id, conn2, "surviving peer is the conn-2 rejoin");
+    }
+
+    // the owning connection's teardown still removes it.
+    handle_leave_if_owner(room.clone(), user_id, conn2, room_id).await?;
+    assert!(
+      room.peers.read().await.get(&user_id).is_none(),
+      "owning teardown removes the peer"
+    );
     Ok(())
   }
 
