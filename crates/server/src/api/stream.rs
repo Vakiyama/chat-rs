@@ -1,10 +1,7 @@
 use std::{
   collections::HashMap,
   pin::Pin,
-  sync::{
-    Arc, Mutex,
-    atomic::Ordering,
-  },
+  sync::{Arc, Mutex, atomic::Ordering},
 };
 
 use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
@@ -140,26 +137,12 @@ struct VoiceRoomManager {
 static ROOM_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<VoiceRoomManager>> =
   std::sync::LazyLock::new(|| tokio::sync::Mutex::new(VoiceRoomManager::default()));
 
-// Fetch the room for a voice channel, creating it (with its server_id resolved from
-// the DB) on first use. The lock is held across the DB lookup so two concurrent
-// joiners can't each create a separate Room for the same channel.
-async fn get_or_create_room(voice_channel_id: Uuid) -> Arc<Room> {
-  get_or_create_room_inner(voice_channel_id, false).await
-}
-
-// Like get_or_create_room, but registers an in-flight join (`pending_joins += 1`)
-// under the same manager-lock acquisition that hands back the room. Registering it
-// atomically with the get/create is what makes eviction safe: a concurrent
-// evict_room_if_empty can only observe the room as empty-and-unreserved if it takes
-// the manager lock before this reservation is recorded — in which case the room is
-// genuinely idle — never in the window where this joiner holds the Arc but hasn't
-// inserted its participant yet. The returned guard releases the reservation on drop.
 async fn reserve_room_for_join(voice_channel_id: Uuid) -> JoinReservation {
-  let room = get_or_create_room_inner(voice_channel_id, true).await;
+  let room = get_or_create_room(voice_channel_id, true).await;
   JoinReservation { room }
 }
 
-async fn get_or_create_room_inner(voice_channel_id: Uuid, reserve: bool) -> Arc<Room> {
+async fn get_or_create_room(voice_channel_id: Uuid, reserve: bool) -> Arc<Room> {
   let mut room_manager = ROOM_MANAGER.lock().await;
   if let Some(room) = room_manager.rooms.get(&voice_channel_id) {
     if reserve {
@@ -185,9 +168,6 @@ async fn get_or_create_room_inner(voice_channel_id: Uuid, reserve: bool) -> Arc<
   room
 }
 
-// RAII marker for a join negotiating against a room. Holds the room alive in the
-// manager (via pending_joins) for the whole handshake; the reservation is released
-// when the guard drops, regardless of whether the join succeeded.
 struct JoinReservation {
   room: Arc<Room>,
 }
@@ -198,11 +178,6 @@ impl Drop for JoinReservation {
   }
 }
 
-// Drop a room from the manager once it has no participants and no joins in flight,
-// so empty rooms don't accumulate for the life of the process. Call after any leave.
-// The manager lock is held across the emptiness check (and the pending_joins read)
-// so it serializes against reserve_room_for_join / get_or_create_room — a room with
-// a join in flight, or one a concurrent joiner is about to be handed, is left intact.
 async fn evict_room_if_empty(voice_channel_id: Uuid) {
   let mut room_manager = ROOM_MANAGER.lock().await;
   let Some(room) = room_manager.rooms.get(&voice_channel_id) else {
@@ -243,8 +218,6 @@ impl StreamService for StreamServer {
     let mut inner_stream = request.into_inner();
 
     let (tx, rx) = mpsc::channel::<Result<ServerVoiceMessage, tonic::Status>>(128);
-
-    // identifies this voice-stream connection in the server-wide presence registry
     let voice_conn_id = Uuid::new_v4();
 
     tokio::spawn(async move {
@@ -253,15 +226,10 @@ impl StreamService for StreamServer {
 
         let api = WEBRTC_API
           .get_or_init(async || {
-            // Create a_client MediaEngine object to configure the supported codec
             let mut media_engine = MediaEngine::default();
 
             media_engine.register_default_codecs().unwrap();
 
-            // Create a_client InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
-            // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
-            // this is enabled by default. If you are manually managing You MUST create a_client InterceptorRegistry
-            // for each PeerConnection.
             let mut registry = Registry::new();
 
             registry = register_default_interceptors(registry, &mut media_engine).unwrap();
@@ -295,7 +263,7 @@ impl StreamService for StreamServer {
             speaking,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let mut peers = room.peers.write().await;
@@ -315,17 +283,9 @@ impl StreamService for StreamServer {
             description: offer,
             voice_channel_id,
           }) => {
-            // Held for the whole handshake so eviction can't drop the room while we
-            // negotiate; released when `reservation` drops at the end of this arm.
             let reservation = reserve_room_for_join(voice_channel_id).await;
             let room = reservation.room.clone();
 
-            // A new offer from a user already present is a reconnect: their old
-            // signaling stream dropped (possibly not yet detected by keepalive) and
-            // they're rejoining on a fresh connection. Evict the stale participant
-            // first so the rejoin isn't rejected and they don't linger as a ghost.
-            // handle_leave is idempotent and renegotiates remaining peers to drop
-            // the stale relay track.
             if room.peers.read().await.contains_key(&request_user_id) {
               let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
                 .await
@@ -360,12 +320,12 @@ impl StreamService for StreamServer {
           }) => {
             println!("received answer from peer {request_user_id}");
 
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             let _ = handle_answer(room.clone(), request_user_id, answer, voice_channel_id).await;
           }
           Ok(ClientVoice::LeaveRoom { voice_channel_id }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             let _ = handle_leave(room.clone(), request_user_id, voice_channel_id)
               .await
@@ -377,7 +337,7 @@ impl StreamService for StreamServer {
             muted,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let peers = room.peers.read().await;
@@ -396,7 +356,7 @@ impl StreamService for StreamServer {
             deafened,
             voice_channel_id,
           }) => {
-            let room = get_or_create_room(voice_channel_id).await;
+            let room = get_or_create_room(voice_channel_id, false).await;
 
             {
               let peers = room.peers.read().await;
@@ -412,9 +372,6 @@ impl StreamService for StreamServer {
             broadcast_server_presence(room.clone()).await;
           }
           Ok(ClientVoice::SubscribeServer { server_id }) => {
-            // register this connection's interest in the server, then dump a
-            // snapshot of every active call in it so the client loads current
-            // presence immediately.
             register_presence_subscriber(voice_conn_id, request_user_id, server_id, tx.clone());
 
             let rooms: Vec<Arc<Room>> = {
@@ -428,8 +385,6 @@ impl StreamService for StreamServer {
               }
               {
                 let peers = room.peers.read().await;
-                // skip empty rooms, and rooms we're in (we get the richer in-call
-                // snapshot there, which the membership snapshot would clobber).
                 if peers.is_empty() || peers.contains_key(&request_user_id) {
                   continue;
                 }
@@ -457,10 +412,6 @@ impl StreamService for StreamServer {
           .collect()
       };
       for (id, room) in rooms {
-        // Only evict if this connection still owns the user's participant. If the
-        // user already rejoined on a newer connection (network-blip reconnect), the
-        // participant now belongs to that connection and this stale teardown must
-        // leave it intact — otherwise we'd drop a peer that's actively in the call.
         let _ = handle_leave_if_owner(room.clone(), request_user_id, voice_conn_id, id)
           .await
           .map_err(|err| println!("Error handling leave: {err}"));
@@ -567,8 +518,6 @@ impl StreamService for StreamServer {
               .await;
           }
           Ok(ClientText::Typing { text_channel_id }) => {
-            // fan out to everyone else; the sender is excluded so they don't see
-            // themselves typing. Transient — not persisted, no DB work.
             let targets = manager.lock().unwrap().targets_without_self(&socket_id);
             let server_msg = ServerText::Typing {
               from: User {

@@ -583,11 +583,9 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             .map_err(|e| eprintln!("audio cues init failed: {e:?}"))
             .ok();
         }
-        if !reconnecting {
-          if let Some(ref mut cues) = model.audio_cues {
-            cues.play(Cue::Join);
-          };
-        }
+        if !reconnecting && let Some(ref mut cues) = model.audio_cues {
+          cues.play(Cue::Join);
+        };
       };
       Task::none()
     }
@@ -613,10 +611,10 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           Task::none()
         }
         RTCPeerConnectionState::Connected => {
-          if matches!(call.link_state, LinkState::Reconnecting { .. }) {
-            if let Some(ref mut cues) = model.audio_cues {
-              cues.play(Cue::Join);
-            }
+          if matches!(call.link_state, LinkState::Reconnecting { .. })
+            && let Some(ref mut cues) = model.audio_cues
+          {
+            cues.play(Cue::Join);
           }
           call.link_state = LinkState::Live;
           Task::none()
