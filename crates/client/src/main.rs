@@ -155,16 +155,10 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
         }),
       ];
 
-      // While the heartbeat is down, tick once a second so the connection-loss
-      // banner/overlay thresholds cross even during the chat stream's backoff
-      // silence (it can sit quiet for up to 30s between retries). Message::None
-      // just re-runs view, which recomputes elapsed from chat_disconnected_since.
       if model.chat_disconnected_since.is_some() {
         subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::None));
       }
 
-      // Settings-only subscriptions: Esc closes back to chat, and a timer drives
-      // the live mic-level meter. Scoped so they can't fire on chat/auth.
       if matches!(model.screen, Screen::Settings(_)) {
         subs.push(iced::event::listen_with(
           |event, _status, _window| match event {
@@ -211,8 +205,6 @@ pub enum Message {
     voice_channel_id: Uuid,
   },
   None,
-  // the in-call signaling reconnect window elapsed; if `id` still matches the
-  // active pending_rejoin we give up and drop the user from the call UI.
   CallReconnectTimedOut {
     id: u32,
   },
@@ -223,15 +215,11 @@ pub enum Message {
     epoch: u32,
     health: MediaHealth,
   },
-  // per-device audio health for the current call: whether the mic and speaker
-  // streams actually came up. Reported on join and on every live device swap.
   VoiceDeviceHealth {
     epoch: u32,
     input_ok: bool,
     output_ok: bool,
   },
-  // whether mic capture frames are currently arriving. Drops false when the mic
-  // opened but stopped delivering (unplugged / OS-muted / broken).
   VoiceMicActivity {
     epoch: u32,
     receiving: bool,
@@ -239,9 +227,6 @@ pub enum Message {
   LoggedIn(User),
 }
 
-// Mirror the in-memory per-user mixer levels into the persisted voice settings.
-// Load-modify-save so we only overwrite this one field and keep the gate/device
-// choices the settings screen owns. Failure is logged (inside save), never fatal.
 fn persist_user_audio(
   per_user_audio: &std::collections::HashMap<Uuid, crate::voice_settings::UserAudioPref>,
 ) {
@@ -253,23 +238,17 @@ fn persist_user_audio(
 fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
   match message {
     Message::Settings(msg) => match msg {
-      // back to chat (close button / Esc). The chat model was dropped on the way
-      // in, so rebuild it and re-init like a fresh login does.
       settings::Message::Close => match model.stashed_chat.take() {
-        // restore the chat model we stashed on the way in — instant, no reload.
         Some(chat_model) => {
           model.screen = Screen::Chat(chat_model);
           iced::Task::none()
         }
-        // no stash (e.g. we opened straight into settings): build + init fresh.
         None => {
           model.screen = Screen::Chat(Default::default());
           iced::Task::done(Message::Chat(chat::Message::Init))
         }
       },
       settings::Message::LogOut => {
-        // tear down voice + streams (subscriptions gate on LoggedIn, so they
-        // stop once user flips to NotLoggedIn) and return to the auth screen.
         model.voice = None;
         model.pending_rejoin = None;
         model.chat_disconnected_since = None;
@@ -286,8 +265,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         })
       }
       msg => {
-        // forward live audio changes to the running voice handle (if any); the
-        // settings model owns display state + persistence to disk.
         if let Some(voice) = &model.voice {
           match &msg {
             settings::Message::NoiseGateChanged(threshold) => {
@@ -302,9 +279,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             _ => {}
           }
         }
-        // Re-bind audio cues to the chosen output device so they follow the same
-        // device the call uses. This also recovers cues that failed to start
-        // (e.g. no working device at startup) once a usable device is selected.
         if let settings::Message::OutputDeviceSelected(name) = &msg {
           match &mut model.audio_cues {
             Some(cues) => {
@@ -335,13 +309,8 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         match msg {
           chat::Message::JoinVoice { voice_channel_id } => {
             if let Some(voice) = &mut model.voice {
-              // bump and drive the join on the model's current epoch so the new pc's
-              // state callbacks aren't filtered out by a stale epoch left behind by an
-              // earlier auto-reconnect.
               voice.epoch += 1;
               voice.link_state = model::LinkState::Connecting;
-              // clear any stale device warnings from a prior call; the fresh
-              // join re-reports device health and mic liveness.
               voice.mic_receiving = true;
               voice.input_ok = true;
               voice.output_ok = true;
@@ -350,9 +319,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::LeaveVoice => {
-            // Leaving while "Reconnecting..." (voice is None, only pending_rejoin
-            // is set) must cancel the auto-rejoin so the stream coming back doesn't
-            // surprise-rejoin us. The stale give-up timer no-ops once this is None.
             let was_reconnecting = model.pending_rejoin.take().is_some();
             if let Some(ref mut voice) = model.voice {
               voice.handle.leave();
@@ -367,8 +333,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::ActiveServerChanged { server_id } => {
-            // remember the active server (so we can re-subscribe on reconnect) and
-            // subscribe now if the voice stream is already up.
             model.active_server_id = Some(server_id);
             if let Some(voice) = &model.voice {
               voice.handle.subscribe_server(server_id);
@@ -377,7 +341,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           }
           chat::Message::ToggleMute => {
             if let Some(ref mut voice) = model.voice {
-              // an explicit mute toggle never changes deafen state.
               voice.muted = !voice.muted;
               voice.handle.set_muted(voice.muted);
               if let Some(ref mut cues) = model.audio_cues {
@@ -388,8 +351,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           }
           chat::Message::ToggleDeafen => {
             if let Some(ref mut voice) = model.voice {
-              // deafen implies mute: deafening forces mute on, undeafening clears
-              // both. The actor mirrors these onto the audio pipeline + server.
               voice.deafened = !voice.deafened;
               voice.muted = voice.deafened;
               voice.handle.set_deafened(voice.deafened);
@@ -405,9 +366,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::SetUserVolume { user_id, volume } => {
-            // live update while dragging: record the new level (clamped to the
-            // slider's 0..=200% range) and push the gain to the call so the user
-            // hears the change immediately. Persistence happens on release.
             let pref = model.per_user_audio.entry(user_id).or_default();
             pref.volume = volume.clamp(0.0, 2.0);
             let gain = pref.effective_gain();
@@ -417,12 +375,10 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::UserVolumeReleased { .. } => {
-            // drag finished — persist the whole map once.
             persist_user_audio(&model.per_user_audio);
             Task::none()
           }
           chat::Message::ToggleUserMute { user_id } => {
-            // flip mute while keeping the remembered volume for un-mute.
             let pref = model.per_user_audio.entry(user_id).or_default();
             pref.muted = !pref.muted;
             let gain = pref.effective_gain();
@@ -433,8 +389,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           chat::Message::GoToSettings => {
-            // stash the live chat model so returning from settings is instant.
-            // (chat_model isn't borrowed in this arm, so replacing screen is fine.)
             let prev = std::mem::replace(&mut model.screen, Screen::Settings(Default::default()));
             if let Screen::Chat(chat_model) = prev {
               model.stashed_chat = Some(chat_model);
@@ -442,8 +396,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             Task::none()
           }
           other => {
-            // apply to whichever chat model is live: the on-screen one, or the
-            // stashed one while we're in settings (so it stays current).
             let chat_model = match &mut model.screen {
               Screen::Chat(chat_model) => Some(chat_model),
               _ => model.stashed_chat.as_mut(),
@@ -496,21 +448,17 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::Loaded(me_return) => match me_return {
       Some(response) => {
         model.screen = Screen::Chat(Default::default());
-        // model.screen = Screen::Settings(Default::default());
         model.user = Auth::LoggedIn(User {
           id: response.user_id,
           name: response.username.clone(),
         });
 
         iced::Task::done(Message::Chat(chat::Message::Init))
-        // Task::none()
       }
       None => Task::none(),
     },
     Message::ChatStreamDisconnected => {
       model.chat_stream = Stream::Disconnected;
-      // Stamp the moment we lost the heartbeat (first drop only, so a flapping
-      // stream keeps the original elapsed). Drives the banner/overlay timing.
       model
         .chat_disconnected_since
         .get_or_insert_with(std::time::Instant::now);
@@ -558,25 +506,15 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         presence_snapshot: vec![],
         muted: false,
         deafened: false,
-        // assume healthy until a join (or device swap) reports otherwise.
         input_ok: true,
         output_ok: true,
         mic_receiving: true,
       };
 
-      // (re)subscribe to the active server's call presence so a fresh or
-      // reconnected voice stream immediately receives a snapshot of all rooms.
       if let Some(server_id) = model.active_server_id {
         voice.handle.subscribe_server(server_id);
       }
 
-      // Auto-rejoin the call we were dropped from. Restore mute/deafen onto the
-      // fresh handle's atomics (set_* just stores them while no call is active),
-      // then join — which re-announces them to the server, the same way a normal
-      // fresh join does. We leave pending_rejoin set (so the card keeps showing
-      // "Reconnecting…" with no flicker until voice_call_id lands) and clear it in
-      // JoinVoiceSuccessful once the rejoin is confirmed. Until then the give-up
-      // timer still guards us if the join never completes.
       if let Some(rejoin) = &model.pending_rejoin {
         voice.muted = rejoin.muted;
         voice.deafened = rejoin.deafened;
@@ -586,19 +524,8 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         voice.handle.join(rejoin.voice_channel_id, voice.epoch);
       }
 
-      // Drop any presence we were showing for this server's rooms; it's rebuilt
-      // from the fresh SubscribeServer / in-call snapshots. This clears ghosts
-      // (e.g. a peer that vanished while we were disconnected) instead of leaving
-      // them stuck on screen — empty rooms send no snapshot, so they stay cleared.
       model.room_presence.clear();
-
-      // The signaling stream coming back proves the server is reachable again, so
-      // clear the app-level "reconnecting"/"no connection" surface now rather than
-      // waiting on the chat heartbeat — which may still be mid-backoff (up to 30s).
-      // Otherwise the overlay lingers while the call audibly resumes behind it (the
-      // rejoin's Join cue plays before the splash clears).
       model.chat_disconnected_since = None;
-
       model.voice = Some(voice);
 
       Task::none()
@@ -606,12 +533,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     Message::WebRTCSignalStreamDisconnected => {
       model.webrtc_stream = Stream::Disconnected;
 
-      // If we were in a call, remember it (and our mute/deafen state) so we can
-      // auto-rejoin once the stream reconnects, instead of silently dropping the
-      // user. A manual leave clears voice_call_id, so this won't surprise-rejoin.
-      // The card keeps showing "Reconnecting..." off this pending_rejoin until we
-      // either recover or the give-up timer below fires. Capture before dropping
-      // the handle below (which ends the actor loop and tears down audio).
       let in_call = model
         .voice
         .as_ref()
@@ -633,17 +554,12 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         id,
       });
 
-      // Arm a give-up timer: if the stream hasn't reconnected and re-joined us by
-      // the deadline, CallReconnectTimedOut drops us from the call client-side.
       Task::perform(
         async { tokio::time::sleep(Duration::from_secs(15)).await },
         move |_| Message::CallReconnectTimedOut { id },
       )
     }
     Message::CallReconnectTimedOut { id } => {
-      // Only give up if this is still the same pending reconnect we armed the timer
-      // for. A successful rejoin (or a newer disconnect) leaves a different/empty
-      // pending_rejoin, in which case this is a stale tick and we do nothing.
       if model.pending_rejoin.as_ref().is_some_and(|r| r.id == id) {
         model.pending_rejoin = None;
         if let Some(ref mut cues) = model.audio_cues {
@@ -653,20 +569,10 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       Task::none()
     }
     Message::JoinVoiceSuccessful { voice_channel_id } => {
-      // The rejoin (if any) is confirmed; drop the pending state so its give-up
-      // timer no-ops. voice_call_id below now drives the card.
       model.pending_rejoin = None;
       if let Some(ref mut voice) = model.voice {
         voice.voice_call_id = Some(voice_channel_id);
-        // JoinVoiceSuccessful fires the moment local PC setup completes and the
-        // offer is sent — before ICE has actually (re)connected. For a reconnect
-        // (link is still Reconnecting here) that's too early to ding "joined": we
-        // haven't recovered yet. Defer the cue to the Connected transition below,
-        // where the link is genuinely back. A fresh join keeps the instant cue.
         let reconnecting = matches!(voice.link_state, LinkState::Reconnecting { .. });
-        // Cues may have failed to initialize at startup (no working device then).
-        // A join is a good moment to retry against the currently-saved device so
-        // the join/leave/peer cues come back to life without a restart.
         if model.audio_cues.is_none() {
           let device = crate::voice_settings::VoiceSettings::load().output_device;
           model.audio_cues = crate::audio_processing::cues::AudioCues::new(device.as_deref())
@@ -689,7 +595,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
       state: rtcpeer_connection_state,
       epoch,
     } => {
-      // if we're in a call
       let Some(ref mut call) = model.voice else {
         return Task::none();
       };
@@ -708,9 +613,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
           Task::none()
         }
         RTCPeerConnectionState::Connected => {
-          // Reaching Connected out of a reconnect is the real "we're back"
-          // moment — play the Join cue here, the one we deferred from
-          // JoinVoiceSuccessful so it wouldn't fire while still Reconnecting.
           if matches!(call.link_state, LinkState::Reconnecting { .. }) {
             if let Some(ref mut cues) = model.audio_cues {
               cues.play(Cue::Join);
@@ -816,8 +718,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
     } => {
       model.room_presence.insert(voice_channel_id, peers.clone());
 
-      // keep the existing in-call presence in sync when the snapshot is for the
-      // call we're actually in (that one carries live speaking state).
       if let Some(ref mut call) = model.voice
         && call.voice_call_id == Some(voice_channel_id)
       {
@@ -838,9 +738,6 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
 }
 
 fn reconnect(call: &mut VoiceCall, id: Uuid) {
-  // Only recover a call that is actually live or already mid-recovery. Idle (the user
-  // deliberately left) and Lost (we already gave up) must never silently rejoin — note
-  // our own pc.close() during a manual leave emits Closed, which routes here.
   let attempt = match call.link_state {
     LinkState::Reconnecting { attempt } => attempt + 1,
     LinkState::Live | LinkState::Connecting | LinkState::Unstable => 1,
@@ -854,18 +751,12 @@ fn reconnect(call: &mut VoiceCall, id: Uuid) {
     };
     return;
   }
-  // Bump the epoch BEFORE rejoining and drive the new connection on that same epoch, so
-  // late callbacks from the dying pc are filtered out while the fresh pc's callbacks
-  // (which carry call.epoch) are accepted. Passing a stale epoch here would make the
-  // model ignore every state change from the reconnected call.
   call.epoch += 1;
   call.link_state = LinkState::Reconnecting { attempt };
   call.handle.leave();
   call.handle.join(id, call.epoch);
 }
 
-// How long the heartbeat must be down before we surface it: a slim banner first,
-// then a full "no connection" overlay once it's clearly not a momentary blip.
 const BANNER_AFTER: Duration = Duration::from_secs(2);
 const OVERLAY_AFTER: Duration = Duration::from_secs(10);
 
@@ -874,8 +765,6 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
     model::Screen::Auth(model) => auth::view(model).map(Message::Auth),
     model::Screen::Chat(chat_model) => screens::chat::view(
       chat_model,
-      // keep the joined channel highlighted while we're reconnecting: fall back to
-      // the pending_rejoin channel when the live voice handle is gone.
       model
         .voice
         .as_ref()
@@ -889,9 +778,6 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
     }
   };
 
-  // App-level connection loss. Only meaningful once logged in (the streams only
-  // run then). The 1s tick subscription keeps this re-evaluating while down so the
-  // thresholds actually fire during the chat stream's quiet backoff windows.
   let down_for = matches!(model.user, Auth::LoggedIn(_))
     .then(|| model.chat_disconnected_since.map(|t| t.elapsed()))
     .flatten();
@@ -905,8 +791,6 @@ fn view(model: &'_ model::Model) -> Element<'_, Message> {
   container(container(view).style(container::rounded_box)).into()
 }
 
-// Slim full-width strip pinned above the app while the heartbeat is down but we
-// haven't yet given up — reassures the user we're actively retrying.
 fn reconnecting_banner<'a>() -> Element<'a, Message> {
   container(
     row![
@@ -929,8 +813,6 @@ fn reconnecting_banner<'a>() -> Element<'a, Message> {
   .into()
 }
 
-// Full-screen takeover once we've been disconnected long enough that the app is
-// effectively unusable; replaces the normal content until the server is back.
 fn no_connection_overlay<'a>() -> Element<'a, Message> {
   container(
     column![
