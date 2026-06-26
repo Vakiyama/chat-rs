@@ -5,6 +5,7 @@ import "google/protobuf/empty.proto";
 
 service ServerService {
   rpc Servers   (google.protobuf.Empty)   returns (ServersResponse);
+  rpc SetChannelMute (SetChannelMuteRequest) returns (google.protobuf.Empty);
 }
 
 message Server {
@@ -17,6 +18,12 @@ message Channel {
  string id = 1;
  string name = 2;
  ChannelType type = 3;
+ bool muted = 4;
+}
+
+message SetChannelMuteRequest {
+  string text_channel_id = 1;
+  bool muted = 2;
 }
 
 enum ChannelType {

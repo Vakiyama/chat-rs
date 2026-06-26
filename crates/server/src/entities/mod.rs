@@ -5,6 +5,7 @@ pub mod server;
 pub mod text_channel;
 pub mod user;
 pub mod user_server;
+pub mod user_text_channel;
 pub mod user_user;
 pub mod voice_channel;
 

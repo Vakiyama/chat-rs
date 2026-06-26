@@ -24,6 +24,8 @@ pub struct Model {
   pub status: Status,
   #[sea_orm(has_many, via = "user_server")]
   pub servers: HasMany<super::server::Entity>,
+  #[sea_orm(has_many, via = "user_text_channel")]
+  pub muted_text_channels: HasMany<super::text_channel::Entity>,
   #[sea_orm(has_many)]
   pub refresh_tokens: HasMany<super::refresh_token::Entity>,
   #[sea_orm(has_many)]

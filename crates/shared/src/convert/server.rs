@@ -11,6 +11,7 @@ use proto::Channel as ChannelProto;
 use proto::ChannelType as ChannelTypeProto;
 use proto::Server as ServerProto;
 use proto::ServersResponse as ServersResponseProto;
+use proto::SetChannelMuteRequest as SetChannelMuteRequestProto;
 
 impl IntoProto<ServersResponseProto> for ServersResponse {
   fn into_proto(self) -> ServersResponseProto {
@@ -36,6 +37,7 @@ impl IntoProto<ChannelProto> for Channel {
       id: self.id.to_string(),
       name: self.name,
       r#type: self.r#type.into_proto(),
+      muted: self.muted,
     }
   }
 }
@@ -91,6 +93,27 @@ impl TryFromProto<ChannelProto> for Channel {
         2 => Ok(ChannelType::Voice),
         _ => Err(tonic::Status::invalid_argument("Invalid channel type")),
       }?,
+      muted: proto.muted,
+    })
+  }
+}
+
+impl IntoProto<SetChannelMuteRequestProto> for SetChannelMuteRequest {
+  fn into_proto(self) -> SetChannelMuteRequestProto {
+    SetChannelMuteRequestProto {
+      text_channel_id: self.text_channel_id.to_string(),
+      muted: self.muted,
+    }
+  }
+}
+
+impl TryFromProto<SetChannelMuteRequestProto> for SetChannelMuteRequest {
+  type Error = tonic::Status;
+
+  fn try_from_proto(proto: SetChannelMuteRequestProto) -> Result<Self, Self::Error> {
+    Ok(Self {
+      text_channel_id: parse_id(proto.text_channel_id)?,
+      muted: proto.muted,
     })
   }
 }
