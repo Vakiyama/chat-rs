@@ -137,6 +137,7 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
 
       let mut subs = vec![
         voice_call_sub,
+        iced::window::events().map(Message::Window),
         Subscription::run(chat_stream::connect).map(|event| event.into()),
         Subscription::run(webrtc_stream::connect).map(|event| event.into()),
         iced::event::listen_with(|event, status, _window| match (event, status) {
@@ -225,6 +226,7 @@ pub enum Message {
     receiving: bool,
   },
   LoggedIn(User),
+  Window((iced::window::Id, iced::window::Event)),
 }
 
 fn persist_user_audio(
@@ -395,13 +397,37 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
             }
             Task::none()
           }
+          chat::Message::PlayCue(cue) => {
+            if model.audio_cues.is_none() {
+              let device = crate::voice_settings::VoiceSettings::load().output_device;
+              model.audio_cues = crate::audio_processing::cues::AudioCues::new(device.as_deref())
+                .map(|mut cues| {
+                  cues.set_volume(0.1);
+                  cues
+                })
+                .map_err(|e| eprintln!("audio cues init failed: {e:?}"))
+                .ok();
+            }
+            if let Some(ref mut cues) = model.audio_cues {
+              cues.play(cue);
+            };
+
+            Task::none()
+          }
           other => {
             let chat_model = match &mut model.screen {
               Screen::Chat(chat_model) => Some(chat_model),
               _ => model.stashed_chat.as_mut(),
             };
             if let Some(chat_model) = chat_model {
-              chat::update(chat_model, other, user, model.chat_stream.clone()).map(Message::Chat)
+              chat::update(
+                chat_model,
+                other,
+                user,
+                model.chat_stream.clone(),
+                &model.window_state,
+              )
+              .map(Message::Chat)
             } else {
               iced::Task::none()
             }
@@ -730,6 +756,14 @@ fn update(model: &mut model::Model, message: Message) -> iced::Task<Message> {
         call.presence_snapshot = peers;
       }
 
+      Task::none()
+    }
+    Message::Window((_id, event)) => {
+      match event {
+        iced::window::Event::Focused => model.window_state = model::WindowState::Focused,
+        iced::window::Event::Unfocused => model.window_state = model::WindowState::NotFocused,
+        _ => (),
+      };
       Task::none()
     }
   }

@@ -1,5 +1,6 @@
+use crate::audio_processing::cues::Cue;
 use crate::colors::{AccentsExt, NeutralsExt};
-use crate::model::{LinkState::*, MediaHealth};
+use crate::model::{self, LinkState::*, MediaHealth};
 use crate::screens::chat::View::NoneSelected;
 use crate::types::async_data::AsyncData;
 use crate::widgets::context_menu::ContextMenu;
@@ -21,6 +22,7 @@ use iced::widget::{
 use iced::widget::{container, row};
 use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
+use notify_rust::Notification;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -29,13 +31,14 @@ const TYPING_SEND_THROTTLE: Duration = Duration::from_millis(2500);
 const TYPING_TIMEOUT: Duration = Duration::from_secs(5);
 use uuid::Uuid;
 
+type TextChannelId = Uuid;
 // --------------------------------- MODEL ---------------------------------
 
 #[derive(Default)]
 pub struct Model {
   servers: AsyncData<Vec<Server>, tonic::Status>,
   view: View,
-  posts: HashMap<Uuid, Posts>,
+  posts: HashMap<TextChannelId, Posts>,
   input: text_editor::Content,
   typing: HashMap<Uuid, IndexMap<Uuid, TypingPeer>>,
   typing_seq: u64,
@@ -135,6 +138,7 @@ pub enum Message {
     user_id: Uuid,
   },
   GoToSettings,
+  PlayCue(Cue),
   None,
 }
 
@@ -144,6 +148,7 @@ pub fn update(
   message: Message,
   user: &User,
   stream: Stream<chat_stream::ChatConnection>,
+  window_state: &model::WindowState,
 ) -> Task<Message> {
   match message {
     Message::EditorAction(action) => {
@@ -245,40 +250,46 @@ pub fn update(
         //
         // otherwise just append post
 
-        let View::TextChannel(ref mut text_channel) = model.view else {
-          return Task::none();
-        };
-        let channel_id = text_channel.id;
+        let text_channel_id = post.text_channel_id;
         // a delivered post means its author stopped typing. Post carries no user
-        // id, so clear by author name (best-effort; the timeout covers the rest).
+        // id, so clear by author name
         let author_name = post.author_name.clone();
 
         let Some(Posts {
           posts: AsyncData::Done(Ok(posts)),
           ..
-        }) = model.posts.get_mut(&text_channel.id)
+        }) = model.posts.get_mut(&text_channel_id)
         else {
-          return Task::none();
+          return show_text_notif(window_state, model, &text_channel_id, &post);
         };
 
         // assumption: reconciled posts will be near end of indexmap (recently sent), usually causing a small shift
         // on remove/reinsert
-        posts.insert_sorted_by(post.id, RenderedPost::Sent(post), |_, v1, _, v2| {
-          if v1.created_at() > v2.created_at() {
-            std::cmp::Ordering::Greater
-          } else {
-            std::cmp::Ordering::Less
-          }
-        });
+        let (_, removed) =
+          posts.insert_sorted_by(post.id, RenderedPost::Sent(post.clone()), |_, v1, _, v2| {
+            if v1.created_at() > v2.created_at() {
+              std::cmp::Ordering::Greater
+            } else {
+              std::cmp::Ordering::Less
+            }
+          });
 
-        if let Some(channel_typing) = model.typing.get_mut(&channel_id) {
+        if let Some(channel_typing) = model.typing.get_mut(&text_channel_id) {
           channel_typing.retain(|_, peer| peer.name != author_name);
         }
-        if model.typing.get(&channel_id).is_some_and(|c| c.is_empty()) {
-          model.typing.remove(&channel_id);
+        if model
+          .typing
+          .get(&text_channel_id)
+          .is_some_and(|c| c.is_empty())
+        {
+          model.typing.remove(&text_channel_id);
         }
 
-        Task::none()
+        if removed.is_none() {
+          show_text_notif(window_state, model, &text_channel_id, &post)
+        } else {
+          Task::none()
+        }
       }
       ServerText::Pong { .. } => Task::none(),
       ServerText::Typing {
@@ -523,12 +534,52 @@ pub fn update(
     | Message::SetUserVolume { .. }
     | Message::UserVolumeReleased { .. }
     | Message::ToggleUserMute { .. }
-    | Message::GoToSettings => Task::none(),
+    | Message::GoToSettings
+    | Message::PlayCue(_) => Task::none(),
   }
 }
 
 fn make_text_input_id(text_channel_id: &Uuid) -> String {
   format!("text_input_{}", { text_channel_id.to_string() })
+}
+
+fn show_text_notif(
+  window_state: &model::WindowState,
+  model: &Model,
+  text_channel_id: &Uuid,
+  post: &Post,
+) -> Task<Message> {
+  if ((matches!(window_state, model::WindowState::NotFocused))
+    || !matches!(
+      &model.view,
+      View::TextChannel(TextChannel {
+        id,
+        name: _
+      }) if id == text_channel_id
+    ))
+    && let AsyncData::Done(Ok(servers)) = &model.servers
+    && let Some(text_channel) = servers.first().and_then(|server| {
+      server.channels.iter().find(|channel| {
+        matches!(channel.r#type, ChannelType::Text) && channel.id == *text_channel_id
+      })
+    })
+  {
+    // todo: assumes 1 server
+    let _ = Notification::new()
+      .summary(&format!(
+        "{}\n({}, #{})",
+        post.author_name,
+        &servers.first().unwrap().name,
+        &text_channel.name
+      ))
+      .body(&post.content)
+      .show()
+      .map_err(|err| eprintln!("{err}"));
+
+    Task::done(Message::PlayCue(Cue::Message))
+  } else {
+    Task::none()
+  }
 }
 
 // --------------------------------- VIEW ---------------------------------

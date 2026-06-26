@@ -35,6 +35,7 @@ pub enum Cue {
   Undeafen,
   PeerJoin,
   PeerLeave,
+  Message,
 }
 
 /// Bake each WAV in at compile time. `from_cursor` decodes the in-memory bytes,
@@ -62,6 +63,7 @@ struct Samples {
   undeafen: StaticSoundData,
   peer_join: StaticSoundData,
   peer_leave: StaticSoundData,
+  message: StaticSoundData,
 }
 
 impl Samples {
@@ -75,6 +77,7 @@ impl Samples {
       undeafen: load_cue!("undeafen")?,
       peer_join: load_cue!("peer_join")?,
       peer_leave: load_cue!("peer_leave")?,
+      message: load_cue!("message")?,
     })
   }
 }
@@ -142,6 +145,7 @@ impl AudioCues {
       Cue::Undeafen => &self.samples.undeafen,
       Cue::PeerJoin => &self.samples.peer_join,
       Cue::PeerLeave => &self.samples.peer_leave,
+      Cue::Message => &self.samples.message,
     };
     // Errors here mean the audio device vanished mid-session — log loudly,
     // don't unwrap. A missing ding should never take down a call.
