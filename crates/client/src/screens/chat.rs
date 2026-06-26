@@ -8,7 +8,9 @@ use crate::{Element, SOURCE_SANS_REGULAR, chat_stream, client, icon};
 use crate::{SPACE_GRID, model::Stream};
 use chat_shared::convert::{IntoProto, TryIntoDomain};
 use chat_shared::domain::post::{GetPostsRequest, GetPostsResponse, Post};
-use chat_shared::domain::server::{Channel, ChannelType, Server, ServersResponse};
+use chat_shared::domain::server::{
+  Channel, ChannelType, Server, ServersResponse, SetChannelMuteRequest,
+};
 use chat_shared::domain::stream::{ClientText, ServerText, User};
 use chrono::{Datelike, Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
@@ -111,6 +113,9 @@ pub enum Message {
   UserSelectedTextChannel {
     text_channel_id: Uuid,
     name: String,
+  },
+  ToggleChannelMute {
+    text_channel_id: Uuid,
   },
   ApiReturnedServers(Result<ServersResponse, tonic::Status>),
   ApiReturnedInitialPosts(Result<GetPostsResponse, tonic::Status>),
@@ -373,6 +378,40 @@ pub fn update(
         })
       }
     }
+    Message::ToggleChannelMute { text_channel_id } => {
+      let AsyncData::Done(Ok(servers)) = &mut model.servers else {
+        return Task::none();
+      };
+
+      let Some(channel) = servers
+        .iter_mut()
+        .flat_map(|server| server.channels.iter_mut())
+        .find(|channel| channel.id == text_channel_id)
+      else {
+        return Task::none();
+      };
+
+      channel.muted = !channel.muted;
+      let muted = channel.muted;
+
+      Task::future(async move {
+        let mut client = client::get().await;
+        if let Err(status) = client
+          .server
+          .set_channel_mute(
+            SetChannelMuteRequest {
+              text_channel_id,
+              muted,
+            }
+            .into_proto(),
+          )
+          .await
+        {
+          eprintln!("failed to persist channel mute: {status}");
+        }
+        Message::None
+      })
+    }
     Message::Init => {
       model.servers = AsyncData::Loading;
 
@@ -563,6 +602,7 @@ fn show_text_notif(
         matches!(channel.r#type, ChannelType::Text) && channel.id == *text_channel_id
       })
     })
+    && !text_channel.muted
   {
     // todo: assumes 1 server
     let _ = Notification::new()
@@ -701,12 +741,15 @@ fn view_channels<'a>(
         NoneSelected => false,
         View::TextChannel(text_channel_view) => text_channel.id == text_channel_view.id,
       };
+      let is_muted = text_channel.muted;
+      let text_channel_id = text_channel.id;
 
-      button(
+      let channel_button = button(
         row![
-          icon(GoogleMaterialSymbols::Tag).size(20).style(|theme| {
+          icon(GoogleMaterialSymbols::Tag).size(20).style(move |theme| {
+            let color = theme.extended_palette().background.weakest.text;
             text::Style {
-              color: Some(theme.extended_palette().background.weakest.text),
+              color: Some(if is_muted { color.scale_alpha(0.45) } else { color }),
             }
           }),
           container(
@@ -737,12 +780,18 @@ fn view_channels<'a>(
           button::Status::Disabled => None,
         };
 
+        let text_color = if is_selected || matches!(status, button::Status::Hovered) {
+          palette.background.neutral.text
+        } else {
+          palette.background.weakest.text
+        };
+
         button::Style {
           background,
-          text_color: if is_selected || matches!(status, button::Status::Hovered) {
-            palette.background.neutral.text
+          text_color: if is_muted {
+            text_color.scale_alpha(0.45)
           } else {
-            palette.background.weakest.text
+            text_color
           },
           border: Border {
             radius: (SPACE_GRID as u32 / 2).into(),
@@ -755,8 +804,13 @@ fn view_channels<'a>(
       .on_press(Message::UserSelectedTextChannel {
         text_channel_id: text_channel.id,
         name: text_channel.name.clone(),
+      });
+
+      // Right-click a text channel to mute/unmute it, mirroring the in-call
+      // right-click mixer on voice participants.
+      ContextMenu::new(channel_button, move || {
+        channel_mute_overlay(text_channel_id, is_muted)
       })
-      // .style(container::primary)
       .into()
     })
     .collect();
@@ -1778,6 +1832,54 @@ fn voice_toggle_button<'a>(
           ..Default::default()
         },
         ..button::Style::default()
+      }
+    })
+    .into()
+}
+
+fn channel_mute_overlay<'a>(text_channel_id: Uuid, muted: bool) -> Element<'a, Message> {
+  let (label, symbol) = if muted {
+    ("Unmute", GoogleMaterialSymbols::Notifications)
+  } else {
+    ("Mute", GoogleMaterialSymbols::NotificationsOff)
+  };
+
+  let mute_button = button(
+    row![icon(symbol).size(16), text(label).size(14)]
+      .spacing(SPACE_GRID as u32)
+      .align_y(Center),
+  )
+  .on_press(Message::ToggleChannelMute { text_channel_id })
+  .width(Length::Fill)
+  .style(move |theme: &Theme, status| {
+    let palette = theme.extended_palette();
+    let background = match status {
+      button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
+      _ => palette.background.weakest.color,
+    };
+    button::Style {
+      background: Some(background.into()),
+      text_color: palette.background.base.text,
+      border: Border {
+        radius: (SPACE_GRID as u32 / 2).into(),
+        ..Default::default()
+      },
+      ..button::Style::default()
+    }
+  });
+
+  container(container(mute_button).width(180))
+    .padding(SPACE_GRID)
+    .style(|theme: &Theme| {
+      let palette = theme.extended_palette();
+      container::Style {
+        background: Some(palette.background.weak.color.into()),
+        border: Border {
+          color: palette.background.strong.color,
+          width: 1.0,
+          radius: border::radius(SPACE_GRID as u32),
+        },
+        ..container::Style::default()
       }
     })
     .into()

@@ -11,7 +11,7 @@ use futures::stream::StreamExt;
 use iced::futures;
 use iced::task::{Never, Sipper, sipper};
 use sonora::config::{
-  AdaptiveDigital, EchoCanceller, FixedDigital, GainController2, NoiseSuppression,
+  AdaptiveDigital, EchoCanceller, FixedDigital, GainController2, HighPassFilter, NoiseSuppression,
 };
 use sonora::{AudioProcessing, Config};
 use std::sync::Arc;
@@ -635,6 +635,9 @@ fn spawn_audio_processor(
         input_volume_controller: false,
         adaptive_digital: Some(AdaptiveDigital::default()),
         fixed_digital: FixedDigital::default(),
+      }),
+      high_pass_filter: Some(HighPassFilter {
+        apply_in_full_band: true,
       }),
       ..Default::default()
     };
