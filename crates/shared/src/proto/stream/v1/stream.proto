@@ -88,6 +88,8 @@ message Post {
   string content = 3;
   google.protobuf.Timestamp created_at = 4;
   string text_channel_id = 5;
+  string author_id = 6;
+  bool edited = 7;
 }
 
 message JoinedRoom {
@@ -100,20 +102,46 @@ message LeftRoom {
 
 message ServerTextMessage {
   oneof payload {
-    JoinedRoom         joined_room = 1;
-    LeftRoom           left_room   = 2;
-    Post               chat        = 3;
-    Pong               pong        = 4;
-    TypingNotification typing      = 5;
+    JoinedRoom         joined_room  = 1;
+    LeftRoom           left_room    = 2;
+    Post               chat         = 3;
+    Pong               pong         = 4;
+    TypingNotification typing       = 5;
+    PostEdited         post_edited  = 6;
+    PostDeleted        post_deleted = 7;
   }
 }
 
 message ClientTextMessage {
   oneof payload {
-    CreatePostRequest post = 1;
-    Ping        ping        = 2;
-    Typing      typing      = 3;
+    CreatePostRequest post        = 1;
+    Ping              ping        = 2;
+    Typing            typing      = 3;
+    EditPostRequest   edit_post   = 4;
+    DeletePostRequest delete_post = 5;
   }
+}
+
+message EditPostRequest {
+  string id = 1;
+  string content = 2;
+  string text_channel_id = 3;
+}
+
+message DeletePostRequest {
+  string id = 1;
+  string text_channel_id = 2;
+}
+
+message PostEdited {
+  string id = 1;
+  string content = 2;
+  string text_channel_id = 3;
+}
+
+message PostDeleted {
+  string id = 1;
+  string text_channel_id = 2;
 }
 
 // A client signals it's actively typing in a text channel. Sent throttled while

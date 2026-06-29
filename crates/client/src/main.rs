@@ -162,6 +162,26 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
           ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
             Some(Message::Chat(chat::Message::TypeAheadBackspace))
           }
+          (
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+              key: iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp),
+              modifiers,
+              ..
+            }),
+            iced::event::Status::Ignored,
+          ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
+            Some(Message::Chat(chat::Message::EditLastOwnPost))
+          }
+          (
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+              key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+              ..
+            }),
+            iced::event::Status::Ignored,
+          ) => Some(Message::Chat(chat::Message::EscapePressed)),
+          (iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)), _) => {
+            Some(Message::Chat(chat::Message::ShiftHeld(modifiers.shift())))
+          }
           _ => None,
         }),
       ];

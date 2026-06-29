@@ -4,7 +4,7 @@ use std::{
   sync::{Arc, Mutex, atomic::Ordering},
 };
 
-use sea_orm::{EntityTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel, QueryFilter};
 use tokio::sync::OnceCell;
 
 use chat_shared::{
@@ -462,12 +462,15 @@ impl StreamService for StreamServer {
           }) => {
             let targets = manager.lock().unwrap().targets_with_self();
 
+            let created_at = chrono::Utc::now();
             let server_msg = ServerText::Post(Post {
               id,
+              author_id: user.id,
               author_name: user.username.clone(),
               content: content.clone(),
-              created_at: chrono::Utc::now(),
+              created_at,
               text_channel_id,
+              edited: false,
             });
 
             let channel = entities::channel::Entity::find()
@@ -482,13 +485,16 @@ impl StreamService for StreamServer {
 
             let channel_id = channel.unwrap().id;
 
+            // Persist with the client-supplied id so later edits/deletes can
+            // reference the same post the clients already know about.
             entities::post::Entity::insert(
               entities::post::Model {
-                id: uuid::Uuid::new_v4(),
+                id,
                 content,
                 channel_id: Some(channel_id),
                 author_id: Some(user.id),
-                created_at: chrono::Utc::now(),
+                created_at,
+                edited: false,
               }
               .into_active_model(),
             )
@@ -500,6 +506,57 @@ impl StreamService for StreamServer {
             })
             .unwrap();
 
+            Manager::emit(targets, server_msg.into_proto()).await;
+          }
+          Ok(ClientText::EditPostRequest {
+            id,
+            content,
+            text_channel_id,
+          }) => {
+            // Only the author may edit. Reject silently if the post is missing
+            // or owned by someone else.
+            let post = entities::post::Entity::find_by_id(id).one(db).await.ok().flatten();
+            let Some(post) = post.filter(|p| p.author_id == Some(user.id)) else {
+              eprintln!("rejecting edit of post {id} by user {}", user.id);
+              continue;
+            };
+
+            let mut active = post.into_active_model();
+            active.content = Set(content.clone());
+            active.edited = Set(true);
+            if let Err(err) = active.update(db).await {
+              eprintln!("error editing post: {err}");
+              continue;
+            }
+
+            let targets = manager.lock().unwrap().targets_with_self();
+            let server_msg = ServerText::PostEdited {
+              id,
+              content,
+              text_channel_id,
+            };
+            Manager::emit(targets, server_msg.into_proto()).await;
+          }
+          Ok(ClientText::DeletePostRequest {
+            id,
+            text_channel_id,
+          }) => {
+            let post = entities::post::Entity::find_by_id(id).one(db).await.ok().flatten();
+            let Some(post) = post.filter(|p| p.author_id == Some(user.id)) else {
+              eprintln!("rejecting delete of post {id} by user {}", user.id);
+              continue;
+            };
+
+            if let Err(err) = entities::post::Entity::delete_by_id(post.id).exec(db).await {
+              eprintln!("error deleting post: {err}");
+              continue;
+            }
+
+            let targets = manager.lock().unwrap().targets_with_self();
+            let server_msg = ServerText::PostDeleted {
+              id,
+              text_channel_id,
+            };
             Manager::emit(targets, server_msg.into_proto()).await;
           }
           Ok(ClientText::Ping { timestamp }) => {
