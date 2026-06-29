@@ -19,6 +19,9 @@ pub struct Model {
   pub channel: HasOne<super::channel::Entity>,
 
   pub created_at: chrono::DateTime<Utc>,
+
+  #[sea_orm(default_value = false)]
+  pub edited: bool,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

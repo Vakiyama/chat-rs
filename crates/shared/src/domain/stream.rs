@@ -20,6 +20,15 @@ pub enum ClientText {
     content: String,
     text_channel_id: Uuid,
   },
+  EditPostRequest {
+    id: Uuid,
+    content: String,
+    text_channel_id: Uuid,
+  },
+  DeletePostRequest {
+    id: Uuid,
+    text_channel_id: Uuid,
+  },
   Ping {
     timestamp: u64,
   },
@@ -37,6 +46,15 @@ pub enum ServerText {
     from: User,
   },
   Post(Post),
+  PostEdited {
+    id: Uuid,
+    content: String,
+    text_channel_id: Uuid,
+  },
+  PostDeleted {
+    id: Uuid,
+    text_channel_id: Uuid,
+  },
   Pong {
     timestamp: u64,
     server_received_at: u64,

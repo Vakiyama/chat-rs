@@ -4,10 +4,12 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub struct Post {
   pub id: Uuid,
+  pub author_id: Uuid,
   pub author_name: String,
   pub content: String,
   pub created_at: chrono::DateTime<Utc>,
   pub text_channel_id: Uuid,
+  pub edited: bool,
 }
 
 #[derive(Clone, Debug)]

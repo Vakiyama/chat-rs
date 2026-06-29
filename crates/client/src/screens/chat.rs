@@ -12,21 +12,19 @@ use chat_shared::domain::server::{
   Channel, ChannelType, Server, ServersResponse, SetChannelMuteRequest,
 };
 use chat_shared::domain::stream::{ClientText, ServerText, User};
-use chrono::{Datelike, Local, Utc};
+use chrono::{Local, Utc};
 use google_material_symbols::GoogleMaterialSymbols;
 use iced::Alignment::Center;
 use iced::font::Weight;
-use iced::widget::keyed::column;
 use iced::widget::scrollable::Scrollbar;
 use iced::widget::{
-  button, column, operation, rule, scrollable, slider, space, stack, text, text_editor,
+  button, column, mouse_area, operation, rule, scrollable, slider, space, stack, text, text_editor,
 };
 use iced::widget::{container, row};
 use iced::{Border, Font, Length, Padding, Pixels, Task, Theme, border, padding};
 use indexmap::IndexMap;
 use notify_rust::Notification;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const TYPING_SEND_THROTTLE: Duration = Duration::from_millis(2500);
@@ -45,6 +43,22 @@ pub struct Model {
   typing: HashMap<Uuid, IndexMap<Uuid, TypingPeer>>,
   typing_seq: u64,
   last_typing_sent: Option<Instant>,
+  editing: Option<Editing>,
+  confirming_delete: Option<DeleteTarget>,
+  shift_held: bool,
+  hovered_post: Option<Uuid>,
+}
+
+struct Editing {
+  post_id: Uuid,
+  text_channel_id: Uuid,
+  content: text_editor::Content,
+}
+
+#[derive(Clone, Copy)]
+struct DeleteTarget {
+  post_id: Uuid,
+  text_channel_id: Uuid,
 }
 
 #[derive(Clone)]
@@ -104,6 +118,25 @@ impl RenderedPost {
 pub enum Message {
   EditorAction(text_editor::Action),
   UserSubmittedChatInput,
+  StartEditPost {
+    post_id: Uuid,
+    text_channel_id: Uuid,
+  },
+  EditAction(text_editor::Action),
+  SubmitEdit,
+  CancelEdit,
+  EditLastOwnPost,
+  ArrowUpInInput,
+  RequestDeletePost {
+    post_id: Uuid,
+    text_channel_id: Uuid,
+  },
+  ConfirmDeletePost,
+  CancelDeletePost,
+  ShiftHeld(bool),
+  PostHovered(Uuid),
+  PostUnhovered(Uuid),
+  EscapePressed,
   ExpireTyping {
     text_channel_id: Uuid,
     user_id: Uuid,
@@ -296,6 +329,48 @@ pub fn update(
         } else {
           Task::none()
         }
+      }
+      ServerText::PostEdited {
+        id,
+        content,
+        text_channel_id,
+      } => {
+        if let Some(Posts {
+          posts: AsyncData::Done(Ok(posts)),
+          ..
+        }) = model.posts.get_mut(&text_channel_id)
+          && let Some(RenderedPost::Sent(post)) = posts.get_mut(&id)
+        {
+          post.content = content;
+          post.edited = true;
+        }
+        Task::none()
+      }
+      ServerText::PostDeleted {
+        id,
+        text_channel_id,
+      } => {
+        if let Some(Posts {
+          posts: AsyncData::Done(Ok(posts)),
+          ..
+        }) = model.posts.get_mut(&text_channel_id)
+        {
+          posts.shift_remove(&id);
+        }
+        if model
+          .editing
+          .as_ref()
+          .is_some_and(|editing| editing.post_id == id)
+        {
+          model.editing = None;
+        }
+        if model
+          .confirming_delete
+          .is_some_and(|target| target.post_id == id)
+        {
+          model.confirming_delete = None;
+        }
+        Task::none()
       }
       ServerText::Pong { .. } => Task::none(),
       ServerText::Typing {
@@ -578,6 +653,114 @@ pub fn update(
         .perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
       operation::focus(text_input_id)
     }
+    Message::StartEditPost {
+      post_id,
+      text_channel_id,
+    } => start_editing(model, post_id, text_channel_id),
+    Message::EditAction(action) => {
+      if let Some(editing) = model.editing.as_mut() {
+        editing.content.perform(action);
+      }
+      Task::none()
+    }
+    Message::CancelEdit => {
+      model.editing = None;
+      Task::none()
+    }
+    Message::SubmitEdit => {
+      let Some(editing) = model.editing.take() else {
+        return Task::none();
+      };
+      let content = editing.content.text();
+      if content.trim().is_empty() {
+        return Task::none();
+      }
+
+      if let Some(Posts {
+        posts: AsyncData::Done(Ok(posts)),
+        ..
+      }) = model.posts.get_mut(&editing.text_channel_id)
+        && let Some(RenderedPost::Sent(post)) = posts.get_mut(&editing.post_id)
+      {
+        post.content = content.clone();
+        post.edited = true;
+      }
+
+      if let Stream::Connected(mut stream) = stream {
+        let _ = stream.try_send(ClientText::EditPostRequest {
+          id: editing.post_id,
+          content,
+          text_channel_id: editing.text_channel_id,
+        });
+      }
+      Task::none()
+    }
+    Message::EditLastOwnPost => {
+      if !model.input.text().trim().is_empty() {
+        return Task::none();
+      }
+      match last_own_post(model, user.id) {
+        Some((post_id, text_channel_id)) => start_editing(model, post_id, text_channel_id),
+        None => Task::none(),
+      }
+    }
+    Message::ArrowUpInInput => {
+      if model.input.text().trim().is_empty()
+        && let Some((post_id, text_channel_id)) = last_own_post(model, user.id)
+      {
+        start_editing(model, post_id, text_channel_id)
+      } else {
+        model
+          .input
+          .perform(text_editor::Action::Move(text_editor::Motion::Up));
+        Task::none()
+      }
+    }
+    Message::RequestDeletePost {
+      post_id,
+      text_channel_id,
+    } => {
+      let target = DeleteTarget {
+        post_id,
+        text_channel_id,
+      };
+      if model.shift_held {
+        delete_post(model, target, stream)
+      } else {
+        model.confirming_delete = Some(target);
+        Task::none()
+      }
+    }
+    Message::ConfirmDeletePost => {
+      let Some(target) = model.confirming_delete.take() else {
+        return Task::none();
+      };
+      delete_post(model, target, stream)
+    }
+    Message::CancelDeletePost => {
+      model.confirming_delete = None;
+      Task::none()
+    }
+    Message::ShiftHeld(held) => {
+      model.shift_held = held;
+      Task::none()
+    }
+    Message::PostHovered(post_id) => {
+      model.hovered_post = Some(post_id);
+      Task::none()
+    }
+    Message::PostUnhovered(post_id) => {
+      if model.hovered_post == Some(post_id) {
+        model.hovered_post = None;
+      }
+      Task::none()
+    }
+    Message::EscapePressed => {
+      if model.confirming_delete.take().is_none() {
+        model.editing = None;
+      }
+      Task::none()
+    }
     // These are all intercepted by the top-level update (they need the voice
     // handle), so they're no-ops here.
     Message::JoinVoice { .. }
@@ -595,6 +778,81 @@ pub fn update(
 
 fn make_text_input_id(text_channel_id: &Uuid) -> String {
   format!("text_input_{}", { text_channel_id.to_string() })
+}
+
+fn make_edit_input_id(post_id: &Uuid) -> String {
+  format!("edit_input_{}", { post_id.to_string() })
+}
+
+/// Open the inline editor for a sent post, pre-filling it with the current
+/// content and focusing it. No-op if the post isn't a delivered (`Sent`) post.
+fn start_editing(model: &mut Model, post_id: Uuid, text_channel_id: Uuid) -> Task<Message> {
+  let Some(Posts {
+    posts: AsyncData::Done(Ok(posts)),
+    ..
+  }) = model.posts.get(&text_channel_id)
+  else {
+    return Task::none();
+  };
+  let Some(RenderedPost::Sent(post)) = posts.get(&post_id) else {
+    return Task::none();
+  };
+
+  model.editing = Some(Editing {
+    post_id,
+    text_channel_id,
+    content: text_editor::Content::with_text(&post.content),
+  });
+  operation::focus(make_edit_input_id(&post_id))
+}
+
+/// The most recent own, delivered post in the currently viewed channel.
+fn last_own_post(model: &Model, user_id: Uuid) -> Option<(Uuid, Uuid)> {
+  let text_channel_id = match model.view {
+    View::TextChannel(TextChannel { id, .. }) => id,
+    _ => return None,
+  };
+  let Some(Posts {
+    posts: AsyncData::Done(Ok(posts)),
+    ..
+  }) = model.posts.get(&text_channel_id)
+  else {
+    return None;
+  };
+  posts.values().rev().find_map(|post| match post {
+    RenderedPost::Sent(post) if post.author_id == user_id => Some((post.id, text_channel_id)),
+    _ => None,
+  })
+}
+
+/// Optimistically remove a post locally and ask the server to delete it.
+fn delete_post(
+  model: &mut Model,
+  target: DeleteTarget,
+  stream: Stream<chat_stream::ChatConnection>,
+) -> Task<Message> {
+  if let Some(Posts {
+    posts: AsyncData::Done(Ok(posts)),
+    ..
+  }) = model.posts.get_mut(&target.text_channel_id)
+  {
+    posts.shift_remove(&target.post_id);
+  }
+  if model
+    .editing
+    .as_ref()
+    .is_some_and(|e| e.post_id == target.post_id)
+  {
+    model.editing = None;
+  }
+
+  if let Stream::Connected(mut stream) = stream {
+    let _ = stream.try_send(ClientText::DeletePostRequest {
+      id: target.post_id,
+      text_channel_id: target.text_channel_id,
+    });
+  }
+  Task::none()
 }
 
 fn show_text_notif(
@@ -644,6 +902,10 @@ pub fn view<'a>(
   current_call_id: Option<&'a Uuid>,
   main_model: &'a crate::model::Model,
 ) -> Element<'a, Message> {
+  let current_user_id = match &main_model.user {
+    model::Auth::LoggedIn(user) => Some(user.id),
+    model::Auth::NotLoggedIn => None,
+  };
   let servers_loaded_message = match &model.servers {
     AsyncData::NotAsked | AsyncData::Loading => Some("Loading servers...".to_string()),
     AsyncData::Done(Ok(_)) => None,
@@ -704,12 +966,13 @@ pub fn view<'a>(
           .map(|peers| peers.values().map(|p| p.name.as_str()).collect())
           .unwrap_or_default();
         view_text_chat_window(
+          model,
           &text_channel.name,
           posts,
-          &model.input,
           *loading_more,
           &text_channel.id,
           typing_names,
+          current_user_id,
         )
       }
     },
@@ -723,22 +986,27 @@ pub fn view<'a>(
     .get_or(&[]);
 
   // todo: hardcoded server name until we add server to model
-  row![
+  let base: Element<'_, Message> = row![
     view_channels(
+      model,
       "The Intergalactic Federation",
-      &model.view,
       channels,
       current_call_id,
       main_model
     ),
     text_chat
   ]
-  .into()
+  .into();
+
+  match model.confirming_delete {
+    Some(_) => stack![base, delete_confirm_dialog()].into(),
+    None => base,
+  }
 }
 
 fn view_channels<'a>(
+  model: &'a Model,
   server_name: &'a str,
-  view: &'a View,
   channels: &'a [Channel],
   active_voice_channel_id: Option<&'a Uuid>,
   main_model: &'a crate::model::Model,
@@ -752,7 +1020,7 @@ fn view_channels<'a>(
   let rendered_text: Vec<Element<'a, Message>> = text_channels
     .into_iter()
     .map(|text_channel| -> Element<'a, Message> {
-      let is_selected = match view {
+      let is_selected = match &model.view {
         NoneSelected => false,
         View::TextChannel(text_channel_view) => text_channel.id == text_channel_view.id,
       };
@@ -1296,14 +1564,15 @@ fn view_user_controller<'a>(model: &'a crate::model::Model) -> Element<'a, Messa
 
 // renders a self contained text chat window with input, posts and member list
 fn view_text_chat_window<'a>(
+  model: &'a Model,
   name: &'a str,
   posts: &'a IndexMap<Uuid, RenderedPost>,
-  input: &'a text_editor::Content,
   loading_more: bool,
   text_channel_id: &'a Uuid,
   typing_names: Vec<&'a str>,
+  current_user_id: Option<Uuid>,
 ) -> Element<'a, Message> {
-  let editor = text_editor(input)
+  let editor = text_editor(&model.input)
     .placeholder(format!("Message #{name}"))
     .id(make_text_input_id(text_channel_id))
     .on_action(Message::EditorAction)
@@ -1316,8 +1585,14 @@ fn view_text_chat_window<'a>(
       let is_char = |c| matches!(key_press.key.as_ref(), Key::Character(s) if s == c);
       let is_backspace = matches!(&key_press.key, Key::Named(Named::Backspace));
 
+      let plain = !modifier && !key_press.modifiers.shift() && !key_press.modifiers.alt();
+
       if matches!(&key_press.key, Key::Named(Named::Enter)) && !key_press.modifiers.shift() {
         Some(Binding::Custom(Message::UserSubmittedChatInput))
+      } else if plain && matches!(&key_press.key, Key::Named(Named::ArrowUp)) {
+        // empty composer + up = edit last own message; otherwise cursor up.
+        // The handler decides based on the buffer contents.
+        Some(Binding::Custom(Message::ArrowUpInInput))
       } else if modifier && is_char("u") {
         Some(Binding::Sequence(vec![
           Binding::SelectLine,
@@ -1349,7 +1624,14 @@ fn view_text_chat_window<'a>(
     // top - channel name
     view_text_chat_title(name),
     stack![
-      row![view_posts(posts, loading_more)].padding([0, SPACE_GRID * 2]),
+      row![view_posts(
+        model,
+        posts,
+        loading_more,
+        text_channel_id,
+        current_user_id,
+      )]
+      .padding([0, SPACE_GRID * 2]),
       container(view_typing_indicator(&typing_names))
         .width(Length::Fill)
         .align_bottom(Length::Fill)
@@ -1427,16 +1709,13 @@ fn view_text_chat_title<'a>(name: &'a str) -> Element<'a, Message> {
   .into()
 }
 
-fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>) {
+fn view_day_divider<'a>(date: chrono::NaiveDate) -> Element<'a, Message> {
   let today = Local::now().date_naive();
   let label = match (today - date).num_days() {
     0 => "Today".to_string(),
     1 => "Yesterday".to_string(),
     _ => date.format("%A, %B %-d, %Y").to_string(),
   };
-
-  // deterministic, stable key per calendar day so keyed diffing stays consistent
-  let key = Uuid::from_u64_pair(0xda7e_da7e_da7e_da7e, date.num_days_from_ce() as u64);
 
   let line = || {
     rule::horizontal(1).style(|theme: &Theme| rule::Style {
@@ -1445,32 +1724,36 @@ fn view_day_divider<'a>(date: chrono::NaiveDate) -> (Uuid, Element<'a, Message>)
     })
   };
 
-  (
-    key,
-    row![
-      container(line()).width(Length::Fill).center_y(Length::Fill),
-      text(label).size(12).style(|theme| text::Style {
-        color: text::secondary(theme).color,
-      }),
-      container(line()).width(Length::Fill).center_y(Length::Fill),
-    ]
-    .align_y(Center)
-    .spacing(SPACE_GRID as u32)
-    .padding([SPACE_GRID, 0])
-    .into(),
-  )
+  row![
+    container(line()).width(Length::Fill).center_y(Length::Fill),
+    text(label).size(12).style(|theme| text::Style {
+      color: text::secondary(theme).color,
+    }),
+    container(line()).width(Length::Fill).center_y(Length::Fill),
+  ]
+  .align_y(Center)
+  .spacing(SPACE_GRID as u32)
+  .padding([SPACE_GRID, 0])
+  .into()
 }
 
 fn view_posts<'a>(
+  model: &'a Model,
   posts: &'a IndexMap<Uuid, RenderedPost>,
   loading_more: bool,
+  text_channel_id: &'a Uuid,
+  current_user_id: Option<Uuid>,
 ) -> Element<'a, Message> {
-  let mut children = vec![];
+  // NOTE: this is a regular (non-keyed) `column`. `keyed::column` must NOT be
+  // used here: its diff reuses child state trees by key *without* a tag check
+  // (`child.diff(tree)` directly), so a key whose element changes type — or a
+  // mid-list insert/remove that shifts a stateful child (`ContextMenu`, the
+  // inline editor) onto a stale tree — hands `State::None` to a stateful widget
+  // and panics with "Downcast on stateless state". A regular column diffs
+  // positionally through `Tree::diff`, which rebuilds on tag mismatch.
+  let mut children: Vec<Element<'a, Message>> = vec![];
   if loading_more {
-    children.push((
-      uuid::Uuid::from_str("a4bbeadb-69c0-4bc6-a866-1dacde29b054").unwrap(),
-      text("Loading more posts...").width(Length::Fill).into(),
-    ));
+    children.push(text("Loading more posts...").width(Length::Fill).into());
   };
 
   const MESSAGE_GROUP_GAP: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
@@ -1542,8 +1825,26 @@ fn view_posts<'a>(
       })
       .wrapping(text::Wrapping::WordOrGlyph);
 
-    let body: Element<'a, Message> = if display_name.is_empty() {
+    // an edited post gets a small muted "(edited)" marker trailing its content.
+    let is_edited = matches!(post.1, RenderedPost::Sent(p) if p.edited);
+    let content_block: Element<'a, Message> = if is_edited {
+      row![
+        content_text,
+        text("(edited)")
+          .size(11)
+          .style(|theme: &Theme| text::Style {
+            color: Some(theme.extended_palette().background.weak.text),
+          })
+      ]
+      .spacing(SPACE_GRID as u32 / 2)
+      .align_y(iced::Alignment::End)
+      .into()
+    } else {
       content_text.into()
+    };
+
+    let body: Element<'a, Message> = if display_name.is_empty() {
+      content_block
     } else {
       row![
         iced_selection::text(display_name)
@@ -1555,7 +1856,7 @@ fn view_posts<'a>(
             weight: Weight::Semibold,
             ..SOURCE_SANS_REGULAR
           }),
-        content_text
+        content_block
       ]
       .spacing(Pixels(SPACE_GRID.into()))
       .into()
@@ -1567,25 +1868,89 @@ fn view_posts<'a>(
       0.0
     };
 
-    children.push((
-      *id,
-      row![
-        iced_selection::text(display_time).style(|theme| iced_selection::text::Style {
-          color: text::secondary(theme).color,
-          selection: theme.extended_palette().secondary.strong.text
-        }), //.align_x(Alignment::Start),
-        body
-      ]
-      .spacing(Pixels(SPACE_GRID.into()))
-      .padding(padding::top(top_pad))
-      .into(),
-    ));
+    // only the author's own delivered posts get the edit/delete affordances.
+    // (Sending/Errored posts have no server-side id to act on yet.)
+    let is_own = matches!(post.1, RenderedPost::Sent(p) if Some(p.author_id) == current_user_id);
+    let is_editing = model
+      .editing
+      .as_ref()
+      .is_some_and(|e| &e.post_id == id && &e.text_channel_id == text_channel_id);
+    let is_hovered = model.hovered_post == Some(*id);
+
+    // The first message in a group always shows its timestamp; grouped messages
+    // hide it (rendered transparent so the gutter width is reserved and content
+    // never shifts) and reveal it on hover.
+    let timestamp_shown = show_name || is_hovered;
+    let timestamp =
+      iced_selection::text(display_time).style(move |theme| iced_selection::text::Style {
+        color: if timestamp_shown {
+          text::secondary(theme).color
+        } else {
+          Some(iced::Color::TRANSPARENT)
+        },
+        selection: theme.extended_palette().secondary.strong.text,
+      });
+
+    let line: Element<'a, Message> = if is_editing {
+      // SAFETY: is_editing implies editing is Some.
+      let content = &model.editing.as_ref().unwrap().content;
+      row![timestamp, view_inline_editor(content, *id)]
+        .spacing(Pixels(SPACE_GRID.into()))
+        .into()
+    } else {
+      row![timestamp, body]
+        .spacing(Pixels(SPACE_GRID.into()))
+        .into()
+    };
+
+    // Full-width hover highlight signalling the row is interactive (context menu
+    // / replies). Driven by model state via the mouse_area below. Sized tight to
+    // the content (no extra padding, to avoid shifting layout vs. the day
+    // dividers); the inter-group gap (`top_pad`) is applied *outside* it so every
+    // row's highlight is the same height.
+    let highlighted = container(line)
+      .width(Length::Fill)
+      .style(move |theme: &Theme| container::Style {
+        background: is_hovered.then(|| theme.neutrals().surface0.into()),
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..container::Style::default()
+      });
+
+    // Wrap the *full-width* highlight (not just the content row) so right-click
+    // works anywhere on the hovered line, not only over the text. No menu while
+    // editing.
+    let with_menu: Element<'a, Message> = if is_own && !is_editing {
+      let post_id = *id;
+      let channel_id = *text_channel_id;
+      ContextMenu::new(highlighted, move || {
+        message_context_menu(post_id, channel_id)
+      })
+      .close_on_release(true)
+      .into()
+    } else {
+      highlighted.into()
+    };
+
+    let post_id = *id;
+    let hoverable = mouse_area(with_menu)
+      .on_enter(Message::PostHovered(post_id))
+      .on_exit(Message::PostUnhovered(post_id));
+
+    children.push(
+      container(hoverable)
+        .width(Length::Fill)
+        .padding(padding::top(top_pad))
+        .into(),
+    );
   }
 
   let scrollbar = Scrollbar::new().width(4).scroller_width(4);
 
   scrollable(
-    column::Column::with_children(children).padding(padding::Padding {
+    iced::widget::Column::with_children(children).padding(padding::Padding {
       top: SPACE_GRID as f32,
       right: SPACE_GRID as f32 * 2.0,
       // extra bottom whitespace so the floating typing indicator doesn't occlude
@@ -1991,5 +2356,239 @@ fn user_mixer_overlay<'a>(
       ..container::Style::default()
     }
   })
+  .into()
+}
+
+/// The inline editor shown in place of a post while it's being edited. Enter
+/// saves, Shift+Enter inserts a newline, Escape cancels.
+fn view_inline_editor<'a>(
+  content: &'a text_editor::Content,
+  post_id: Uuid,
+) -> Element<'a, Message> {
+  let editor = text_editor(content)
+    .id(make_edit_input_id(&post_id))
+    .on_action(Message::EditAction)
+    .key_binding(|key_press| {
+      use iced::keyboard::Key;
+      use iced::keyboard::key::Named;
+      use text_editor::Binding;
+
+      match &key_press.key {
+        Key::Named(Named::Enter) if !key_press.modifiers.shift() => {
+          Some(Binding::Custom(Message::SubmitEdit))
+        }
+        Key::Named(Named::Escape) => Some(Binding::Custom(Message::CancelEdit)),
+        _ => Binding::from_key_press(key_press),
+      }
+    })
+    .padding(SPACE_GRID)
+    .style(|theme, status| {
+      let default_style = text_editor::default(theme, status);
+      text_editor::Style {
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..default_style.border
+        },
+        ..default_style
+      }
+    });
+
+  // a clickable text link styled to read as a hint: muted by default, the
+  // verb brightening on hover. `word` is the clickable action verb.
+  let hint_link = |prefix: &'a str, word: &'a str, message: Message| {
+    button(
+      row![
+        text(prefix).size(11).style(|theme: &Theme| text::Style {
+          color: Some(theme.extended_palette().background.weak.text),
+        }),
+        text(word).size(11).style(|theme: &Theme| text::Style {
+          color: Some(theme.extended_palette().background.base.text),
+        }),
+      ]
+      .spacing(SPACE_GRID as u32 / 4),
+    )
+    .on_press(message)
+    .padding(0)
+    .style(|_theme: &Theme, _status| button::Style {
+      background: None,
+      ..button::Style::default()
+    })
+  };
+
+  let hint = row![
+    hint_link("escape to ", "cancel", Message::CancelEdit),
+    text("•").size(11).style(|theme: &Theme| text::Style {
+      color: Some(theme.extended_palette().background.weak.text),
+    }),
+    hint_link("enter to ", "save", Message::SubmitEdit),
+  ]
+  .spacing(SPACE_GRID as u32 / 2)
+  .align_y(Center);
+
+  column![editor, hint]
+    .spacing(SPACE_GRID as u32 / 2)
+    .width(Length::Fill)
+    .into()
+}
+
+/// The right-click menu for an own message: edit and delete actions.
+fn message_context_menu<'a>(post_id: Uuid, text_channel_id: Uuid) -> Element<'a, Message> {
+  let menu_button = |label: &'a str, symbol, message: Message, danger: bool| {
+    button(
+      row![icon(symbol).size(16), text(label).size(14)]
+        .spacing(SPACE_GRID as u32)
+        .align_y(Center),
+    )
+    .on_press(message)
+    .width(Length::Fill)
+    .style(move |theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
+        _ => palette.background.weakest.color,
+      };
+      button::Style {
+        background: Some(background.into()),
+        text_color: if danger {
+          palette.danger.base.color
+        } else {
+          palette.background.base.text
+        },
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    })
+  };
+
+  container(
+    column![
+      menu_button(
+        "Edit",
+        GoogleMaterialSymbols::Edit,
+        Message::StartEditPost {
+          post_id,
+          text_channel_id,
+        },
+        false,
+      ),
+      menu_button(
+        "Delete",
+        GoogleMaterialSymbols::Delete,
+        Message::RequestDeletePost {
+          post_id,
+          text_channel_id,
+        },
+        true,
+      ),
+    ]
+    .spacing(SPACE_GRID as u32 / 2)
+    .width(160),
+  )
+  .padding(SPACE_GRID)
+  .style(|theme: &Theme| {
+    let palette = theme.extended_palette();
+    container::Style {
+      background: Some(palette.background.weak.color.into()),
+      border: Border {
+        color: palette.background.strong.color,
+        width: 1.0,
+        radius: border::radius(SPACE_GRID as u32),
+      },
+      ..container::Style::default()
+    }
+  })
+  .into()
+}
+
+/// A modal asking the user to confirm deleting a message. A translucent
+/// backdrop dismisses on click; the card offers Cancel / Delete.
+fn delete_confirm_dialog<'a>() -> Element<'a, Message> {
+  let backdrop = mouse_area(
+    container(space::horizontal())
+      .width(Length::Fill)
+      .height(Length::Fill)
+      .style(|_theme: &Theme| container::Style {
+        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
+        ..container::Style::default()
+      }),
+  )
+  .on_press(Message::CancelDeletePost);
+
+  let cancel = button(text("Cancel").size(14))
+    .on_press(Message::CancelDeletePost)
+    .style(|theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
+        _ => palette.background.weak.color,
+      };
+      button::Style {
+        background: Some(background.into()),
+        text_color: palette.background.base.text,
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    });
+
+  let confirm = button(text("Delete").size(14))
+    .on_press(Message::ConfirmDeletePost)
+    .style(|theme: &Theme, status| {
+      let palette = theme.extended_palette();
+      let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.danger.strong.color,
+        _ => palette.danger.base.color,
+      };
+      button::Style {
+        background: Some(background.into()),
+        text_color: palette.danger.base.text,
+        border: Border {
+          radius: (SPACE_GRID as u32 / 2).into(),
+          ..Default::default()
+        },
+        ..button::Style::default()
+      }
+    });
+
+  let card = container(
+    column![
+      text("Delete Message").size(16).font(Font {
+        weight: Weight::Semibold,
+        ..SOURCE_SANS_REGULAR
+      }),
+      text("Are you sure you want to delete this message? This cannot be undone.").size(13),
+      text("Tip: hold Shift while deleting to skip this confirmation.")
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+          color: Some(theme.extended_palette().background.weak.text),
+        }),
+      row![space::horizontal(), cancel, confirm].spacing(SPACE_GRID as u32),
+    ]
+    .spacing((SPACE_GRID * 2) as u32)
+    .width(360),
+  )
+  .padding(SPACE_GRID * 3)
+  .style(|theme: &Theme| {
+    let palette = theme.extended_palette();
+    container::Style {
+      background: Some(palette.background.weak.color.into()),
+      border: Border {
+        color: palette.background.strong.color,
+        width: 1.0,
+        radius: border::radius(SPACE_GRID as u32),
+      },
+      ..container::Style::default()
+    }
+  });
+
+  stack![
+    backdrop,
+    container(card).center(Length::Fill).padding(SPACE_GRID * 2)
+  ]
   .into()
 }

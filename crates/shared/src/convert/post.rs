@@ -38,10 +38,12 @@ impl IntoProto<PostProto> for Post {
 
     PostProto {
       id: self.id.to_string(),
+      author_id: self.author_id.to_string(),
       author_name: self.author_name,
       content: self.content,
       created_at: Some(created_at),
       text_channel_id: self.text_channel_id.into(),
+      edited: self.edited,
     }
   }
 }
@@ -122,10 +124,12 @@ impl TryFromProto<PostProto> for Post {
 
     Ok(Post {
       id,
+      author_id: parse_id(proto.author_id)?,
       author_name: proto.author_name,
       content: proto.content,
       created_at,
       text_channel_id: parse_id(proto.text_channel_id)?,
+      edited: proto.edited,
     })
   }
 }

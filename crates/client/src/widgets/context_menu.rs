@@ -45,6 +45,11 @@ pub struct ContextMenu<
   overlay_instance: Option<Element<'a, Message, Theme, Renderer>>,
   /// The style of the [`ContextMenu`].
   class: Theme::Class<'a>,
+  /// When set, a left-click *inside* the menu content closes it (after the
+  /// clicked control receives the event). Off by default so interactive menus
+  /// (e.g. a volume slider) stay open across drags; on for one-shot action
+  /// menus that should dismiss as soon as an item is chosen.
+  close_on_release: bool,
 }
 
 impl<'a, Overlay, Message, Theme, Renderer> ContextMenu<'a, Overlay, Message, Theme, Renderer>
@@ -67,7 +72,16 @@ where
       overlay,
       overlay_instance: None,
       class: Theme::default(),
+      close_on_release: false,
     }
+  }
+
+  /// Closes the menu when a left-click lands inside its content (the clicked
+  /// control still receives the event first). Use for one-shot action menus.
+  #[must_use]
+  pub fn close_on_release(mut self, close: bool) -> Self {
+    self.close_on_release = close;
+    self
   }
 
   /// Sets the style of the [`ContextMenu`].
@@ -264,6 +278,7 @@ where
         content,
         &self.class,
         s,
+        self.close_on_release,
       )
       .overlay(),
     )
@@ -319,6 +334,8 @@ where
   class: &'a Theme::Class<'b>,
   /// The state shared with the [`ContextMenu`].
   state: &'a mut State,
+  /// Whether a left-click inside the content should dismiss the menu.
+  close_on_release: bool,
 }
 
 impl<'a, 'b, Message, Theme, Renderer> ContextMenuOverlay<'a, 'b, Message, Theme, Renderer>
@@ -334,6 +351,7 @@ where
     content: &'a mut Element<'b, Message, Theme, Renderer>,
     class: &'a <Theme as Catalog>::Class<'b>,
     state: &'a mut State,
+    close_on_release: bool,
   ) -> Self {
     ContextMenuOverlay {
       position,
@@ -341,6 +359,7 @@ where
       content,
       class,
       state,
+      close_on_release,
     }
   }
 
@@ -469,6 +488,12 @@ where
         if !cursor.is_over(layout_children.bounds()) {
           self.state.show = false;
           capture_event = true;
+          shell.request_redraw();
+        } else if self.close_on_release {
+          // dismiss one-shot action menus once an item is chosen. We don't
+          // capture, so the clicked control still receives this release and
+          // emits its message.
+          self.state.show = false;
           shell.request_redraw();
         }
       }

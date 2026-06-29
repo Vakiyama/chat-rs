@@ -82,10 +82,12 @@ impl PostsService for PostsServer {
       .into_iter()
       .map(|(post, poster)| Post {
         id: post.id,
+        author_id: poster.id,
         author_name: poster.username,
         content: post.content,
         created_at: post.created_at,
         text_channel_id,
+        edited: post.edited,
       })
       .collect();
 

@@ -141,6 +141,26 @@ impl IntoProto<ClientTextMessage> for ClientText {
           content,
         })),
       },
+      ClientText::EditPostRequest {
+        id,
+        content,
+        text_channel_id,
+      } => ClientTextMessage {
+        payload: Some(client_text_message::Payload::EditPost(EditPostRequest {
+          id: id.into(),
+          content,
+          text_channel_id: text_channel_id.into(),
+        })),
+      },
+      ClientText::DeletePostRequest {
+        id,
+        text_channel_id,
+      } => ClientTextMessage {
+        payload: Some(client_text_message::Payload::DeletePost(DeletePostRequest {
+          id: id.into(),
+          text_channel_id: text_channel_id.into(),
+        })),
+      },
       ClientText::Ping { timestamp } => ClientTextMessage {
         payload: Some(client_text_message::Payload::Ping(Ping { timestamp })),
       },
@@ -165,14 +185,36 @@ impl IntoProto<ServerTextMessage> for ServerText {
           payload: Some(server_text_message::Payload::Chat(
             convert::stream::proto::Post {
               id: post.id.into(),
+              author_id: post.author_id.into(),
               author_name: post.author_name,
               content: post.content,
               created_at: Some(created_at),
               text_channel_id: post.text_channel_id.into(),
+              edited: post.edited,
             },
           )),
         }
       }
+      ServerText::PostEdited {
+        id,
+        content,
+        text_channel_id,
+      } => ServerTextMessage {
+        payload: Some(server_text_message::Payload::PostEdited(PostEdited {
+          id: id.into(),
+          content,
+          text_channel_id: text_channel_id.into(),
+        })),
+      },
+      ServerText::PostDeleted {
+        id,
+        text_channel_id,
+      } => ServerTextMessage {
+        payload: Some(server_text_message::Payload::PostDeleted(PostDeleted {
+          id: id.into(),
+          text_channel_id: text_channel_id.into(),
+        })),
+      },
       ServerText::JoinedRoom { from } => ServerTextMessage {
         payload: Some(server_text_message::Payload::JoinedRoom(JoinedRoom {
           from: Some(from.into_proto()),
@@ -356,12 +398,23 @@ impl TryFromProto<ServerTextMessage> for ServerText {
               .id
               .try_into()
               .map_err(|_| tonic::Status::invalid_argument("failed to parse id"))?,
+            author_id: parse_id(chat_message.author_id)?,
             author_name: chat_message.author_name,
             content: chat_message.content,
             created_at,
             text_channel_id: parse_id(chat_message.text_channel_id)?,
+            edited: chat_message.edited,
           }))
         }
+        server_text_message::Payload::PostEdited(edited) => Ok(ServerText::PostEdited {
+          id: parse_id(edited.id)?,
+          content: edited.content,
+          text_channel_id: parse_id(edited.text_channel_id)?,
+        }),
+        server_text_message::Payload::PostDeleted(deleted) => Ok(ServerText::PostDeleted {
+          id: parse_id(deleted.id)?,
+          text_channel_id: parse_id(deleted.text_channel_id)?,
+        }),
         server_text_message::Payload::Pong(pong) => Ok(ServerText::Pong {
           timestamp: pong.timestamp,
           server_received_at: pong.server_received_at,
@@ -393,6 +446,15 @@ impl TryFromProto<ClientTextMessage> for ClientText {
           id: parse_id(chat_message.id)?,
           content: chat_message.content,
           text_channel_id: parse_id(chat_message.text_channel_id)?,
+        }),
+        client_text_message::Payload::EditPost(edit) => Ok(ClientText::EditPostRequest {
+          id: parse_id(edit.id)?,
+          content: edit.content,
+          text_channel_id: parse_id(edit.text_channel_id)?,
+        }),
+        client_text_message::Payload::DeletePost(delete) => Ok(ClientText::DeletePostRequest {
+          id: parse_id(delete.id)?,
+          text_channel_id: parse_id(delete.text_channel_id)?,
         }),
         client_text_message::Payload::Ping(ping) => Ok(ClientText::Ping {
           timestamp: ping.timestamp,
