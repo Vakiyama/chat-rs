@@ -194,8 +194,6 @@ pub fn update(
       let is_edit = action.is_edit();
       model.input.perform(action);
 
-      // While the user is actively editing in a channel, announce typing to the
-      // server — throttled, and never for an empty buffer (e.g. just cleared).
       let channel_id = match model.view {
         View::TextChannel(TextChannel { id, .. }) => Some(id),
         _ => None,
@@ -282,16 +280,7 @@ pub fn update(
         Task::none()
       }
       ServerText::Post(post) => {
-        // when receiving a post, we need to check if it already exists in the posts indexmap (O(1) lookup),
-        //
-        // if it does, then it's a Sending and we need to reconcile - replace with Sent() and
-        // reinsert based on created_at (can use bin search on the created time)
-        //
-        // otherwise just append post
-
         let text_channel_id = post.text_channel_id;
-        // a delivered post means its author stopped typing. Post carries no user
-        // id, so clear by author name
         let author_name = post.author_name.clone();
 
         let Some(Posts {
@@ -631,7 +620,7 @@ pub fn update(
 
       let text_input_id = make_text_input_id(&current_text_channel_id);
       // insert the typed-ahead text at the cursor (Content has no push_str), then
-      // focus the editor so subsequent keystrokes land there.
+      // focus the editor so subsequent keystrokes land there
       for c in input.chars() {
         model
           .input
@@ -762,7 +751,7 @@ pub fn update(
       Task::none()
     }
     // These are all intercepted by the top-level update (they need the voice
-    // handle), so they're no-ops here.
+    // handle), so they're no-ops here
     Message::JoinVoice { .. }
     | Message::LeaveVoice
     | Message::ActiveServerChanged { .. }
@@ -784,8 +773,6 @@ fn make_edit_input_id(post_id: &Uuid) -> String {
   format!("edit_input_{}", { post_id.to_string() })
 }
 
-/// Open the inline editor for a sent post, pre-filling it with the current
-/// content and focusing it. No-op if the post isn't a delivered (`Sent`) post.
 fn start_editing(model: &mut Model, post_id: Uuid, text_channel_id: Uuid) -> Task<Message> {
   let Some(Posts {
     posts: AsyncData::Done(Ok(posts)),
@@ -1745,10 +1732,10 @@ fn view_posts<'a>(
   current_user_id: Option<Uuid>,
 ) -> Element<'a, Message> {
   // NOTE: this is a regular (non-keyed) `column`. `keyed::column` must NOT be
-  // used here: its diff reuses child state trees by key *without* a tag check
-  // (`child.diff(tree)` directly), so a key whose element changes type — or a
+  // used here: its diff reuses child state trees by key without a tag check
+  // (`child.diff(tree)` directly), so a key whose element changes type, or a
   // mid-list insert/remove that shifts a stateful child (`ContextMenu`, the
-  // inline editor) onto a stale tree — hands `State::None` to a stateful widget
+  // inline editor) onto a stale tree, hands `State::None` to a stateful widget
   // and panics with "Downcast on stateless state". A regular column diffs
   // positionally through `Tree::diff`, which rebuilds on tag mismatch.
   let mut children: Vec<Element<'a, Message>> = vec![];
@@ -1877,9 +1864,6 @@ fn view_posts<'a>(
       .is_some_and(|e| &e.post_id == id && &e.text_channel_id == text_channel_id);
     let is_hovered = model.hovered_post == Some(*id);
 
-    // The first message in a group always shows its timestamp; grouped messages
-    // hide it (rendered transparent so the gutter width is reserved and content
-    // never shifts) and reveal it on hover.
     let timestamp_shown = show_name || is_hovered;
     let timestamp =
       iced_selection::text(display_time).style(move |theme| iced_selection::text::Style {
@@ -1892,7 +1876,6 @@ fn view_posts<'a>(
       });
 
     let line: Element<'a, Message> = if is_editing {
-      // SAFETY: is_editing implies editing is Some.
       let content = &model.editing.as_ref().unwrap().content;
       row![timestamp, view_inline_editor(content, *id)]
         .spacing(Pixels(SPACE_GRID.into()))
@@ -1903,11 +1886,6 @@ fn view_posts<'a>(
         .into()
     };
 
-    // Full-width hover highlight signalling the row is interactive (context menu
-    // / replies). Driven by model state via the mouse_area below. Sized tight to
-    // the content (no extra padding, to avoid shifting layout vs. the day
-    // dividers); the inter-group gap (`top_pad`) is applied *outside* it so every
-    // row's highlight is the same height.
     let highlighted = container(line)
       .width(Length::Fill)
       .style(move |theme: &Theme| container::Style {
@@ -1919,9 +1897,6 @@ fn view_posts<'a>(
         ..container::Style::default()
       });
 
-    // Wrap the *full-width* highlight (not just the content row) so right-click
-    // works anywhere on the hovered line, not only over the text. No menu while
-    // editing.
     let with_menu: Element<'a, Message> = if is_own && !is_editing {
       let post_id = *id;
       let channel_id = *text_channel_id;
@@ -1962,8 +1937,7 @@ fn view_posts<'a>(
   .direction(scrollable::Direction::Vertical(scrollbar))
   .anchor_bottom()
   .on_scroll(|viewport| {
-    // distance from the *top* under anchor_bottom == reversed offset
-    const LOAD_THRESHOLD: f32 = 400.0; // start prefetching ~200px early
+    const LOAD_THRESHOLD: f32 = 400.0;
     if viewport.absolute_offset_reversed().y <= LOAD_THRESHOLD {
       Message::UserScrolledToTop
     } else {
@@ -2117,8 +2091,6 @@ fn view_call_controller<'a>(
   .spacing(2)
   .width(Length::Fill);
 
-  // mute/deafen now live in the user controller; the call panel keeps the
-  // status readout and the leave button.
   let leave_button = button(icon(GoogleMaterialSymbols::CallEnd).size(20))
     .on_press(Message::LeaveVoice)
     .style(|theme: &Theme, status| {
@@ -2146,9 +2118,6 @@ fn view_call_controller<'a>(
       }
     });
 
-  // device warnings get their own full-width line below the status/leave row so
-  // they have room to wrap instead of being crammed into the single-line meta
-  // row next to the channel name, latency, and leave button.
   let mut body =
     column![row![status, leave_button].align_y(Center)].spacing(u32::from(SPACE_GRID) / 2);
   if let Some(hint) = media_hint {
@@ -2202,8 +2171,6 @@ fn view_call_controller<'a>(
   )
 }
 
-// A small icon toggle for the in-call controls (mute / deafen). When `active`
-// (i.e. engaged: muted or deafened) it reads as danger; otherwise it's subtle.
 fn voice_toggle_button<'a>(
   symbol: GoogleMaterialSymbols,
   active: bool,
@@ -2359,8 +2326,6 @@ fn user_mixer_overlay<'a>(
   .into()
 }
 
-/// The inline editor shown in place of a post while it's being edited. Enter
-/// saves, Shift+Enter inserts a newline, Escape cancels.
 fn view_inline_editor<'a>(
   content: &'a text_editor::Content,
   post_id: Uuid,
@@ -2393,8 +2358,6 @@ fn view_inline_editor<'a>(
       }
     });
 
-  // a clickable text link styled to read as a hint: muted by default, the
-  // verb brightening on hover. `word` is the clickable action verb.
   let hint_link = |prefix: &'a str, word: &'a str, message: Message| {
     button(
       row![
@@ -2431,7 +2394,6 @@ fn view_inline_editor<'a>(
     .into()
 }
 
-/// The right-click menu for an own message: edit and delete actions.
 fn message_context_menu<'a>(post_id: Uuid, text_channel_id: Uuid) -> Element<'a, Message> {
   let menu_button = |label: &'a str, symbol, message: Message, danger: bool| {
     button(
@@ -2503,8 +2465,6 @@ fn message_context_menu<'a>(post_id: Uuid, text_channel_id: Uuid) -> Element<'a,
   .into()
 }
 
-/// A modal asking the user to confirm deleting a message. A translucent
-/// backdrop dismisses on click; the card offers Cancel / Delete.
 fn delete_confirm_dialog<'a>() -> Element<'a, Message> {
   let backdrop = mouse_area(
     container(space::horizontal())
