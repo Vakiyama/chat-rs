@@ -122,6 +122,7 @@ pub enum Message {
   ApiReturnedMorePosts(Result<GetPostsResponse, tonic::Status>),
   UserScrolledToTop,
   TypeAhead(String),
+  TypeAheadBackspace,
   Init,
   JoinVoice {
     voice_channel_id: Uuid,
@@ -563,6 +564,20 @@ pub fn update(
       }
       operation::focus(text_input_id)
     }
+    Message::TypeAheadBackspace => {
+      let Some(current_text_channel_id) = (match model.view {
+        View::TextChannel(TextChannel { id, .. }) => Some(id),
+        _ => None,
+      }) else {
+        return Task::none();
+      };
+
+      let text_input_id = make_text_input_id(&current_text_channel_id);
+      model
+        .input
+        .perform(text_editor::Action::Edit(text_editor::Edit::Backspace));
+      operation::focus(text_input_id)
+    }
     // These are all intercepted by the top-level update (they need the voice
     // handle), so they're no-ops here.
     Message::JoinVoice { .. }
@@ -746,12 +761,18 @@ fn view_channels<'a>(
 
       let channel_button = button(
         row![
-          icon(GoogleMaterialSymbols::Tag).size(20).style(move |theme| {
-            let color = theme.extended_palette().background.weakest.text;
-            text::Style {
-              color: Some(if is_muted { color.scale_alpha(0.45) } else { color }),
-            }
-          }),
+          icon(GoogleMaterialSymbols::Tag)
+            .size(20)
+            .style(move |theme| {
+              let color = theme.extended_palette().background.weakest.text;
+              text::Style {
+                color: Some(if is_muted {
+                  color.scale_alpha(0.45)
+                } else {
+                  color
+                }),
+              }
+            }),
           container(
             text(&text_channel.name)
               .wrapping(text::Wrapping::None)
@@ -1289,12 +1310,26 @@ fn view_text_chat_window<'a>(
     .key_binding(|key_press| {
       use iced::keyboard::Key;
       use iced::keyboard::key::Named;
+      use text_editor::{Binding, Motion};
+
+      let modifier = key_press.modifiers.command() || key_press.modifiers.control();
+      let is_char = |c| matches!(key_press.key.as_ref(), Key::Character(s) if s == c);
+      let is_backspace = matches!(&key_press.key, Key::Named(Named::Backspace));
+
       if matches!(&key_press.key, Key::Named(Named::Enter)) && !key_press.modifiers.shift() {
-        Some(text_editor::Binding::Custom(
-          Message::UserSubmittedChatInput,
-        ))
+        Some(Binding::Custom(Message::UserSubmittedChatInput))
+      } else if modifier && is_char("u") {
+        Some(Binding::Sequence(vec![
+          Binding::SelectLine,
+          Binding::Backspace,
+        ]))
+      } else if modifier && (is_char("w") || is_backspace) {
+        Some(Binding::Sequence(vec![
+          Binding::Select(Motion::WordLeft),
+          Binding::Backspace,
+        ]))
       } else {
-        text_editor::Binding::from_key_press(key_press)
+        Binding::from_key_press(key_press)
       }
     })
     .max_height((SPACE_GRID * 24) as f32)

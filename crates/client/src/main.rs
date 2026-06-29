@@ -152,6 +152,16 @@ fn subscription(model: &model::Model) -> Subscription<Message> {
           ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
             Some(Message::Chat(chat::Message::TypeAhead(text.into())))
           }
+          (
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+              key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace),
+              modifiers,
+              ..
+            }),
+            iced::event::Status::Ignored,
+          ) if !modifiers.command() && !modifiers.control() && !modifiers.alt() => {
+            Some(Message::Chat(chat::Message::TypeAheadBackspace))
+          }
           _ => None,
         }),
       ];
