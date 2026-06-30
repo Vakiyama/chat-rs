@@ -785,10 +785,13 @@ fn start_editing(model: &mut Model, post_id: Uuid, text_channel_id: Uuid) -> Tas
     return Task::none();
   };
 
+  let mut content = text_editor::Content::with_text(&post.content);
+  content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+
   model.editing = Some(Editing {
     post_id,
     text_channel_id,
-    content: text_editor::Content::with_text(&post.content),
+    content,
   });
   operation::focus(make_edit_input_id(&post_id))
 }
